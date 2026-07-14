@@ -607,7 +607,7 @@ function App() {
   const blank = {
     date: new Date().toISOString().slice(0, 10),
     instrument: "NQ", direction: "LONG", contracts: 1,
-    entry: "", exit: "", stop: "", setup: SETUPS[0], notes: "",
+    entry: "", exit: "", stop: "", tp: "", setup: SETUPS[0], notes: "",
   };
   const [form, setForm] = useState(blank);
   const [risk, setRisk] = useState({ account: "50000", pct: "1", stopPts: "20", instrument: "NQ" });
@@ -982,9 +982,9 @@ function App() {
   function exportCSV() {
     if (!trades.length) { flash("No trades to export yet"); return; }
     const esc = (s) => '"' + String(s == null ? "" : s).replace(/"/g, '""') + '"';
-    const rows = [["date", "instrument", "direction", "contracts", "entry", "exit", "stop", "setup", "points", "pnl", "notes"].join(",")];
+    const rows = [["date", "instrument", "direction", "contracts", "entry", "exit", "stop", "tp", "setup", "points", "pnl", "notes"].join(",")];
     [...trades].sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((t) =>
-      rows.push([t.date, t.instrument, t.direction, t.contracts, t.entry, t.exit, t.stop || "", esc(t.setup), calcPoints(t).toFixed(2), calcPnl(t).toFixed(2), esc(t.notes || "")].join(","))
+      rows.push([t.date, t.instrument, t.direction, t.contracts, t.entry, t.exit, t.stop || "", t.tp || "", esc(t.setup), calcPoints(t).toFixed(2), calcPnl(t).toFixed(2), esc(t.notes || "")].join(","))
     );
     download(`polaris-trades-${new Date().toISOString().slice(0, 10)}.csv`, rows.join("\n"), "text/csv");
     flash("CSV exported");
@@ -1154,7 +1154,7 @@ ${memoryRef.current || "(empty — nothing recorded yet)"}`;
     const s = computeStats(t);
     const recent = t.slice(0, 25).map((x) => ({
       date: x.date, inst: x.instrument, dir: x.direction, qty: x.contracts,
-      entry: x.entry, exit: x.exit, setup: x.setup,
+      entry: x.entry, exit: x.exit, stop: x.stop || null, tp: x.tp || null, setup: x.setup,
       pts: +calcPoints(x).toFixed(2), pnl: +calcPnl(x).toFixed(2), r: calcR(x) != null ? +calcR(x).toFixed(2) : null, notes: x.notes || "",
     }));
     return `You are POLARIS, the AI copilot embedded in Landen's NQ futures trading command center — named for the north star: the fixed point a navigator steers by. Personality: calm, dry British wit, unfailingly composed, loyal but honest — you address him as "sir" occasionally, never obsequiously. Your job is to keep him oriented to his process when the market pulls him off course, and you will push back plainly when the data warrants it.
@@ -1177,8 +1177,8 @@ When he asks what the market is doing, describe it from this data plainly — di
 
 VOICE TRADE LOGGING:
 When Landen is clearly reporting a completed trade he wants logged (not a hypothetical, not a plan, not something already in the journal above) — append exactly one machine-readable block as the very last line of your reply, after your normal spoken response:
-<trade>{"date":"YYYY-MM-DD","instrument":"NQ|MNQ","direction":"LONG|SHORT","contracts":N,"entry":N,"exit":N,"stop":N|null,"setup":"one of: ${JSON.stringify(SETUPS)}","notes":"..."}</trade>
-Rules for this block: only emit it when direction, entry, exit, and contracts are all clear from what he said — if anything is missing or ambiguous, ask him for it in your spoken reply instead of guessing, and do not emit the block. Omit "date" to default to today. Use null for "stop" if he didn't mention one. Pick the closest matching setup name from the list, or "Other". Never emit this block for a trade already visible in the journal data above, and never emit more than one.
+<trade>{"date":"YYYY-MM-DD","instrument":"NQ|MNQ","direction":"LONG|SHORT","contracts":N,"entry":N,"exit":N,"stop":N|null,"tp":N|null,"setup":"one of: ${JSON.stringify(SETUPS)}","notes":"..."}</trade>
+Rules for this block: only emit it when direction, entry, exit, and contracts are all clear from what he said — if anything is missing or ambiguous, ask him for it in your spoken reply instead of guessing, and do not emit the block. Omit "date" to default to today. Use null for "stop" or "tp" if he didn't mention them. Pick the closest matching setup name from the list, or "Other". Never emit this block for a trade already visible in the journal data above, and never emit more than one.
 
 Hard rules:
 - Never predict price direction, give trade signals, or tell him to enter/exit a position. Analyze HIS data and process; frame market talk as education.
@@ -1199,12 +1199,13 @@ Hard rules:
       const entry = Number(raw.entry);
       const exit = Number(raw.exit);
       const stop = raw.stop === null || raw.stop === undefined || raw.stop === "" ? "" : Number(raw.stop);
+      const tp = raw.tp === null || raw.tp === undefined || raw.tp === "" ? "" : Number(raw.tp);
       const setup = SETUPS.includes(raw.setup) ? raw.setup : "Other";
       const date = raw.date && /^\d{4}-\d{2}-\d{2}$/.test(raw.date) ? raw.date : new Date().toISOString().slice(0, 10);
       const notes = typeof raw.notes === "string" ? raw.notes : "";
-      const valid = POINT_VALUE[instrument] && (direction === "LONG" || direction === "SHORT") && contracts > 0 && Number.isFinite(entry) && Number.isFinite(exit) && (stop === "" || Number.isFinite(stop));
+      const valid = POINT_VALUE[instrument] && (direction === "LONG" || direction === "SHORT") && contracts > 0 && Number.isFinite(entry) && Number.isFinite(exit) && (stop === "" || Number.isFinite(stop)) && (tp === "" || Number.isFinite(tp));
       if (!valid) return { cleanText, trade: null };
-      return { cleanText, trade: { date, instrument, direction, contracts, entry, exit, stop, setup, notes, id: Date.now() } };
+      return { cleanText, trade: { date, instrument, direction, contracts, entry, exit, stop, tp, setup, notes, id: Date.now() } };
     } catch (e) {
       return { cleanText, trade: null };
     }
@@ -1598,6 +1599,10 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                 <input type="number" step="0.25" placeholder="21520.00" value={form.stop} onChange={(e) => setForm({ ...form, stop: e.target.value })} style={inputStyle} />
               </div>
               <div>
+                <Label>Take profit (optional)</Label>
+                <input type="number" step="0.25" placeholder="21600.00" value={form.tp} onChange={(e) => setForm({ ...form, tp: e.target.value })} style={inputStyle} />
+              </div>
+              <div>
                 <Label>Setup</Label>
                 <select value={form.setup} onChange={(e) => setForm({ ...form, setup: e.target.value })} style={inputStyle}>
                   {SETUPS.map((s) => <option key={s}>{s}</option>)}
@@ -1637,6 +1642,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                       <span style={{ fontWeight: 600, fontSize: 13, color: t.direction === "LONG" ? C.green : C.red }}>{t.direction}</span>
                       <span style={{ fontSize: 13 }}>{t.contracts}× {t.instrument}</span>
                       <span style={{ fontSize: 12, color: C.muted }}>{t.entry} → {t.exit}</span>
+                      {t.tp !== undefined && t.tp !== "" && <span style={{ fontSize: 11, color: C.faint }}>TP {t.tp}</span>}
                       <span style={{ marginLeft: "auto", fontWeight: 600, fontSize: 15, color: pnlColor(p) }}>{fmt$2(p)}</span>
                       {r != null && <span style={{ fontSize: 11, color: pnlColor(r), border: `1px solid ${C.border}`, borderRadius: 3, padding: "2px 6px" }}>{(r >= 0 ? "+" : "") + r.toFixed(2)}R</span>}
                     </div>
