@@ -27,6 +27,7 @@
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
   @keyframes blink { 0%,49% {opacity:1} 50%,100% {opacity:0} }
   @keyframes panelIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
   ::-webkit-scrollbar { height: 6px; width: 6px; }
   ::-webkit-scrollbar-thumb { background: #0A6E8A; border-radius: 3px; }
   button { transition: filter 0.15s ease, transform 0.08s ease, box-shadow 0.15s ease, background 0.15s ease, border-color 0.15s ease; }
@@ -464,6 +465,7 @@ function App() {
   const [trades, setTrades] = useState([]);
   const [toast, setToast] = useState("");
   const [storageOk, setStorageOk] = useState(true);
+  const [now, setNow] = useState(Date.now());
 
   const blank = {
     date: new Date().toISOString().slice(0, 10),
@@ -598,6 +600,11 @@ function App() {
     S.set("polaris-chat", JSON.stringify(chat)).catch(() => {});
   }, [chat]);
 
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 15000);
+    return () => clearInterval(id);
+  }, []);
+
   async function persist(next) {
     setTrades(next);
     try { await S.set("nq-trades", JSON.stringify(next)); } catch (e) { flash("Save failed"); }
@@ -661,6 +668,40 @@ function App() {
   const todayISO = new Date().toISOString().slice(0, 10);
   const todaysTrades = useMemo(() => trades.filter((t) => t.date === todayISO), [trades, todayISO]);
   const todaysTradesRef = useRef(todaysTrades); todaysTradesRef.current = todaysTrades;
+
+  const breaches = useMemo(() => {
+    const list = [];
+    const netToday = todaysTrades.reduce((a, t) => a + calcPnl(t), 0);
+    if (rules.maxTrades.enabled && todaysTrades.length >= rules.maxTrades.value) {
+      list.push({ key: `maxTrades:${todayISO}`, label: `MAX TRADES PER DAY (${rules.maxTrades.value})` });
+    }
+    if (rules.maxLoss.enabled && netToday <= -Math.abs(rules.maxLoss.value)) {
+      list.push({ key: `maxLoss:${todayISO}`, label: `MAX DAILY LOSS (${fmt$(rules.maxLoss.value)})` });
+    }
+    if (rules.cooldown.enabled && todaysTrades.length) {
+      const last = todaysTrades.reduce((a, b) => (b.id > a.id ? b : a));
+      if (calcPnl(last) < 0) {
+        const elapsedMin = (now - last.id) / 60000;
+        if (elapsedMin < rules.cooldown.value) {
+          list.push({ key: `cooldown:${last.id}`, label: `COOLDOWN AFTER A LOSS (${rules.cooldown.value} MIN)` });
+        }
+      }
+    }
+    return list;
+  }, [todaysTrades, rules, now, todayISO]);
+  const announcedBreachesRef = useRef(new Set());
+
+  useEffect(() => {
+    breaches.forEach((b) => {
+      if (announcedBreachesRef.current.has(b.key)) return;
+      announcedBreachesRef.current.add(b.key);
+      chime(2);
+      const msg = `Sir, stand down. You've breached your ${b.label.toLowerCase()} limit. Step back before the next trade.`;
+      setChat((prev) => [...prev, { role: "assistant", content: msg }]);
+      speak(msg);
+      updateMemory("rule breach", "[system: rule breach detected]", `Breach: ${b.label} on ${todayISO}.`);
+    });
+  }, [breaches]);
 
   const acct = Number(risk.account) || 0;
   const riskDollars = acct * ((Number(risk.pct) || 0) / 100);
@@ -1162,8 +1203,8 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
     <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 700px at 50% -10%, #06182B 0%, ${C.bg} 55%)`, color: C.text, fontFamily: mono }}>
       <Backdrop />
       {/* status bar */}
-      <div style={{ borderBottom: `1px solid ${C.border}`, background: "rgba(5,14,26,0.85)", padding: "10px 16px", display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", position: "sticky", top: 0, zIndex: 5, backdropFilter: "blur(8px)" }}>
-        <span style={{ fontFamily: disp, fontWeight: 700, fontSize: 19, letterSpacing: "0.22em", color: C.cyan, textShadow: `0 0 14px rgba(0,212,255,0.6)` }}>
+      <div style={{ borderBottom: `1px solid ${breaches.length ? C.red : C.border}`, background: breaches.length ? "rgba(40,8,12,0.85)" : "rgba(5,14,26,0.85)", padding: "10px 16px", display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", position: "sticky", top: 0, zIndex: 5, backdropFilter: "blur(8px)" }}>
+        <span style={{ fontFamily: disp, fontWeight: 700, fontSize: 19, letterSpacing: "0.22em", color: breaches.length ? C.red : C.cyan, textShadow: breaches.length ? `0 0 14px rgba(255,85,102,0.6)` : `0 0 14px rgba(0,212,255,0.6)` }}>
           POLARIS
         </span>
         <span style={{ fontSize: 10, color: C.faint, letterSpacing: "0.1em" }}>NQ TRADE SYSTEMS · {new Date().toDateString().toUpperCase()}</span>
@@ -1172,6 +1213,13 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
           <span style={{ color: C.cyan, animation: "blink 1.2s step-end infinite" }}>▌</span>
         </span>
       </div>
+
+      {/* stand down banner */}
+      {breaches.length > 0 && (
+        <div style={{ background: "linear-gradient(90deg, rgba(255,85,102,0.22), rgba(255,85,102,0.08), rgba(255,85,102,0.22))", backgroundSize: "200% 100%", animation: "shimmer 3s linear infinite", borderBottom: `1px solid ${C.red}`, color: C.red, padding: "10px 16px", fontFamily: mono, fontWeight: 700, letterSpacing: "0.08em", fontSize: 12, textAlign: "center", position: "relative", zIndex: 4 }}>
+          ⛔ STAND DOWN — {breaches.map((b) => b.label).join(" · ")} BREACHED
+        </div>
+      )}
 
       {/* tabs */}
       <div style={{ display: "flex", gap: 4, padding: "10px 12px", overflowX: "auto", borderBottom: `1px solid ${C.border}`, position: "relative", zIndex: 1 }}>
@@ -1726,6 +1774,35 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                     </button>
                   </div>
                 </React.Fragment>
+              )}
+            </Panel>
+
+            <Panel>
+              <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>RULES — THE GUARDIAN</div>
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 4, lineHeight: 1.6 }}>
+                Hard limits, checked against today's logged trades — voice-logged trades count too. Breaches never block logging; they just get loud: a red banner, a chime, and one spoken warning per breach.
+              </div>
+              {[
+                { key: "maxTrades", label: "MAX TRADES PER DAY", unit: "", min: 1, step: 1 },
+                { key: "maxLoss", label: "MAX DAILY LOSS ($)", unit: "$", min: 1, step: 25 },
+                { key: "cooldown", label: "COOLDOWN AFTER A LOSS (MIN)", unit: "", min: 1, step: 5 },
+              ].map((r) => (
+                <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 0", borderTop: `1px solid ${C.border}`, flexWrap: "wrap" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: rules[r.key].enabled ? C.text : C.muted, cursor: "pointer", flex: 1, minWidth: 180 }}>
+                    <input type="checkbox" checked={rules[r.key].enabled}
+                      onChange={(e) => saveRules({ ...rules, [r.key]: { ...rules[r.key], enabled: e.target.checked } })}
+                      style={{ accentColor: C.cyan }} />
+                    {r.label}
+                  </label>
+                  <input type="number" min={r.min} step={r.step} value={rules[r.key].value} disabled={!rules[r.key].enabled}
+                    onChange={(e) => saveRules({ ...rules, [r.key]: { ...rules[r.key], value: Number(e.target.value) || r.min } })}
+                    style={{ ...inputStyle, width: 100, opacity: rules[r.key].enabled ? 1 : 0.5 }} />
+                </div>
+              ))}
+              {breaches.length > 0 && (
+                <div style={{ marginTop: 12, fontSize: 11, color: C.red }}>
+                  ⛔ {breaches.length} rule{breaches.length > 1 ? "s" : ""} breached today — see the banner above.
+                </div>
               )}
             </Panel>
 
