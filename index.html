@@ -28,6 +28,9 @@
   @keyframes blink { 0%,49% {opacity:1} 50%,100% {opacity:0} }
   @keyframes panelIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+  @keyframes panelSweep { 0%, 100% { left: -45%; } 50% { left: 110%; } }
+  @keyframes tabIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes glowFlash { 0% { filter: drop-shadow(0 0 0 currentColor); } 30% { filter: drop-shadow(0 0 6px currentColor); } 100% { filter: drop-shadow(0 0 0 currentColor); } }
   ::-webkit-scrollbar { height: 6px; width: 6px; }
   ::-webkit-scrollbar-thumb { background: #0A6E8A; border-radius: 3px; }
   button { transition: filter 0.15s ease, transform 0.08s ease, box-shadow 0.15s ease, background 0.15s ease, border-color 0.15s ease; }
@@ -97,6 +100,14 @@ function calcPoints(t) {
   const dir = t.direction === "LONG" ? 1 : -1;
   return (Number(t.exit) - Number(t.entry)) * dir;
 }
+function calcR(t) {
+  if (t.stop === "" || t.stop == null) return null;
+  const riskPts = Math.abs(Number(t.entry) - Number(t.stop));
+  if (!riskPts) return null;
+  const riskDollars = riskPts * POINT_VALUE[t.instrument] * Number(t.contracts);
+  if (!riskDollars) return null;
+  return calcPnl(t) / riskDollars;
+}
 function computeStats(trades) {
   if (!trades.length) return null;
   const pnls = trades.map(calcPnl);
@@ -120,7 +131,9 @@ function computeStats(trades) {
     else if (streak < 0 && p < 0) streak--;
     else break;
   }
-  return { net, winRate, avgWin, avgLoss, pf, expectancy, streak, count: trades.length };
+  const rValues = trades.map(calcR).filter((r) => r != null);
+  const avgR = rValues.length ? rValues.reduce((a, b) => a + b, 0) / rValues.length : null;
+  return { net, winRate, avgWin, avgLoss, pf, expectancy, streak, count: trades.length, avgR };
 }
 
 // ---------- market scanner (model: sweep → CISD → FVG retrace → rejection) ----------
@@ -253,6 +266,19 @@ function chime(n) {
     }
   } catch (e) {}
 }
+function tabTick() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.type = "sine";
+    o.frequency.value = 1500;
+    g.gain.setValueAtTime(0.0001, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.045, ctx.currentTime + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.08);
+    o.start(); o.stop(ctx.currentTime + 0.09);
+  } catch (e) {}
+}
 
 // ---------- candle chart ----------
 function CandleChart({ cs, seq }) {
@@ -298,6 +324,31 @@ const Label = ({ children, color }) => (
   </div>
 );
 
+function AnimatedNumber({ value, format }) {
+  const [display, setDisplay] = useState(value);
+  const fromRef = useRef(value);
+  const rafRef = useRef(null);
+  useEffect(() => {
+    const from = fromRef.current;
+    const to = value;
+    if (from === to) { setDisplay(to); return; }
+    const start = performance.now();
+    const dur = 550;
+    cancelAnimationFrame(rafRef.current);
+    const tick = (t) => {
+      const p = Math.min(1, (t - start) / dur);
+      const eased = 1 - Math.pow(1 - p, 3);
+      const cur = from + (to - from) * eased;
+      setDisplay(cur);
+      if (p < 1) rafRef.current = requestAnimationFrame(tick);
+      else fromRef.current = to;
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [value]);
+  return format(display);
+}
+
 const inputStyle = {
   width: "100%",
   boxSizing: "border-box",
@@ -313,6 +364,7 @@ const inputStyle = {
 
 const Panel = ({ children, style }) => (
   <div style={{
+    position: "relative",
     background: "linear-gradient(160deg, rgba(14,30,52,0.78) 0%, rgba(8,18,34,0.72) 55%, rgba(6,14,28,0.78) 100%)",
     border: `1px solid ${C.border}`,
     borderRadius: 8,
@@ -321,7 +373,12 @@ const Panel = ({ children, style }) => (
     boxShadow: "0 10px 34px rgba(0,0,0,0.45), 0 0 24px rgba(0,212,255,0.05), inset 0 1px 0 rgba(0,212,255,0.12)",
     animation: "panelIn 0.4s ease both",
     ...style,
-  }}>{children}</div>
+  }}>
+    <div aria-hidden="true" style={{ position: "absolute", inset: 0, overflow: "hidden", borderRadius: "inherit", pointerEvents: "none" }}>
+      <div style={{ position: "absolute", top: 0, bottom: 0, left: "-45%", width: "35%", background: "linear-gradient(90deg, transparent, rgba(0,212,255,0.07), transparent)", transform: "skewX(-18deg)", animation: "panelSweep 7s ease-in-out infinite" }} />
+    </div>
+    <div style={{ display: "contents" }}>{children}</div>
+  </div>
 );
 
 // ---------- equity curve ----------
@@ -366,6 +423,8 @@ function Reactor({ state, onClick, size = 150 }) {
     state === "listening" ? "pulse 0.8s ease-in-out infinite" :
     state === "speaking" ? "pulse 0.45s ease-in-out infinite" :
     "pulse 3.2s ease-in-out infinite";
+  const particleCount = state === "speaking" ? 14 : state === "listening" ? 11 : state === "thinking" ? 6 : 9;
+  const particleSpin = state === "thinking" ? "spinrev 2.2s linear infinite" : state === "speaking" ? "spinrev 5s linear infinite" : "spinrev 10s linear infinite";
   return (
     <button onClick={onClick} aria-label={state === "listening" ? "Stop listening" : "Talk to POLARIS"}
       style={{ background: "transparent", border: "none", cursor: "pointer", position: "relative", width: size, height: size, padding: 0 }}>
@@ -381,6 +440,13 @@ function Reactor({ state, onClick, size = 150 }) {
               x2={100 + Math.cos(a) * 70} y2={100 + Math.sin(a) * 70}
               stroke={core} strokeWidth="3" opacity="0.7" />
           );
+        })}
+      </svg>
+      <svg viewBox="0 0 200 200" style={{ width: "100%", height: "100%", position: "absolute", top: 0, left: 0, animation: particleSpin, transformOrigin: "100px 100px" }}>
+        {[...Array(particleCount)].map((_, i) => {
+          const a = (i / particleCount) * Math.PI * 2;
+          const r = 98;
+          return <circle key={i} cx={100 + Math.cos(a) * r} cy={100 + Math.sin(a) * r} r={state === "speaking" ? 2.2 : 1.5} fill={core} opacity={0.6} style={{ filter: `drop-shadow(0 0 3px ${core})` }} />;
         })}
       </svg>
       <div style={{
@@ -1017,7 +1083,7 @@ ${memoryRef.current || "(empty — nothing recorded yet)"}`;
     const recent = t.slice(0, 25).map((x) => ({
       date: x.date, inst: x.instrument, dir: x.direction, qty: x.contracts,
       entry: x.entry, exit: x.exit, setup: x.setup,
-      pts: +calcPoints(x).toFixed(2), pnl: +calcPnl(x).toFixed(2), notes: x.notes || "",
+      pts: +calcPoints(x).toFixed(2), pnl: +calcPnl(x).toFixed(2), r: calcR(x) != null ? +calcR(x).toFixed(2) : null, notes: x.notes || "",
     }));
     return `You are POLARIS, the AI copilot embedded in Landen's NQ futures trading command center — named for the north star: the fixed point a navigator steers by. Personality: calm, dry British wit, unfailingly composed, loyal but honest — you address him as "sir" occasionally, never obsequiously. Your job is to keep him oriented to his process when the market pulls him off course, and you will push back plainly when the data warrants it.
 
@@ -1027,7 +1093,7 @@ LONG-TERM MEMORY (durable facts about Landen carried over from past sessions):
 ${memoryRef.current || "None recorded yet."}
 
 LIVE JOURNAL DATA:
-${s ? `Stats: ${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, avg win ${fmt$(s.avgWin)}, avg loss ${fmt$(s.avgLoss)}, profit factor ${s.pf === Infinity ? "inf" : s.pf.toFixed(2)}, expectancy ${fmt$(s.expectancy)}/trade, current streak ${s.streak}.` : "No trades logged yet."}
+${s ? `Stats: ${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, avg win ${fmt$(s.avgWin)}, avg loss ${fmt$(s.avgLoss)}, profit factor ${s.pf === Infinity ? "inf" : s.pf.toFixed(2)}, expectancy ${fmt$(s.expectancy)}/trade, current streak ${s.streak}, avg R-multiple ${s.avgR == null ? "n/a (no stops recorded)" : s.avgR.toFixed(2) + "R"}.` : "No trades logged yet."}
 Recent trades (newest first): ${JSON.stringify(recent)}
 
 Contract reference: NQ = $20/point, MNQ = $2/point, tick 0.25.
@@ -1209,7 +1275,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
         </span>
         <span style={{ fontSize: 10, color: C.faint, letterSpacing: "0.1em" }}>NQ TRADE SYSTEMS · {new Date().toDateString().toUpperCase()}</span>
         <span style={{ marginLeft: "auto", fontSize: 13, color: stats ? pnlColor(stats.net) : C.muted }}>
-          NET {stats ? fmt$(stats.net) : "$0"}
+          NET <AnimatedNumber value={stats ? stats.net : 0} format={fmt$} />
           <span style={{ color: C.cyan, animation: "blink 1.2s step-end infinite" }}>▌</span>
         </span>
       </div>
@@ -1224,7 +1290,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
       {/* tabs */}
       <div style={{ display: "flex", gap: 4, padding: "10px 12px", overflowX: "auto", borderBottom: `1px solid ${C.border}`, position: "relative", zIndex: 1 }}>
         {tabs.map((t) => (
-          <button key={t} onClick={() => setTab(t)}
+          <button key={t} onClick={() => { if (t !== tab) tabTick(); setTab(t); }}
             style={{
               fontFamily: mono, fontSize: 12, letterSpacing: "0.12em", padding: "8px 14px",
               background: tab === t ? "rgba(0,212,255,0.14)" : "transparent",
@@ -1250,6 +1316,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
           </div>
         )}
 
+        <div key={tab} style={{ display: "flex", flexDirection: "column", gap: 14, animation: "tabIn 0.28s ease" }}>
         {/* ================= POLARIS ================= */}
         {tab === "POLARIS" && (
           <React.Fragment>
@@ -1357,18 +1424,21 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
               <React.Fragment>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
                   {[
-                    ["NET P&L", fmt$(stats.net), pnlColor(stats.net)],
-                    ["WIN RATE", stats.winRate.toFixed(1) + "%", stats.winRate >= 50 ? C.green : C.gold],
-                    ["PROFIT FACTOR", stats.pf === Infinity ? "∞" : stats.pf.toFixed(2), stats.pf >= 1.5 ? C.green : stats.pf >= 1 ? C.gold : C.red],
-                    ["EXPECTANCY", fmt$(stats.expectancy) + "/trade", pnlColor(stats.expectancy)],
-                    ["AVG WIN", fmt$(stats.avgWin), C.green],
-                    ["AVG LOSS", fmt$(stats.avgLoss), C.red],
-                    ["STREAK", (stats.streak > 0 ? "+" : "") + stats.streak, pnlColor(stats.streak)],
-                    ["TRADES", String(stats.count), C.text],
-                  ].map(([l, v, col]) => (
-                    <Panel key={l} style={{ padding: "12px 14px" }}>
-                      <Label>{l}</Label>
-                      <div style={{ fontSize: 20, fontWeight: 600, color: col }}>{v}</div>
+                    { l: "NET P&L", raw: stats.net, fmt: fmt$, col: pnlColor(stats.net) },
+                    { l: "WIN RATE", raw: stats.winRate, fmt: (v) => v.toFixed(1) + "%", col: stats.winRate >= 50 ? C.green : C.gold },
+                    { l: "PROFIT FACTOR", raw: stats.pf === Infinity ? 999 : stats.pf, fmt: (v) => (stats.pf === Infinity ? "∞" : v.toFixed(2)), col: stats.pf >= 1.5 ? C.green : stats.pf >= 1 ? C.gold : C.red },
+                    { l: "EXPECTANCY", raw: stats.expectancy, fmt: (v) => fmt$(v) + "/trade", col: pnlColor(stats.expectancy) },
+                    { l: "AVG WIN", raw: stats.avgWin, fmt: fmt$, col: C.green },
+                    { l: "AVG LOSS", raw: stats.avgLoss, fmt: fmt$, col: C.red },
+                    { l: "STREAK", raw: stats.streak, fmt: (v) => (v > 0 ? "+" : "") + Math.round(v), col: pnlColor(stats.streak) },
+                    { l: "TRADES", raw: stats.count, fmt: (v) => String(Math.round(v)), col: C.text },
+                    { l: "AVG R", raw: stats.avgR == null ? 0 : stats.avgR, fmt: (v) => (stats.avgR == null ? "—" : (v >= 0 ? "+" : "") + v.toFixed(2) + "R"), col: stats.avgR == null ? C.faint : pnlColor(stats.avgR) },
+                  ].map((s) => (
+                    <Panel key={s.l} style={{ padding: "12px 14px" }}>
+                      <Label>{s.l}</Label>
+                      <div style={{ fontSize: 20, fontWeight: 600, color: s.col }}>
+                        <AnimatedNumber value={s.raw} format={s.fmt} />
+                      </div>
                     </Panel>
                   ))}
                 </div>
@@ -1459,6 +1529,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
             ) : (
               trades.map((t) => {
                 const p = calcPnl(t);
+                const r = calcR(t);
                 return (
                   <Panel key={t.id} style={{ padding: "12px 14px" }}>
                     <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
@@ -1467,6 +1538,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                       <span style={{ fontSize: 13 }}>{t.contracts}× {t.instrument}</span>
                       <span style={{ fontSize: 12, color: C.muted }}>{t.entry} → {t.exit}</span>
                       <span style={{ marginLeft: "auto", fontWeight: 600, fontSize: 15, color: pnlColor(p) }}>{fmt$2(p)}</span>
+                      {r != null && <span style={{ fontSize: 11, color: pnlColor(r), border: `1px solid ${C.border}`, borderRadius: 3, padding: "2px 6px" }}>{(r >= 0 ? "+" : "") + r.toFixed(2)}R</span>}
                     </div>
                     <div style={{ display: "flex", gap: 10, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
                       <span style={{ fontSize: 10, letterSpacing: "0.1em", color: C.cyan, border: `1px solid ${C.border}`, borderRadius: 3, padding: "2px 8px" }}>{t.setup.toUpperCase()}</span>
@@ -1837,6 +1909,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
             </Panel>
           </React.Fragment>
         )}
+        </div>
 
         <div style={{ textAlign: "center", color: C.faint, fontSize: 10, letterSpacing: "0.1em", padding: "6px 0 20px" }}>
           NQ $20/PT · MNQ $2/PT · TICK 0.25 · STANDALONE MODE — DATA SAVED IN THIS BROWSER
