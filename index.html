@@ -26,8 +26,14 @@
   @keyframes sweep { 0% { top: -160px; } 100% { top: 110%; } }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
   @keyframes blink { 0%,49% {opacity:1} 50%,100% {opacity:0} }
+  @keyframes panelIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
   ::-webkit-scrollbar { height: 6px; width: 6px; }
   ::-webkit-scrollbar-thumb { background: #0A6E8A; border-radius: 3px; }
+  button { transition: filter 0.15s ease, transform 0.08s ease, box-shadow 0.15s ease, background 0.15s ease, border-color 0.15s ease; }
+  button:hover:not(:disabled) { filter: brightness(1.14); }
+  button:active:not(:disabled) { transform: translateY(1px) scale(0.99); }
+  button:disabled { cursor: not-allowed; opacity: 0.5; filter: none; }
+  input, select, textarea { transition: border-color 0.15s ease, box-shadow 0.15s ease; }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
 </style>
 </head>
@@ -307,6 +313,7 @@ const Panel = ({ children, style }) => (
     padding: 16,
     backdropFilter: "blur(6px)",
     boxShadow: "0 10px 34px rgba(0,0,0,0.45), 0 0 24px rgba(0,212,255,0.05), inset 0 1px 0 rgba(0,212,255,0.12)",
+    animation: "panelIn 0.4s ease both",
     ...style,
   }}>{children}</div>
 );
@@ -451,6 +458,7 @@ function App() {
   const [tab, setTab] = useState("POLARIS");
   const [trades, setTrades] = useState([]);
   const [toast, setToast] = useState("");
+  const [storageOk, setStorageOk] = useState(true);
 
   const blank = {
     date: new Date().toISOString().slice(0, 10),
@@ -473,8 +481,15 @@ function App() {
   const chatEndRef = useRef(null);
   const tradesRef = useRef(trades); tradesRef.current = trades;
   const chatRef = useRef(chat); chatRef.current = chat;
+  const chatLoadedRef = useRef(false);
   const voiceOutRef = useRef(voiceOut); voiceOutRef.current = voiceOut;
   const voiceURIRef = useRef(voiceURI); voiceURIRef.current = voiceURI;
+
+  // ----- long-term memory -----
+  const [memory, setMemory] = useState("");
+  const memoryRef = useRef(memory); memoryRef.current = memory;
+  const [memoryEditing, setMemoryEditing] = useState(false);
+  const [memoryDraft, setMemoryDraft] = useState("");
 
   // keys + engine
   const [anthropicKey, setAnthropicKey] = useState("");
@@ -521,10 +536,21 @@ function App() {
   }
 
   useEffect(() => {
+    try {
+      const probe = "__polaris_storage_probe__";
+      localStorage.setItem(probe, "1");
+      setStorageOk(localStorage.getItem(probe) === "1");
+      localStorage.removeItem(probe);
+    } catch (e) {
+      setStorageOk(false);
+    }
     (async () => {
       try { const r = await S.get("nq-trades"); if (r && r.value) setTrades(JSON.parse(r.value)); } catch (e) {}
       try { const v = await S.get("polaris-voice"); if (v && v.value) setVoiceURI(v.value); } catch (e) {}
       try { const a = await S.get("polaris-anthropic-key"); if (a && a.value) setAnthropicKey(a.value); } catch (e) {}
+      try { const ch = await S.get("polaris-chat"); if (ch && ch.value) setChat(JSON.parse(ch.value)); } catch (e) {}
+      chatLoadedRef.current = true;
+      try { const m = await S.get("polaris-memory"); if (m && m.value) setMemory(m.value); } catch (e) {}
       try {
         const el = await S.get("polaris-elevenlabs");
         if (el && el.value) {
@@ -556,6 +582,11 @@ function App() {
     if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
   }, [chat, interim, voiceState]);
 
+  useEffect(() => {
+    if (!chatLoadedRef.current) return;
+    S.set("polaris-chat", JSON.stringify(chat)).catch(() => {});
+  }, [chat]);
+
   async function persist(next) {
     setTrades(next);
     try { await S.set("nq-trades", JSON.stringify(next)); } catch (e) { flash("Save failed"); }
@@ -565,6 +596,21 @@ function App() {
   async function saveAnthropicKey(k) {
     setAnthropicKey(k);
     try { await S.set("polaris-anthropic-key", k); } catch (e) {}
+  }
+  async function saveMemory(text) {
+    setMemory(text);
+    memoryRef.current = text;
+    try { await S.set("polaris-memory", text); } catch (e) {}
+  }
+  function wipeMemory() {
+    if (!window.confirm("Wipe Polaris's long-term memory? This can't be undone.")) return;
+    saveMemory("");
+    flash("Memory wiped");
+  }
+  function clearChatHistory() {
+    if (!window.confirm("Clear the entire chat transcript? This can't be undone.")) return;
+    setChat([]);
+    flash("Chat history cleared");
   }
   async function pickVoice(uri) {
     setVoiceURI(uri);
@@ -862,6 +908,45 @@ function App() {
   const dayPct = lastPx && dayInfo ? ((lastPx - dayInfo.prevClose) / dayInfo.prevClose) * 100 : null;
   const weekPct = lastPx && dayInfo ? ((lastPx - dayInfo.weekAgo) / dayInfo.weekAgo) * 100 : null;
 
+  async function callAnthropic(key, system, messages, maxTokens) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: maxTokens || 1000,
+        system,
+        messages,
+      }),
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => null);
+      const detail = errBody && errBody.error && errBody.error.message ? errBody.error.message : "HTTP " + res.status;
+      throw new Error(detail);
+    }
+    const data = await res.json();
+    return (data.content || []).map((b) => b.text || "").join(" ").trim();
+  }
+
+  async function updateMemory(exchangeLabel, userText, assistantText) {
+    const key = anthropicKeyRef.current.trim();
+    if (!key) return;
+    try {
+      const sys = `You maintain a private running memory file about Landen, a trader who talks with POLARIS, his AI copilot. Update the memory below using the latest exchange: durable facts only — his goals, trading rules, struggles, recurring patterns, things he's explicitly asked to be remembered, and notable rule breaches. Drop anything stale or no longer relevant. Keep it terse, factual, third person. Hard limit: 300 words. Output ONLY the updated memory text and nothing else — no preamble, no markdown.
+
+CURRENT MEMORY:
+${memoryRef.current || "(empty — nothing recorded yet)"}`;
+      const messages = [{ role: "user", content: `LATEST EXCHANGE (${exchangeLabel})\nLanden: ${userText}\nPolaris: ${assistantText}\n\nReturn the full updated memory text.` }];
+      const updated = await callAnthropic(key, sys, messages, 500);
+      if (updated) saveMemory(updated);
+    } catch (e) { /* silent — memory updates never surface to the user */ }
+  }
+
   function buildSystemPrompt() {
     const t = tradesRef.current;
     const s = computeStats(t);
@@ -873,6 +958,9 @@ function App() {
     return `You are POLARIS, the AI copilot embedded in Landen's NQ futures trading command center — named for the north star: the fixed point a navigator steers by. Personality: calm, dry British wit, unfailingly composed, loyal but honest — you address him as "sir" occasionally, never obsequiously. Your job is to keep him oriented to his process when the market pulls him off course, and you will push back plainly when the data warrants it.
 
 You can discuss anything he brings up — trading, markets concepts, life, mindset, discipline — but your specialty is his trading operation.
+
+LONG-TERM MEMORY (durable facts about Landen carried over from past sessions):
+${memoryRef.current || "None recorded yet."}
 
 LIVE JOURNAL DATA:
 ${s ? `Stats: ${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, avg win ${fmt$(s.avgWin)}, avg loss ${fmt$(s.avgLoss)}, profit factor ${s.pf === Infinity ? "inf" : s.pf.toFixed(2)}, expectancy ${fmt$(s.expectancy)}/trade, current streak ${s.streak}.` : "No trades logged yet."}
@@ -904,31 +992,11 @@ Hard rules:
     }
     setVoiceState("thinking");
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": key,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          system: buildSystemPrompt(),
-          messages: history.slice(-16).map((m) => ({ role: m.role, content: m.content })),
-        }),
-      });
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => null);
-        const detail = errBody && errBody.error && errBody.error.message ? errBody.error.message : "HTTP " + res.status;
-        throw new Error(detail);
-      }
-      const data = await res.json();
-      const reply = (data.content || []).map((b) => b.text || "").join(" ").trim() || "I seem to have lost my train of thought, sir. Try again.";
+      const reply = (await callAnthropic(key, buildSystemPrompt(), history.slice(-16).map((m) => ({ role: m.role, content: m.content })), 1000)) || "I seem to have lost my train of thought, sir. Try again.";
       setChat([...history, { role: "assistant", content: reply }]);
       speak(reply);
       if (!voiceOutRef.current) setVoiceState("idle");
+      updateMemory("chat", text, reply);
     } catch (e) {
       const err = "Mainframe error: " + (e.message || "connection failed") + ". Check the API key in SETUP.";
       setChat([...history, { role: "assistant", content: err }]);
@@ -985,6 +1053,11 @@ Hard rules:
       </div>
 
       <div style={{ maxWidth: 1080, margin: "0 auto", padding: 16, display: "flex", flexDirection: "column", gap: 14, position: "relative", zIndex: 1 }}>
+        {!storageOk && (
+          <div style={{ background: "rgba(255,85,102,0.1)", border: `1px solid ${C.red}`, color: C.red, padding: "10px 14px", borderRadius: 4, fontSize: 12, lineHeight: 1.6 }}>
+            ⚠ This browser is blocking local storage — nothing will be saved, including API keys and your trade journal. This is almost always Private Browsing Mode or "Block All Cookies" in Safari settings. Turn those off for this site and reload.
+          </div>
+        )}
         {toast && (
           <div style={{ background: C.panel2, border: `1px solid ${C.gold}`, color: C.gold, padding: "8px 12px", borderRadius: 4, fontSize: 12 }}>
             {toast}
@@ -1353,6 +1426,9 @@ Hard rules:
               <div style={{ fontSize: 11, marginTop: 8, color: anthropicKey ? C.green : C.gold }}>
                 {anthropicKey ? "✓ Key saved — the brain is online" : "No key yet — Polaris can't respond without one"}
               </div>
+              <div style={{ fontSize: 10, color: C.faint, marginTop: 10, lineHeight: 1.6 }}>
+                Keys below are saved automatically as you type. If they don't survive closing Safari, Private Browsing Mode is almost always the cause — it keeps storage in memory only and wipes it when the tab closes. Turn it off for this site to make keys stick.
+              </div>
             </Panel>
 
             <Panel>
@@ -1415,7 +1491,7 @@ Hard rules:
                           <input
                             type="password"
                             value={elKey}
-                            onChange={(e) => setElKey(e.target.value)}
+                            onChange={(e) => { setElKey(e.target.value); saveElConfig({ key: e.target.value }); }}
                             placeholder="xi-…"
                             style={{ ...inputStyle, flex: 1 }}
                           />
@@ -1446,6 +1522,53 @@ Hard rules:
                     TEST VOICE
                   </button>
                 </div>
+              )}
+            </Panel>
+
+            <Panel>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+                <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan }}>MEMORY</div>
+                <div style={{ fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>
+                  {memory ? memory.trim().split(/\s+/).filter(Boolean).length : 0}/300 WORDS
+                </div>
+              </div>
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
+                A running summary of durable facts Polaris carries between sessions — goals, rules, struggles, recurring patterns. Updates quietly in the background after each reply.
+              </div>
+              {memoryEditing ? (
+                <React.Fragment>
+                  <textarea rows={7} value={memoryDraft} onChange={(e) => setMemoryDraft(e.target.value)} style={{ ...inputStyle, resize: "vertical" }} />
+                  <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                    <button onClick={() => { saveMemory(memoryDraft.trim()); setMemoryEditing(false); flash("Memory saved"); }}
+                      style={{ background: C.cyan, color: "#04121C", border: "none", borderRadius: 4, padding: "10px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                      SAVE
+                    </button>
+                    <button onClick={() => setMemoryEditing(false)}
+                      style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, padding: "10px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                      CANCEL
+                    </button>
+                  </div>
+                </React.Fragment>
+              ) : (
+                <React.Fragment>
+                  <div style={{ background: "rgba(3,10,20,0.8)", border: `1px solid ${C.border}`, borderRadius: 6, padding: 12, fontSize: 12, lineHeight: 1.7, color: memory ? C.text : C.faint, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto" }}>
+                    {memory || "Nothing recorded yet — Polaris starts learning after your first conversation."}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                    <button onClick={() => { setMemoryDraft(memory); setMemoryEditing(true); }}
+                      style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "10px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                      EDIT
+                    </button>
+                    <button onClick={wipeMemory}
+                      style={{ background: "transparent", color: C.red, border: `1px solid rgba(255,85,102,0.4)`, borderRadius: 4, padding: "10px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                      WIPE MEMORY
+                    </button>
+                    <button onClick={clearChatHistory}
+                      style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, padding: "10px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                      CLEAR CHAT HISTORY
+                    </button>
+                  </div>
+                </React.Fragment>
               )}
             </Panel>
 
