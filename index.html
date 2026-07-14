@@ -58,6 +58,11 @@ const S = {
 // ---------- constants ----------
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
+const DEFAULT_RULES = {
+  maxTrades: { enabled: false, value: 5 },
+  maxLoss: { enabled: false, value: 500 },
+  cooldown: { enabled: false, value: 30 },
+};
 
 const C = {
   bg: "#030710",
@@ -491,6 +496,11 @@ function App() {
   const [memoryEditing, setMemoryEditing] = useState(false);
   const [memoryDraft, setMemoryDraft] = useState("");
 
+  // ----- rules engine -----
+  const [rules, setRules] = useState(DEFAULT_RULES);
+  const rulesRef = useRef(rules); rulesRef.current = rules;
+  const [deskBusy, setDeskBusy] = useState(false);
+
   // keys + engine
   const [anthropicKey, setAnthropicKey] = useState("");
   const [engine, setEngine] = useState("device");
@@ -551,6 +561,7 @@ function App() {
       try { const ch = await S.get("polaris-chat"); if (ch && ch.value) setChat(JSON.parse(ch.value)); } catch (e) {}
       chatLoadedRef.current = true;
       try { const m = await S.get("polaris-memory"); if (m && m.value) setMemory(m.value); } catch (e) {}
+      try { const ru = await S.get("polaris-rules"); if (ru && ru.value) setRules({ ...DEFAULT_RULES, ...JSON.parse(ru.value) }); } catch (e) {}
       try {
         const el = await S.get("polaris-elevenlabs");
         if (el && el.value) {
@@ -612,6 +623,11 @@ function App() {
     setChat([]);
     flash("Chat history cleared");
   }
+  async function saveRules(next) {
+    setRules(next);
+    rulesRef.current = next;
+    try { await S.set("polaris-rules", JSON.stringify(next)); } catch (e) {}
+  }
   async function pickVoice(uri) {
     setVoiceURI(uri);
     try { await S.set("polaris-voice", uri); } catch (e) {}
@@ -642,6 +658,9 @@ function App() {
 
   const stats = useMemo(() => computeStats(trades), [trades]);
   const livePnl = form.entry !== "" && form.exit !== "" && form.contracts ? calcPnl(form) : null;
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const todaysTrades = useMemo(() => trades.filter((t) => t.date === todayISO), [trades, todayISO]);
+  const todaysTradesRef = useRef(todaysTrades); todaysTradesRef.current = todaysTrades;
 
   const acct = Number(risk.account) || 0;
   const riskDollars = acct * ((Number(risk.pct) || 0) / 100);
@@ -1043,6 +1062,86 @@ Hard rules:
     }
   }
 
+  function rulesSummaryText() {
+    const r = rulesRef.current;
+    const parts = [];
+    if (r.maxTrades.enabled) parts.push(`max ${r.maxTrades.value} trades/day`);
+    if (r.maxLoss.enabled) parts.push(`max daily loss ${fmt$(r.maxLoss.value)}`);
+    if (r.cooldown.enabled) parts.push(`${r.cooldown.value} min cooldown after a loss`);
+    return parts.length ? parts.join(", ") : "no hard limits configured";
+  }
+
+  async function openDesk() {
+    const key = anthropicKeyRef.current.trim();
+    if (!key || deskBusy) return;
+    setDeskBusy(true);
+    setVoiceState("thinking");
+    try {
+      const s = computeStats(tradesRef.current);
+      const last = candlesRef.current.length ? candlesRef.current[candlesRef.current.length - 1] : null;
+      const sys = `You are POLARIS delivering Landen's morning trading briefing before he starts his session. Same personality as always: calm, dry British wit, unfailingly composed, address him as "sir" occasionally. This is a SPOKEN monologue, not a conversation — no questions, no markdown, no lists. Hard limit: 150 words.
+
+Cover briefly: current market context from the live feed, his stats and current streak, his active hard limits, and end with exactly one concrete focus for this session.
+
+MARKET FEED (${symbolRef.current} as the NQ proxy): ${last ? `Last ${last.c}${dayInfoRef.current ? `, day ${(((last.c - dayInfoRef.current.prevClose) / dayInfoRef.current.prevClose) * 100).toFixed(2)}%, week ${(((last.c - dayInfoRef.current.weekAgo) / dayInfoRef.current.weekAgo) * 100).toFixed(2)}%` : ""}. Recent candles: ${JSON.stringify(candlesRef.current.slice(-10).map((c) => ({ o: c.o, h: c.h, l: c.l, c: c.c })))}` : "Not connected — the MARKET tab scanner isn't running."}
+
+STATS: ${s ? `${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, current streak ${s.streak}.` : "No trades logged yet."}
+
+ACTIVE HARD LIMITS: ${rulesSummaryText()}
+
+LONG-TERM MEMORY (his durable goals, rules, and patterns): ${memoryRef.current || "None recorded yet."}`;
+      const briefing = await callAnthropic(key, sys, [{ role: "user", content: "Open the desk." }], 400);
+      const text = briefing || "Systems nominal, sir. Nothing further to brief.";
+      setChat([...chatRef.current, { role: "assistant", content: text }]);
+      speak(text);
+      if (!voiceOutRef.current) setVoiceState("idle");
+    } catch (e) {
+      flash("Couldn't open the desk — " + (e.message || "connection failed"));
+      setVoiceState("idle");
+    } finally {
+      setDeskBusy(false);
+    }
+  }
+
+  async function closeDesk() {
+    const key = anthropicKeyRef.current.trim();
+    if (!key || deskBusy) return;
+    const today = todaysTradesRef.current;
+    if (!today.length) { flash("No trades logged today to review"); return; }
+    setDeskBusy(true);
+    setVoiceState("thinking");
+    try {
+      const rows = today.map((x) => ({
+        inst: x.instrument, dir: x.direction, qty: x.contracts, entry: x.entry, exit: x.exit,
+        setup: x.setup, pts: +calcPoints(x).toFixed(2), pnl: +calcPnl(x).toFixed(2), notes: x.notes || "",
+      }));
+      const netToday = rows.reduce((a, x) => a + x.pnl, 0);
+      const sys = `You are POLARIS delivering Landen's end-of-session debrief. Same personality: calm, dry British wit, "sir" occasionally, loyal but honest — push back plainly where the data warrants it. SPOKEN monologue, no markdown, no lists. Hard limit: 180 words.
+
+Grade today's session honestly with a single letter grade (A-F) based on his process, not just P&L. Name the best decision and the worst decision from today's trades specifically, by reference to what happened. Mention his active hard limits or any breaches from memory if relevant.
+
+TODAY'S TRADES: ${JSON.stringify(rows)}
+NET TODAY: ${fmt$(netToday)}
+ACTIVE HARD LIMITS: ${rulesSummaryText()}
+LONG-TERM MEMORY: ${memoryRef.current || "None recorded yet."}
+
+After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by the single most important lesson from today in one sentence. This line is not spoken aloud, so it can be plainly factual.`;
+      const raw = (await callAnthropic(key, sys, [{ role: "user", content: "Close the desk." }], 500)) || "No debrief to give, sir.";
+      const m = raw.match(/\n?TAKEAWAY:\s*([\s\S]+)$/i);
+      const text = m ? raw.slice(0, m.index).trim() : raw;
+      const takeaway = m ? m[1].trim() : text;
+      setChat([...chatRef.current, { role: "assistant", content: text }]);
+      speak(text);
+      if (!voiceOutRef.current) setVoiceState("idle");
+      updateMemory("close-the-desk debrief", "Close the desk.", takeaway);
+    } catch (e) {
+      flash("Couldn't close the desk — " + (e.message || "connection failed"));
+      setVoiceState("idle");
+    } finally {
+      setDeskBusy(false);
+    }
+  }
+
   function sendDraft() {
     const t = draft.trim();
     if (!t || voiceState === "thinking") return;
@@ -1122,6 +1221,25 @@ Hard rules:
                 </div>
               )}
             </div>
+
+            {/* session rituals */}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button onClick={openDesk} disabled={!anthropicKey || deskBusy}
+                style={{ flex: 1, minWidth: 160, padding: "12px 0", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.1em", borderRadius: 4, cursor: "pointer",
+                  background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}` }}>
+                ☀ OPEN THE DESK
+              </button>
+              <button onClick={closeDesk} disabled={!anthropicKey || deskBusy}
+                style={{ flex: 1, minWidth: 160, padding: "12px 0", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.1em", borderRadius: 4, cursor: "pointer",
+                  background: "transparent", color: C.gold, border: `1px solid rgba(245,200,107,0.4)` }}>
+                ● CLOSE THE DESK
+              </button>
+            </div>
+            {!anthropicKey && (
+              <div style={{ fontSize: 11, color: C.faint, textAlign: "center", marginTop: -6 }}>
+                Add an Anthropic API key in SETUP to open or close the desk.
+              </div>
+            )}
 
             {/* transcript */}
             <Panel style={{ maxHeight: 320, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}>
