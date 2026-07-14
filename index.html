@@ -627,10 +627,14 @@ function App() {
     } catch (e) {}
   }
 
+  function logTrade(t) {
+    persist([t, ...tradesRef.current]);
+  }
+
   function addTrade() {
     if (form.entry === "" || form.exit === "" || !form.contracts) { flash("Entry, exit, and contracts are required"); return; }
     const t = { ...form, id: Date.now(), contracts: Number(form.contracts) };
-    persist([t, ...trades]);
+    logTrade(t);
     setForm({ ...blank, date: form.date, instrument: form.instrument });
     flash("Trade logged");
   }
@@ -973,11 +977,39 @@ ${candlesRef.current.length ? `Last ${candlesRef.current[candlesRef.current.leng
 Scanner (his model: liquidity sweep → change in state of delivery → retrace into imbalance → rejection): ${scanningRef.current ? "ACTIVE" : "off"}. Recent events: ${scanEventsRef.current.length ? scanEventsRef.current.slice(0, 6).map((e) => `[${e.time}] ${e.msg}`).join(" | ") : "none yet"}.
 When he asks what the market is doing, describe it from this data plainly — direction, range, notable candles — without predicting what comes next.
 
+VOICE TRADE LOGGING:
+When Landen is clearly reporting a completed trade he wants logged (not a hypothetical, not a plan, not something already in the journal above) — append exactly one machine-readable block as the very last line of your reply, after your normal spoken response:
+<trade>{"date":"YYYY-MM-DD","instrument":"NQ|MNQ","direction":"LONG|SHORT","contracts":N,"entry":N,"exit":N,"stop":N|null,"setup":"one of: ${JSON.stringify(SETUPS)}","notes":"..."}</trade>
+Rules for this block: only emit it when direction, entry, exit, and contracts are all clear from what he said — if anything is missing or ambiguous, ask him for it in your spoken reply instead of guessing, and do not emit the block. Omit "date" to default to today. Use null for "stop" if he didn't mention one. Pick the closest matching setup name from the list, or "Other". Never emit this block for a trade already visible in the journal data above, and never emit more than one.
+
 Hard rules:
 - Never predict price direction, give trade signals, or tell him to enter/exit a position. Analyze HIS data and process; frame market talk as education.
 - No financial advice; you are an analysis and accountability system.
 - Responses are SPOKEN ALOUD: keep them under 120 words, plain text, no markdown, no lists, no symbols. Conversational sentences only.
 - Reference his actual numbers when relevant.`;
+  }
+
+  function parseTradeBlock(reply) {
+    const m = reply.match(/<trade>([\s\S]*?)<\/trade>\s*$/);
+    if (!m) return { cleanText: reply, trade: null };
+    const cleanText = reply.slice(0, m.index).trim();
+    try {
+      const raw = JSON.parse(m[1]);
+      const instrument = String(raw.instrument || "").toUpperCase();
+      const direction = String(raw.direction || "").toUpperCase();
+      const contracts = Number(raw.contracts);
+      const entry = Number(raw.entry);
+      const exit = Number(raw.exit);
+      const stop = raw.stop === null || raw.stop === undefined || raw.stop === "" ? "" : Number(raw.stop);
+      const setup = SETUPS.includes(raw.setup) ? raw.setup : "Other";
+      const date = raw.date && /^\d{4}-\d{2}-\d{2}$/.test(raw.date) ? raw.date : new Date().toISOString().slice(0, 10);
+      const notes = typeof raw.notes === "string" ? raw.notes : "";
+      const valid = POINT_VALUE[instrument] && (direction === "LONG" || direction === "SHORT") && contracts > 0 && Number.isFinite(entry) && Number.isFinite(exit) && (stop === "" || Number.isFinite(stop));
+      if (!valid) return { cleanText, trade: null };
+      return { cleanText, trade: { date, instrument, direction, contracts, entry, exit, stop, setup, notes, id: Date.now() } };
+    } catch (e) {
+      return { cleanText, trade: null };
+    }
   }
 
   async function sendToPolaris(text) {
@@ -992,7 +1024,14 @@ Hard rules:
     }
     setVoiceState("thinking");
     try {
-      const reply = (await callAnthropic(key, buildSystemPrompt(), history.slice(-16).map((m) => ({ role: m.role, content: m.content })), 1000)) || "I seem to have lost my train of thought, sir. Try again.";
+      const raw = (await callAnthropic(key, buildSystemPrompt(), history.slice(-16).map((m) => ({ role: m.role, content: m.content })), 1000)) || "I seem to have lost my train of thought, sir. Try again.";
+      const { cleanText, trade } = parseTradeBlock(raw);
+      let reply = cleanText || "Logged, sir.";
+      if (trade) {
+        logTrade(trade);
+        reply += ` Logged: ${trade.direction} ${trade.contracts} ${trade.instrument} for ${fmt$2(calcPnl(trade))}.`;
+        flash("Trade logged — via voice");
+      }
       setChat([...history, { role: "assistant", content: reply }]);
       speak(reply);
       if (!voiceOutRef.current) setVoiceState("idle");
