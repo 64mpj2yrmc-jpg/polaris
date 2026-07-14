@@ -135,6 +135,20 @@ function computeStats(trades) {
   const avgR = rValues.length ? rValues.reduce((a, b) => a + b, 0) / rValues.length : null;
   return { net, winRate, avgWin, avgLoss, pf, expectancy, streak, count: trades.length, avgR };
 }
+function computeBadges(trades, stats) {
+  const weekDays = new Set(
+    trades.filter((t) => Date.now() - new Date(t.date + "T00:00:00").getTime() < 7 * 86400000).map((t) => t.date)
+  );
+  return [
+    { id: "streak3", label: "3 WIN STREAK", achieved: !!stats && stats.streak >= 3 },
+    { id: "streak5", label: "5 WIN STREAK", achieved: !!stats && stats.streak >= 5 },
+    { id: "streak10", label: "10 WIN STREAK", achieved: !!stats && stats.streak >= 10 },
+    { id: "pf2", label: "PROFIT FACTOR 2X", achieved: !!stats && stats.pf >= 2 },
+    { id: "disciplined", label: "DISCIPLINED · AVG 1R+", achieved: !!stats && stats.avgR != null && stats.avgR >= 1 },
+    { id: "consistent", label: "CONSISTENT WEEK", achieved: weekDays.size >= 5 },
+    { id: "century", label: "CENTURY · 100 TRADES", achieved: !!stats && stats.count >= 100 },
+  ];
+}
 
 // ---------- market scanner (model: sweep → CISD → FVG retrace → rejection) ----------
 function findSwings(cs, strength) {
@@ -412,6 +426,63 @@ function EquityCurve({ trades }) {
       <path d={path} fill="none" stroke={last >= 0 ? C.cyan : C.red} strokeWidth="2" strokeLinejoin="round" style={{ filter: "drop-shadow(0 0 4px rgba(0,212,255,0.6))" }} />
       <circle cx={x(pts.length - 1)} cy={y(last)} r="3.5" fill={last >= 0 ? C.cyan : C.red} />
     </svg>
+  );
+}
+
+// ---------- P&L calendar heatmap ----------
+function PnlHeatmap({ trades }) {
+  const WEEKS = 18;
+  const byDate = {};
+  trades.forEach((t) => { byDate[t.date] = (byDate[t.date] || 0) + calcPnl(t); });
+  const maxAbs = Math.max(1, ...Object.values(byDate).map((v) => Math.abs(v)));
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const endDow = today.getDay();
+  const gridEnd = new Date(today);
+  gridEnd.setDate(gridEnd.getDate() + (6 - endDow));
+  const gridStart = new Date(gridEnd);
+  gridStart.setDate(gridStart.getDate() - (WEEKS * 7 - 1));
+
+  const cols = [];
+  for (let w = 0; w < WEEKS; w++) {
+    const col = [];
+    for (let d = 0; d < 7; d++) {
+      const dt = new Date(gridStart);
+      dt.setDate(dt.getDate() + w * 7 + d);
+      const iso = dt.toISOString().slice(0, 10);
+      col.push({ iso, pnl: byDate[iso] || 0, hasTrades: iso in byDate, future: dt > today });
+    }
+    cols.push(col);
+  }
+
+  const cellColor = (cell) => {
+    if (cell.future) return "transparent";
+    if (!cell.hasTrades) return "rgba(255,255,255,0.045)";
+    if (cell.pnl === 0) return "rgba(0,212,255,0.3)";
+    const a = 0.18 + 0.68 * Math.min(1, Math.abs(cell.pnl) / maxAbs);
+    return cell.pnl > 0 ? `rgba(47,224,138,${a})` : `rgba(255,85,102,${a})`;
+  };
+
+  if (!trades.length) {
+    return (
+      <div style={{ height: 100, display: "flex", alignItems: "center", justifyContent: "center", color: C.faint, fontFamily: mono, fontSize: 12 }}>
+        Log trades to populate the calendar
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", gap: 3, overflowX: "auto", padding: "4px 2px" }}>
+      {cols.map((col, ci) => (
+        <div key={ci} style={{ display: "flex", flexDirection: "column", gap: 3, flexShrink: 0 }}>
+          {col.map((cell, ri) => (
+            <div key={ri} title={cell.future ? "" : `${cell.iso} — ${cell.hasTrades ? fmt$(cell.pnl) : "no trades"}`}
+              style={{ width: 11, height: 11, borderRadius: 2, background: cellColor(cell), border: cell.future ? "none" : `1px solid ${C.border}` }} />
+          ))}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -730,6 +801,7 @@ function App() {
   function deleteTrade(id) { persist(trades.filter((t) => t.id !== id)); }
 
   const stats = useMemo(() => computeStats(trades), [trades]);
+  const badges = useMemo(() => computeBadges(trades, stats), [trades, stats]);
   const livePnl = form.entry !== "" && form.exit !== "" && form.contracts ? calcPnl(form) : null;
   const todayISO = new Date().toISOString().slice(0, 10);
   const todaysTrades = useMemo(() => trades.filter((t) => t.date === todayISO), [trades, todayISO]);
@@ -1443,8 +1515,36 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                   ))}
                 </div>
                 <Panel>
+                  <Label color={C.cyan}>Milestones</Label>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {badges.map((b) => (
+                      <div key={b.id} title={b.achieved ? "Achieved" : "Not yet achieved"}
+                        style={{
+                          fontSize: 10, letterSpacing: "0.08em", padding: "6px 10px", borderRadius: 4, fontWeight: 600,
+                          border: `1px solid ${b.achieved ? C.borderBright : C.border}`,
+                          color: b.achieved ? C.gold : C.faint,
+                          background: b.achieved ? "rgba(245,200,107,0.1)" : "transparent",
+                          boxShadow: b.achieved ? "0 0 10px rgba(245,200,107,0.25)" : "none",
+                        }}>
+                        {b.label}
+                      </div>
+                    ))}
+                  </div>
+                </Panel>
+                <Panel>
                   <Label color={C.cyan}>Equity curve</Label>
                   <EquityCurve trades={trades} />
+                </Panel>
+                <Panel>
+                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+                    <Label color={C.cyan}>P&L calendar</Label>
+                    <div style={{ display: "flex", gap: 10, fontSize: 10, color: C.faint, alignItems: "center" }}>
+                      <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 9, height: 9, borderRadius: 2, background: "rgba(255,85,102,0.7)", display: "inline-block" }} />LOSS</span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 9, height: 9, borderRadius: 2, background: "rgba(255,255,255,0.045)", border: `1px solid ${C.border}`, display: "inline-block" }} />NONE</span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 9, height: 9, borderRadius: 2, background: "rgba(47,224,138,0.7)", display: "inline-block" }} />WIN</span>
+                    </div>
+                  </div>
+                  <PnlHeatmap trades={trades} />
                 </Panel>
               </React.Fragment>
             )}
