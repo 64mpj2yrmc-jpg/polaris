@@ -1,0 +1,1495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="theme-color" content="#030710" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="POLARIS" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%23030710'/%3E%3Cpath d='M50 12 L57 43 L88 50 L57 57 L50 88 L43 57 L12 50 L43 43 Z' fill='%2300D4FF'/%3E%3C/svg%3E" />
+<title>POLARIS · NQ Trade Systems</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Orbitron:wght@500;700&display=swap');
+  html, body { margin: 0; padding: 0; background: #030710; }
+  * { -webkit-tap-highlight-color: transparent; }
+  input:focus, select:focus, textarea:focus, button:focus-visible { border-color: rgba(0,212,255,0.55) !important; outline: 2px solid rgba(0,212,255,0.3); outline-offset: 0; }
+  select { appearance: none; -webkit-appearance: none; }
+  @keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
+  @keyframes spinrev { from { transform: rotate(360deg);} to { transform: rotate(0deg);} }
+  @keyframes twinkle { 0%,100% { opacity: 0.06; } 50% { opacity: 0.55; } }
+  @keyframes breathe { 0%,100% { opacity: 0.12; } 50% { opacity: 0.55; } }
+  @keyframes sweep { 0% { top: -160px; } 100% { top: 110%; } }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+  @keyframes blink { 0%,49% {opacity:1} 50%,100% {opacity:0} }
+  ::-webkit-scrollbar { height: 6px; width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #0A6E8A; border-radius: 3px; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef } = React;
+
+// ---------- storage shim (localStorage with in-memory fallback) ----------
+const __mem = {};
+const S = {
+  async get(k) {
+    try { const v = localStorage.getItem(k); return v == null ? null : { key: k, value: v }; }
+    catch (e) { return __mem[k] != null ? { key: k, value: __mem[k] } : null; }
+  },
+  async set(k, v) {
+    try { localStorage.setItem(k, v); } catch (e) { __mem[k] = v; }
+    return { key: k, value: v };
+  },
+};
+
+// ---------- constants ----------
+const POINT_VALUE = { NQ: 20, MNQ: 2 };
+const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
+
+const C = {
+  bg: "#030710",
+  panel: "rgba(10, 22, 40, 0.72)",
+  panel2: "#0B1626",
+  border: "rgba(0, 212, 255, 0.22)",
+  borderBright: "rgba(0, 212, 255, 0.55)",
+  cyan: "#00D4FF",
+  cyanDim: "#0A6E8A",
+  gold: "#F5C86B",
+  text: "#DDF3FF",
+  muted: "#6E93AD",
+  faint: "#3A5570",
+  green: "#2FE08A",
+  red: "#FF5566",
+};
+
+const mono = "'IBM Plex Mono', 'Courier New', monospace";
+const disp = "'Orbitron', 'Arial', sans-serif";
+
+// ---------- helpers ----------
+const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
+const fmt$2 = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const pnlColor = (n) => (n > 0 ? C.green : n < 0 ? C.red : C.muted);
+
+function calcPnl(t) {
+  const dir = t.direction === "LONG" ? 1 : -1;
+  return (Number(t.exit) - Number(t.entry)) * dir * POINT_VALUE[t.instrument] * Number(t.contracts);
+}
+function calcPoints(t) {
+  const dir = t.direction === "LONG" ? 1 : -1;
+  return (Number(t.exit) - Number(t.entry)) * dir;
+}
+function computeStats(trades) {
+  if (!trades.length) return null;
+  const pnls = trades.map(calcPnl);
+  const net = pnls.reduce((a, b) => a + b, 0);
+  const wins = pnls.filter((p) => p > 0);
+  const losses = pnls.filter((p) => p < 0);
+  const winRate = (wins.length / trades.length) * 100;
+  const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
+  const avgLoss = losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : 0;
+  const grossW = wins.reduce((a, b) => a + b, 0);
+  const grossL = Math.abs(losses.reduce((a, b) => a + b, 0));
+  const pf = grossL > 0 ? grossW / grossL : grossW > 0 ? Infinity : 0;
+  const expectancy = net / trades.length;
+  let streak = 0;
+  const sorted = [...trades].sort((a, b) => (a.date < b.date ? 1 : -1));
+  for (const t of sorted) {
+    const p = calcPnl(t);
+    if (p === 0) continue;
+    if (streak === 0) streak = p > 0 ? 1 : -1;
+    else if (streak > 0 && p > 0) streak++;
+    else if (streak < 0 && p < 0) streak--;
+    else break;
+  }
+  return { net, winRate, avgWin, avgLoss, pf, expectancy, streak, count: trades.length };
+}
+
+// ---------- market scanner (model: sweep → CISD → FVG retrace → rejection) ----------
+function findSwings(cs, strength) {
+  const highs = [], lows = [];
+  for (let i = strength; i < cs.length - strength; i++) {
+    let isH = true, isL = true;
+    for (let j = 1; j <= strength; j++) {
+      if (cs[i].h <= cs[i - j].h || cs[i].h < cs[i + j].h) isH = false;
+      if (cs[i].l >= cs[i - j].l || cs[i].l > cs[i + j].l) isL = false;
+    }
+    if (isH) highs.push({ i, price: cs[i].h });
+    if (isL) lows.push({ i, price: cs[i].l });
+  }
+  return { highs, lows };
+}
+function cisdTargetBear(cs, idx) {
+  let j = idx;
+  if (cs[j].c <= cs[j].o) j--;
+  let start = -1;
+  while (j >= 0 && cs[j].c > cs[j].o) { start = j; j--; }
+  return start >= 0 ? cs[start].o : cs[idx].l;
+}
+function cisdTargetBull(cs, idx) {
+  let j = idx;
+  if (cs[j].c >= cs[j].o) j--;
+  let start = -1;
+  while (j >= 0 && cs[j].c < cs[j].o) { start = j; j--; }
+  return start >= 0 ? cs[start].o : cs[idx].h;
+}
+function fvgAt(cs, k, dir) {
+  if (k < 2) return null;
+  if (dir === "bear" && cs[k - 2].l > cs[k].h) return { hi: cs[k - 2].l, lo: cs[k].h };
+  if (dir === "bull" && cs[k - 2].h < cs[k].l) return { lo: cs[k - 2].h, hi: cs[k].l };
+  return null;
+}
+function advanceScan(seq, cs, i, swings, emit) {
+  const c = cs[i];
+  if (!seq) {
+    const sweptHigh = swings.highs.filter((s) => s.i < i && c.h > s.price && c.c < s.price).sort((a, b) => b.price - a.price)[0];
+    if (sweptHigh) {
+      emit("sweep", "bear", sweptHigh.price, i);
+      return { dir: "bear", phase: "sweep", level: sweptHigh.price, cisdTarget: cisdTargetBear(cs, i), sweepIdx: i, fvg: null };
+    }
+    const sweptLow = swings.lows.filter((s) => s.i < i && c.l < s.price && c.c > s.price).sort((a, b) => a.price - b.price)[0];
+    if (sweptLow) {
+      emit("sweep", "bull", sweptLow.price, i);
+      return { dir: "bull", phase: "sweep", level: sweptLow.price, cisdTarget: cisdTargetBull(cs, i), sweepIdx: i, fvg: null };
+    }
+    return null;
+  }
+  if (i - seq.sweepIdx > 40) { emit("expired", seq.dir, seq.level, i); return null; }
+  if (seq.dir === "bear") {
+    if (seq.phase === "sweep") {
+      if (c.c > seq.level) { emit("invalidated", "bear", seq.level, i); return null; }
+      if (c.c < seq.cisdTarget) {
+        let f = null;
+        for (let k = i; k > seq.sweepIdx && k >= 2; k--) { const g = fvgAt(cs, k, "bear"); if (g) { f = g; break; } }
+        emit("cisd", "bear", c.c, i);
+        return { ...seq, phase: "cisd", fvg: f };
+      }
+      return seq;
+    }
+    if (seq.phase === "cisd") {
+      if (!seq.fvg) {
+        const g = fvgAt(cs, i, "bear");
+        if (g) return { ...seq, fvg: g };
+        if (c.c > seq.level) { emit("invalidated", "bear", seq.level, i); return null; }
+        return seq;
+      }
+      if (c.c > seq.fvg.hi) { emit("invalidated", "bear", seq.fvg.hi, i); return null; }
+      if (c.h >= seq.fvg.lo) {
+        if (c.c < seq.fvg.lo) { emit("complete", "bear", seq.fvg.lo, i); return null; }
+        emit("retrace", "bear", seq.fvg.lo, i);
+        return { ...seq, phase: "retrace" };
+      }
+      return seq;
+    }
+    if (seq.phase === "retrace") {
+      if (c.c > seq.fvg.hi) { emit("invalidated", "bear", seq.fvg.hi, i); return null; }
+      if (c.c < seq.fvg.lo) { emit("complete", "bear", seq.fvg.lo, i); return null; }
+      return seq;
+    }
+  } else {
+    if (seq.phase === "sweep") {
+      if (c.c < seq.level) { emit("invalidated", "bull", seq.level, i); return null; }
+      if (c.c > seq.cisdTarget) {
+        let f = null;
+        for (let k = i; k > seq.sweepIdx && k >= 2; k--) { const g = fvgAt(cs, k, "bull"); if (g) { f = g; break; } }
+        emit("cisd", "bull", c.c, i);
+        return { ...seq, phase: "cisd", fvg: f };
+      }
+      return seq;
+    }
+    if (seq.phase === "cisd") {
+      if (!seq.fvg) {
+        const g = fvgAt(cs, i, "bull");
+        if (g) return { ...seq, fvg: g };
+        if (c.c < seq.level) { emit("invalidated", "bull", seq.level, i); return null; }
+        return seq;
+      }
+      if (c.c < seq.fvg.lo) { emit("invalidated", "bull", seq.fvg.lo, i); return null; }
+      if (c.l <= seq.fvg.hi) {
+        if (c.c > seq.fvg.hi) { emit("complete", "bull", seq.fvg.hi, i); return null; }
+        emit("retrace", "bull", seq.fvg.hi, i);
+        return { ...seq, phase: "retrace" };
+      }
+      return seq;
+    }
+    if (seq.phase === "retrace") {
+      if (c.c < seq.fvg.lo) { emit("invalidated", "bull", seq.fvg.lo, i); return null; }
+      if (c.c > seq.fvg.hi) { emit("complete", "bull", seq.fvg.hi, i); return null; }
+      return seq;
+    }
+  }
+  return seq;
+}
+function chime(n) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    for (let k = 0; k < (n || 1); k++) {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.frequency.value = 880 + k * 220;
+      const t0 = ctx.currentTime + k * 0.18;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.25, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.5);
+      o.start(t0); o.stop(t0 + 0.55);
+    }
+  } catch (e) {}
+}
+
+// ---------- candle chart ----------
+function CandleChart({ cs, seq }) {
+  const view = cs.slice(-60);
+  if (!view.length)
+    return (
+      <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center", color: C.faint, fontFamily: mono, fontSize: 12 }}>
+        Connect the data feed to render the tape
+      </div>
+    );
+  const w = 600, h = 180, pad = 6;
+  const min = Math.min(...view.map((c) => c.l)), max = Math.max(...view.map((c) => c.h));
+  const range = max - min || 1;
+  const bw = (w - pad * 2) / view.length;
+  const y = (v) => h - pad - ((v - min) / range) * (h - pad * 2);
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: 180, display: "block" }}>
+      {seq && seq.fvg && seq.fvg.hi >= min && seq.fvg.lo <= max && (
+        <rect x={pad} width={w - pad * 2} y={y(Math.min(seq.fvg.hi, max))} height={Math.max(2, y(Math.max(seq.fvg.lo, min)) - y(Math.min(seq.fvg.hi, max)))} fill="rgba(0,212,255,0.1)" stroke={C.border} />
+      )}
+      {seq && seq.level >= min && seq.level <= max && (
+        <line x1={pad} x2={w - pad} y1={y(seq.level)} y2={y(seq.level)} stroke={C.gold} strokeDasharray="4 4" strokeWidth="1" />
+      )}
+      {view.map((c, i) => {
+        const x = pad + i * bw + bw / 2;
+        const up = c.c >= c.o;
+        const col = up ? C.green : C.red;
+        return (
+          <g key={c.t + i}>
+            <line x1={x} x2={x} y1={y(c.h)} y2={y(c.l)} stroke={col} strokeWidth="1" />
+            <rect x={x - bw * 0.3} y={y(Math.max(c.o, c.c))} width={bw * 0.6} height={Math.max(1, Math.abs(y(c.o) - y(c.c)))} fill={col} />
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ---------- UI atoms ----------
+const Label = ({ children, color }) => (
+  <div style={{ fontFamily: mono, fontSize: 10, letterSpacing: "0.14em", color: color || C.muted, textTransform: "uppercase", marginBottom: 6 }}>
+    {children}
+  </div>
+);
+
+const inputStyle = {
+  width: "100%",
+  boxSizing: "border-box",
+  background: "rgba(3, 10, 20, 0.8)",
+  border: `1px solid ${C.border}`,
+  borderRadius: 4,
+  color: C.text,
+  fontFamily: mono,
+  fontSize: 14,
+  padding: "10px 12px",
+  outline: "none",
+};
+
+const Panel = ({ children, style }) => (
+  <div style={{
+    background: "linear-gradient(160deg, rgba(14,30,52,0.78) 0%, rgba(8,18,34,0.72) 55%, rgba(6,14,28,0.78) 100%)",
+    border: `1px solid ${C.border}`,
+    borderRadius: 8,
+    padding: 16,
+    backdropFilter: "blur(6px)",
+    boxShadow: "0 10px 34px rgba(0,0,0,0.45), 0 0 24px rgba(0,212,255,0.05), inset 0 1px 0 rgba(0,212,255,0.12)",
+    ...style,
+  }}>{children}</div>
+);
+
+// ---------- equity curve ----------
+function EquityCurve({ trades }) {
+  const sorted = [...trades].sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : a.id - b.id));
+  let run = 0;
+  const pts = [0, ...sorted.map((t) => (run += calcPnl(t)))];
+  if (pts.length < 2)
+    return (
+      <div style={{ height: 140, display: "flex", alignItems: "center", justifyContent: "center", color: C.faint, fontFamily: mono, fontSize: 12 }}>
+        Log trades to render the equity projection
+      </div>
+    );
+  const w = 600, h = 140, pad = 8;
+  const min = Math.min(...pts, 0), max = Math.max(...pts, 0);
+  const range = max - min || 1;
+  const x = (i) => pad + (i / (pts.length - 1)) * (w - pad * 2);
+  const y = (v) => h - pad - ((v - min) / range) * (h - pad * 2);
+  const path = pts.map((v, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const last = pts[pts.length - 1];
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: 140, display: "block" }}>
+      <defs>
+        <linearGradient id="eqglow" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={C.cyan} stopOpacity="0.25" />
+          <stop offset="100%" stopColor={C.cyan} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <line x1={pad} x2={w - pad} y1={y(0)} y2={y(0)} stroke={C.faint} strokeDasharray="3 4" strokeWidth="1" />
+      <path d={`${path} L ${x(pts.length - 1)},${h - pad} L ${x(0)},${h - pad} Z`} fill="url(#eqglow)" />
+      <path d={path} fill="none" stroke={last >= 0 ? C.cyan : C.red} strokeWidth="2" strokeLinejoin="round" style={{ filter: "drop-shadow(0 0 4px rgba(0,212,255,0.6))" }} />
+      <circle cx={x(pts.length - 1)} cy={y(last)} r="3.5" fill={last >= 0 ? C.cyan : C.red} />
+    </svg>
+  );
+}
+
+// ---------- arc reactor orb ----------
+function Reactor({ state, onClick, size = 150 }) {
+  const core = state === "listening" ? C.gold : state === "thinking" ? C.cyanDim : C.cyan;
+  const spin = state === "thinking" ? "spin 1.2s linear infinite" : "spin 14s linear infinite";
+  const pulse =
+    state === "listening" ? "pulse 0.8s ease-in-out infinite" :
+    state === "speaking" ? "pulse 0.45s ease-in-out infinite" :
+    "pulse 3.2s ease-in-out infinite";
+  return (
+    <button onClick={onClick} aria-label={state === "listening" ? "Stop listening" : "Talk to POLARIS"}
+      style={{ background: "transparent", border: "none", cursor: "pointer", position: "relative", width: size, height: size, padding: 0 }}>
+      <svg viewBox="0 0 200 200" style={{ width: "100%", height: "100%", animation: spin }}>
+        <circle cx="100" cy="100" r="92" fill="none" stroke={C.border} strokeWidth="1" />
+        <circle cx="100" cy="100" r="80" fill="none" stroke={core} strokeWidth="2" strokeDasharray="40 18 8 18" opacity="0.8" />
+        <circle cx="100" cy="100" r="64" fill="none" stroke={core} strokeWidth="1" strokeDasharray="4 8" opacity="0.5" />
+        {[...Array(8)].map((_, i) => {
+          const a = (i / 8) * Math.PI * 2;
+          return (
+            <line key={i}
+              x1={100 + Math.cos(a) * 52} y1={100 + Math.sin(a) * 52}
+              x2={100 + Math.cos(a) * 70} y2={100 + Math.sin(a) * 70}
+              stroke={core} strokeWidth="3" opacity="0.7" />
+          );
+        })}
+      </svg>
+      <div style={{
+        position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
+        width: size * 0.36, height: size * 0.36, borderRadius: "50%",
+        background: `radial-gradient(circle, #fff 0%, ${core} 45%, transparent 75%)`,
+        boxShadow: `0 0 ${size * 0.25}px ${core}`,
+        animation: pulse,
+      }} />
+    </button>
+  );
+}
+
+// ---------- ambient backdrop ----------
+const STARS = Array.from({ length: 80 }, (_, i) => ({
+  x: (i * 137.508) % 100,
+  y: (i * 61.803) % 100,
+  s: 1 + (i % 3),
+  d: 3 + (i % 7),
+  delay: (i % 10) * 0.4,
+}));
+
+function Backdrop() {
+  return (
+    <div aria-hidden="true" style={{ position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none", overflow: "hidden" }}>
+      {/* ambient glows */}
+      <div style={{ position: "absolute", inset: 0, background:
+        "radial-gradient(900px 520px at 50% -8%, rgba(0,212,255,0.10) 0%, transparent 60%)," +
+        "radial-gradient(720px 520px at 106% 112%, rgba(0,110,170,0.13) 0%, transparent 60%)," +
+        "radial-gradient(620px 420px at -6% 102%, rgba(0,212,255,0.06) 0%, transparent 60%)" }} />
+      {/* blueprint grid — fine + major */}
+      <div style={{ position: "absolute", inset: 0, backgroundImage:
+        "linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px)," +
+        "linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px)," +
+        "linear-gradient(rgba(0,212,255,0.055) 1px, transparent 1px)," +
+        "linear-gradient(90deg, rgba(0,212,255,0.055) 1px, transparent 1px)",
+        backgroundSize: "24px 24px, 24px 24px, 120px 120px, 120px 120px" }} />
+      {/* starfield */}
+      {STARS.map((st, i) => (
+        <div key={i} style={{ position: "absolute", left: st.x + "%", top: st.y + "%", width: st.s, height: st.s, borderRadius: "50%", background: "#00D4FF", animation: `twinkle ${st.d}s ease-in-out infinite`, animationDelay: st.delay + "s" }} />
+      ))}
+      {/* large HUD ring — upper right */}
+      <svg viewBox="0 0 400 400" style={{ position: "absolute", width: 560, height: 560, top: -180, right: -170, opacity: 0.16, animation: "spin 90s linear infinite" }}>
+        <circle cx="200" cy="200" r="190" fill="none" stroke="#00D4FF" strokeWidth="1" strokeDasharray="2 6" />
+        <circle cx="200" cy="200" r="160" fill="none" stroke="#00D4FF" strokeWidth="1" strokeDasharray="60 20 10 20" />
+        <circle cx="200" cy="200" r="120" fill="none" stroke="#00D4FF" strokeWidth="0.7" strokeDasharray="4 10" />
+        {[...Array(24)].map((_, i) => {
+          const a = (i / 24) * Math.PI * 2;
+          return <line key={i} x1={200 + Math.cos(a) * 172} y1={200 + Math.sin(a) * 172} x2={200 + Math.cos(a) * 182} y2={200 + Math.sin(a) * 182} stroke="#00D4FF" strokeWidth="1.5" />;
+        })}
+      </svg>
+      {/* large HUD ring — lower left, counter-rotating */}
+      <svg viewBox="0 0 400 400" style={{ position: "absolute", width: 660, height: 660, bottom: -280, left: -240, opacity: 0.11, animation: "spinrev 140s linear infinite" }}>
+        <circle cx="200" cy="200" r="190" fill="none" stroke="#00D4FF" strokeWidth="1" strokeDasharray="40 14 6 14" />
+        <circle cx="200" cy="200" r="150" fill="none" stroke="#00D4FF" strokeWidth="0.7" strokeDasharray="3 9" />
+        <circle cx="200" cy="200" r="100" fill="none" stroke="#00D4FF" strokeWidth="1" strokeDasharray="80 40" />
+        {[...Array(12)].map((_, i) => {
+          const a = (i / 12) * Math.PI * 2;
+          return <line key={i} x1={200 + Math.cos(a) * 140} y1={200 + Math.sin(a) * 140} x2={200 + Math.cos(a) * 148} y2={200 + Math.sin(a) * 148} stroke="#00D4FF" strokeWidth="1.5" />;
+        })}
+      </svg>
+      {/* vertical data filaments */}
+      {[7, 24, 71, 92].map((x, i) => (
+        <div key={i} style={{ position: "absolute", left: x + "%", top: 0, bottom: 0, width: 1, background: "linear-gradient(180deg, transparent, rgba(0,212,255,0.22), transparent)", animation: `breathe ${13 + i * 4}s ease-in-out infinite`, animationDelay: i * 2.5 + "s" }} />
+      ))}
+      {/* radar sweep */}
+      <div style={{ position: "absolute", left: 0, right: 0, top: -160, height: 150, background: "linear-gradient(180deg, transparent, rgba(0,212,255,0.05), transparent)", animation: "sweep 12s linear infinite" }} />
+      {/* corner brackets */}
+      <div style={{ position: "absolute", top: 8, left: 8, width: 34, height: 34, borderStyle: "solid", borderColor: "rgba(0,212,255,0.45)", borderWidth: "1px 0 0 1px" }} />
+      <div style={{ position: "absolute", top: 8, right: 8, width: 34, height: 34, borderStyle: "solid", borderColor: "rgba(0,212,255,0.45)", borderWidth: "1px 1px 0 0" }} />
+      <div style={{ position: "absolute", bottom: 8, left: 8, width: 34, height: 34, borderStyle: "solid", borderColor: "rgba(0,212,255,0.45)", borderWidth: "0 0 1px 1px" }} />
+      <div style={{ position: "absolute", bottom: 8, right: 8, width: 34, height: 34, borderStyle: "solid", borderColor: "rgba(0,212,255,0.45)", borderWidth: "0 1px 1px 0" }} />
+      {/* vignette for depth */}
+      <div style={{ position: "absolute", inset: 0, background: "radial-gradient(130% 110% at 50% 45%, transparent 55%, rgba(0,0,0,0.5) 100%)" }} />
+    </div>
+  );
+}
+
+// ---------- main ----------
+function App() {
+  const [tab, setTab] = useState("POLARIS");
+  const [trades, setTrades] = useState([]);
+  const [toast, setToast] = useState("");
+
+  const blank = {
+    date: new Date().toISOString().slice(0, 10),
+    instrument: "NQ", direction: "LONG", contracts: 1,
+    entry: "", exit: "", stop: "", setup: SETUPS[0], notes: "",
+  };
+  const [form, setForm] = useState(blank);
+  const [risk, setRisk] = useState({ account: "50000", pct: "1", stopPts: "20", instrument: "NQ" });
+
+  // ----- POLARIS state -----
+  const [voiceState, setVoiceState] = useState("idle");
+  const [chat, setChat] = useState([]);
+  const [draft, setDraft] = useState("");
+  const [interim, setInterim] = useState("");
+  const [voiceOut, setVoiceOut] = useState(true);
+  const [speechSupported, setSpeechSupported] = useState(true);
+  const [voiceList, setVoiceList] = useState([]);
+  const [voiceURI, setVoiceURI] = useState("");
+  const recogRef = useRef(null);
+  const chatEndRef = useRef(null);
+  const tradesRef = useRef(trades); tradesRef.current = trades;
+  const chatRef = useRef(chat); chatRef.current = chat;
+  const voiceOutRef = useRef(voiceOut); voiceOutRef.current = voiceOut;
+  const voiceURIRef = useRef(voiceURI); voiceURIRef.current = voiceURI;
+
+  // keys + engine
+  const [anthropicKey, setAnthropicKey] = useState("");
+  const [engine, setEngine] = useState("device");
+  const [elKey, setElKey] = useState("");
+  const [elVoices, setElVoices] = useState([]);
+  const [elVoiceId, setElVoiceId] = useState("");
+  const [elStatus, setElStatus] = useState("");
+  const anthropicKeyRef = useRef(anthropicKey); anthropicKeyRef.current = anthropicKey;
+  const engineRef = useRef(engine); engineRef.current = engine;
+  const elKeyRef = useRef(elKey); elKeyRef.current = elKey;
+  const elVoiceIdRef = useRef(elVoiceId); elVoiceIdRef.current = elVoiceId;
+  const audioRef = useRef(null);
+
+  // market + scanner
+  const [tdKey, setTdKey] = useState("");
+  const [symbol, setSymbol] = useState("QQQ");
+  const [tf, setTf] = useState("5min");
+  const [candles, setCandles] = useState([]);
+  const [dayInfo, setDayInfo] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanEvents, setScanEvents] = useState([]);
+  const [seqView, setSeqView] = useState(null);
+  const [mktStatus, setMktStatus] = useState("");
+  const tdKeyRef = useRef(tdKey); tdKeyRef.current = tdKey;
+  const symbolRef = useRef(symbol); symbolRef.current = symbol;
+  const tfRef = useRef(tf); tfRef.current = tf;
+  const scanningRef = useRef(scanning); scanningRef.current = scanning;
+  const candlesRef = useRef(candles); candlesRef.current = candles;
+  const dayInfoRef = useRef(dayInfo); dayInfoRef.current = dayInfo;
+  const scanEventsRef = useRef(scanEvents); scanEventsRef.current = scanEvents;
+  const seqRef = useRef(null);
+  const processedRef = useRef(null);
+
+  function rankVoices(vs) {
+    const score = (v) =>
+      (/premium/i.test(v.name) ? 10 : 0) +
+      (/enhanced|natural|neural/i.test(v.name) ? 8 : 0) +
+      (/Google|Microsoft/i.test(v.name) ? 4 : 0) +
+      (/en-GB/i.test(v.lang) ? 2 : 0) +
+      (/Daniel|Arthur|Oliver|James|Ryan|Guy/i.test(v.name) ? 2 : 0) -
+      (/compact|whisper|novelty|bells|bad news|zarvox|trinoids/i.test(v.name) ? 20 : 0);
+    return vs.filter((v) => v.lang && v.lang.toLowerCase().startsWith("en")).sort((a, b) => score(b) - score(a));
+  }
+
+  useEffect(() => {
+    (async () => {
+      try { const r = await S.get("nq-trades"); if (r && r.value) setTrades(JSON.parse(r.value)); } catch (e) {}
+      try { const v = await S.get("polaris-voice"); if (v && v.value) setVoiceURI(v.value); } catch (e) {}
+      try { const a = await S.get("polaris-anthropic-key"); if (a && a.value) setAnthropicKey(a.value); } catch (e) {}
+      try {
+        const el = await S.get("polaris-elevenlabs");
+        if (el && el.value) {
+          const cfg = JSON.parse(el.value);
+          if (cfg.key) setElKey(cfg.key);
+          if (cfg.voiceId) setElVoiceId(cfg.voiceId);
+          if (cfg.engine) setEngine(cfg.engine);
+          if (cfg.voices) setElVoices(cfg.voices);
+        }
+      } catch (e) {}
+      try { const k = await S.get("polaris-tdkey"); if (k && k.value) setTdKey(k.value); } catch (e) {}
+    })();
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) setSpeechSupported(false);
+    const loadVoices = () => {
+      if (!window.speechSynthesis) return;
+      const ranked = rankVoices(window.speechSynthesis.getVoices() || []);
+      setVoiceList(ranked);
+      setVoiceURI((cur) => cur || (ranked[0] ? ranked[0].voiceURI : ""));
+    };
+    loadVoices();
+    if (window.speechSynthesis && window.speechSynthesis.addEventListener) {
+      window.speechSynthesis.addEventListener("voiceschanged", loadVoices);
+      return () => window.speechSynthesis.removeEventListener("voiceschanged", loadVoices);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+  }, [chat, interim, voiceState]);
+
+  async function persist(next) {
+    setTrades(next);
+    try { await S.set("nq-trades", JSON.stringify(next)); } catch (e) { flash("Save failed"); }
+  }
+  function flash(msg) { setToast(msg); setTimeout(() => setToast(""), 2500); }
+
+  async function saveAnthropicKey(k) {
+    setAnthropicKey(k);
+    try { await S.set("polaris-anthropic-key", k); } catch (e) {}
+  }
+  async function pickVoice(uri) {
+    setVoiceURI(uri);
+    try { await S.set("polaris-voice", uri); } catch (e) {}
+  }
+  async function saveElConfig(next) {
+    try {
+      await S.set("polaris-elevenlabs", JSON.stringify({
+        key: next.key !== undefined ? next.key : elKeyRef.current,
+        voiceId: next.voiceId !== undefined ? next.voiceId : elVoiceIdRef.current,
+        engine: next.engine !== undefined ? next.engine : engineRef.current,
+        voices: next.voices !== undefined ? next.voices : elVoices,
+      }));
+    } catch (e) {}
+  }
+
+  function addTrade() {
+    if (form.entry === "" || form.exit === "" || !form.contracts) { flash("Entry, exit, and contracts are required"); return; }
+    const t = { ...form, id: Date.now(), contracts: Number(form.contracts) };
+    persist([t, ...trades]);
+    setForm({ ...blank, date: form.date, instrument: form.instrument });
+    flash("Trade logged");
+  }
+  function deleteTrade(id) { persist(trades.filter((t) => t.id !== id)); }
+
+  const stats = useMemo(() => computeStats(trades), [trades]);
+  const livePnl = form.entry !== "" && form.exit !== "" && form.contracts ? calcPnl(form) : null;
+
+  const acct = Number(risk.account) || 0;
+  const riskDollars = acct * ((Number(risk.pct) || 0) / 100);
+  const perContractRisk = (Number(risk.stopPts) || 0) * POINT_VALUE[risk.instrument];
+  const maxContracts = perContractRisk > 0 ? Math.floor(riskDollars / perContractRisk) : 0;
+
+  // ---------- voice engines ----------
+  async function loadElVoices() {
+    const key = elKeyRef.current.trim();
+    if (!key) { setElStatus("Paste your ElevenLabs API key first"); return; }
+    setElStatus("Loading voices…");
+    try {
+      const res = await fetch("https://api.elevenlabs.io/v1/voices", { headers: { "xi-api-key": key } });
+      if (!res.ok) throw new Error("bad key");
+      const data = await res.json();
+      const vs = (data.voices || []).map((v) => ({ id: v.voice_id, name: v.name }));
+      if (!vs.length) { setElStatus("Key works, but no voices in your account — add some from the Voice Library on elevenlabs.io"); return; }
+      setElVoices(vs);
+      const pick = elVoiceIdRef.current || vs[0].id;
+      setElVoiceId(pick);
+      setElStatus(vs.length + " voices loaded");
+      saveElConfig({ key, voiceId: pick, voices: vs });
+    } catch (e) {
+      setElStatus("Couldn't load voices — check the API key");
+    }
+  }
+
+  function speakDevice(text) {
+    if (!window.speechSynthesis) { setVoiceState("idle"); return; }
+    try {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      const all = window.speechSynthesis.getVoices();
+      const chosen = all.find((v) => v.voiceURI === voiceURIRef.current) || rankVoices(all)[0] || null;
+      if (chosen) u.voice = chosen;
+      u.rate = 1.0;
+      u.pitch = 1.0;
+      u.onstart = () => setVoiceState("speaking");
+      u.onend = () => setVoiceState("idle");
+      u.onerror = () => setVoiceState("idle");
+      window.speechSynthesis.speak(u);
+    } catch (e) { setVoiceState("idle"); }
+  }
+
+  async function speakEleven(text) {
+    const key = elKeyRef.current.trim();
+    const voiceId = elVoiceIdRef.current;
+    if (!key || !voiceId) { speakDevice(text); return; }
+    setVoiceState("speaking");
+    try {
+      const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`, {
+        method: "POST",
+        headers: { "xi-api-key": key, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text,
+          model_id: "eleven_turbo_v2_5",
+          voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+        }),
+      });
+      if (!res.ok) throw new Error("tts failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.onended = () => { setVoiceState("idle"); URL.revokeObjectURL(url); };
+      audio.onerror = () => { setVoiceState("idle"); URL.revokeObjectURL(url); };
+      await audio.play();
+    } catch (e) {
+      setElStatus("ElevenLabs playback failed — using device voice");
+      speakDevice(text);
+    }
+  }
+
+  function speak(text) {
+    if (!voiceOutRef.current) { setVoiceState("idle"); return; }
+    if (engineRef.current === "elevenlabs") speakEleven(text);
+    else speakDevice(text);
+  }
+
+  function stopSpeaking() {
+    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+    try { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } } catch (e) {}
+    setVoiceState("idle");
+  }
+
+  function toggleListening() {
+    if (voiceState === "speaking") { stopSpeaking(); return; }
+    if (voiceState === "listening") {
+      try { recogRef.current && recogRef.current.stop(); } catch (e) {}
+      return;
+    }
+    if (voiceState === "thinking") return;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { flash("Voice input isn't supported in this browser — type below"); return; }
+    try {
+      const rec = new SR();
+      recogRef.current = rec;
+      rec.lang = "en-US";
+      rec.interimResults = true;
+      rec.continuous = false;
+      let finalText = "";
+      rec.onresult = (e) => {
+        let interimText = "";
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const txt = e.results[i][0].transcript;
+          if (e.results[i].isFinal) finalText += txt;
+          else interimText += txt;
+        }
+        setInterim(interimText || finalText);
+      };
+      rec.onend = () => {
+        setInterim("");
+        if (finalText.trim()) sendToPolaris(finalText.trim());
+        else setVoiceState("idle");
+      };
+      rec.onerror = () => { setInterim(""); setVoiceState("idle"); flash("Mic error — check microphone permission"); };
+      rec.start();
+      setVoiceState("listening");
+    } catch (e) { flash("Couldn't start the mic"); setVoiceState("idle"); }
+  }
+
+  // ---------- backup / restore ----------
+  function download(name, text, type) {
+    const blob = new Blob([text], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 500);
+  }
+  function exportJSON() {
+    if (!trades.length) { flash("No trades to back up yet"); return; }
+    download(
+      `polaris-backup-${new Date().toISOString().slice(0, 10)}.json`,
+      JSON.stringify({ app: "polaris", exportedAt: new Date().toISOString(), trades }, null, 2),
+      "application/json"
+    );
+    flash("Backup exported — " + trades.length + " trades");
+  }
+  function exportCSV() {
+    if (!trades.length) { flash("No trades to export yet"); return; }
+    const esc = (s) => '"' + String(s == null ? "" : s).replace(/"/g, '""') + '"';
+    const rows = [["date", "instrument", "direction", "contracts", "entry", "exit", "stop", "setup", "points", "pnl", "notes"].join(",")];
+    [...trades].sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((t) =>
+      rows.push([t.date, t.instrument, t.direction, t.contracts, t.entry, t.exit, t.stop || "", esc(t.setup), calcPoints(t).toFixed(2), calcPnl(t).toFixed(2), esc(t.notes || "")].join(","))
+    );
+    download(`polaris-trades-${new Date().toISOString().slice(0, 10)}.csv`, rows.join("\n"), "text/csv");
+    flash("CSV exported");
+  }
+  function importJSON(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        const incoming = Array.isArray(data) ? data : data.trades;
+        if (!Array.isArray(incoming)) throw new Error("bad format");
+        const map = new Map(trades.map((t) => [t.id, t]));
+        let added = 0;
+        incoming.forEach((t) => {
+          if (t && t.id != null && t.entry != null && !map.has(t.id)) { map.set(t.id, t); added++; }
+        });
+        const merged = [...map.values()].sort((a, b) => b.id - a.id);
+        persist(merged);
+        flash(added + " trades restored — " + merged.length + " total in the book");
+      } catch (err) { flash("Couldn't read that backup file"); }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  // ---------- market data + scanner ----------
+  async function saveTdKey(k) {
+    setTdKey(k);
+    try { await S.set("polaris-tdkey", k); } catch (e) {}
+  }
+
+  function addScanEvent(ev) {
+    setScanEvents((prev) => [ev, ...prev].slice(0, 30));
+  }
+
+  function runScanner(cs, silent) {
+    if (cs.length < 20) return;
+    const swings = findSwings(cs, 3);
+    let startIdx = 5;
+    if (processedRef.current) {
+      const idx = cs.findIndex((c) => c.t === processedRef.current);
+      startIdx = idx >= 0 ? idx + 1 : Math.max(5, cs.length - 3);
+    }
+    const emit = (type, dir, price, i) => {
+      const dirWord = dir === "bear" ? "bearish" : "bullish";
+      const msgs = {
+        sweep: `${dir === "bear" ? "Buy-side" : "Sell-side"} liquidity swept at ${price.toFixed(2)} — watching for a shift in delivery`,
+        cisd: `Change in the state of delivery confirmed — ${dirWord}`,
+        retrace: `Price retracing into the ${dirWord} imbalance`,
+        complete: `SETUP COMPLETE — ${dirWord} model: sweep, shift, and rejection from the imbalance at ${price.toFixed(2)}`,
+        invalidated: `${dirWord} sequence invalidated — closed through the level`,
+        expired: `${dirWord} sequence expired without completing`,
+      };
+      addScanEvent({ time: cs[i].t, type, dir, msg: msgs[type] });
+      if (!silent && scanningRef.current) {
+        if (type === "complete") { chime(3); speak(`Sir, your setup is complete on ${symbolRef.current}. The ${dirWord} model delivered: sweep, shift, and rejection from the imbalance.`); }
+        else if (type === "sweep" || type === "cisd" || type === "retrace") { chime(1); speak(msgs[type]); }
+      }
+    };
+    for (let i = startIdx; i < cs.length; i++) {
+      seqRef.current = advanceScan(seqRef.current, cs, i, swings, emit);
+    }
+    setSeqView(seqRef.current);
+    processedRef.current = cs[cs.length - 1].t;
+  }
+
+  async function fetchIntraday(silent) {
+    const key = tdKeyRef.current.trim();
+    if (!key) { setMktStatus("Add a Twelve Data API key in SETUP"); return; }
+    try {
+      const res = await fetch(`https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbolRef.current)}&interval=${tfRef.current}&outputsize=160&apikey=${key}`);
+      const data = await res.json();
+      if (!data.values) throw new Error(data.message || "no data returned");
+      const cs = data.values.map((v) => ({ t: v.datetime, o: +v.open, h: +v.high, l: +v.low, c: +v.close })).reverse();
+      const closed = cs.slice(0, -1);
+      setCandles(closed);
+      setMktStatus("Updated " + new Date().toLocaleTimeString());
+      runScanner(closed, silent);
+    } catch (e) {
+      setMktStatus("Feed error: " + (e.message || "check key and symbol"));
+    }
+  }
+
+  async function fetchDaily() {
+    const key = tdKeyRef.current.trim();
+    if (!key) return;
+    try {
+      const res = await fetch(`https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbolRef.current)}&interval=1day&outputsize=8&apikey=${key}`);
+      const data = await res.json();
+      if (!data.values) return;
+      const d = data.values.map((v) => ({ t: v.datetime, c: +v.close })).reverse();
+      const last = d[d.length - 1], prev = d[d.length - 2], wk = d[Math.max(0, d.length - 6)];
+      setDayInfo({
+        prevClose: prev ? prev.c : last.c,
+        weekAgo: wk ? wk.c : last.c,
+        asOf: last.t,
+      });
+    } catch (e) {}
+  }
+
+  function toggleScan() {
+    if (!scanning) {
+      if (!tdKey.trim()) { flash("Add a Twelve Data key in SETUP first"); setTab("SETUP"); return; }
+      seqRef.current = null;
+      processedRef.current = null;
+      setSeqView(null);
+      chime(1);
+    }
+    setScanning((s) => !s);
+  }
+
+  useEffect(() => {
+    if (!scanning) return;
+    fetchDaily();
+    fetchIntraday(true); // first pass backfills history silently
+    const id = setInterval(() => fetchIntraday(false), 60000);
+    return () => clearInterval(id);
+  }, [scanning, symbol, tf]);
+
+  const lastPx = candles.length ? candles[candles.length - 1].c : null;
+  const dayPct = lastPx && dayInfo ? ((lastPx - dayInfo.prevClose) / dayInfo.prevClose) * 100 : null;
+  const weekPct = lastPx && dayInfo ? ((lastPx - dayInfo.weekAgo) / dayInfo.weekAgo) * 100 : null;
+
+  function buildSystemPrompt() {
+    const t = tradesRef.current;
+    const s = computeStats(t);
+    const recent = t.slice(0, 25).map((x) => ({
+      date: x.date, inst: x.instrument, dir: x.direction, qty: x.contracts,
+      entry: x.entry, exit: x.exit, setup: x.setup,
+      pts: +calcPoints(x).toFixed(2), pnl: +calcPnl(x).toFixed(2), notes: x.notes || "",
+    }));
+    return `You are POLARIS, the AI copilot embedded in Landen's NQ futures trading command center — named for the north star: the fixed point a navigator steers by. Personality: calm, dry British wit, unfailingly composed, loyal but honest — you address him as "sir" occasionally, never obsequiously. Your job is to keep him oriented to his process when the market pulls him off course, and you will push back plainly when the data warrants it.
+
+You can discuss anything he brings up — trading, markets concepts, life, mindset, discipline — but your specialty is his trading operation.
+
+LIVE JOURNAL DATA:
+${s ? `Stats: ${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, avg win ${fmt$(s.avgWin)}, avg loss ${fmt$(s.avgLoss)}, profit factor ${s.pf === Infinity ? "inf" : s.pf.toFixed(2)}, expectancy ${fmt$(s.expectancy)}/trade, current streak ${s.streak}.` : "No trades logged yet."}
+Recent trades (newest first): ${JSON.stringify(recent)}
+
+Contract reference: NQ = $20/point, MNQ = $2/point, tick 0.25.
+
+MARKET FEED (${symbolRef.current} as the NQ proxy — moves directionally with NQ):
+${candlesRef.current.length ? `Last ${candlesRef.current[candlesRef.current.length - 1].c}${dayInfoRef.current ? `, day ${(((candlesRef.current[candlesRef.current.length - 1].c - dayInfoRef.current.prevClose) / dayInfoRef.current.prevClose) * 100).toFixed(2)}%, week ${(((candlesRef.current[candlesRef.current.length - 1].c - dayInfoRef.current.weekAgo) / dayInfoRef.current.weekAgo) * 100).toFixed(2)}%` : ""}. Recent candles (${tfRef.current}, oldest→newest): ${JSON.stringify(candlesRef.current.slice(-20).map((c) => ({ t: c.t.slice(11, 16) || c.t, o: c.o, h: c.h, l: c.l, c: c.c })))}` : "Not connected — the feed starts when the scanner runs on the MARKET tab."}
+Scanner (his model: liquidity sweep → change in state of delivery → retrace into imbalance → rejection): ${scanningRef.current ? "ACTIVE" : "off"}. Recent events: ${scanEventsRef.current.length ? scanEventsRef.current.slice(0, 6).map((e) => `[${e.time}] ${e.msg}`).join(" | ") : "none yet"}.
+When he asks what the market is doing, describe it from this data plainly — direction, range, notable candles — without predicting what comes next.
+
+Hard rules:
+- Never predict price direction, give trade signals, or tell him to enter/exit a position. Analyze HIS data and process; frame market talk as education.
+- No financial advice; you are an analysis and accountability system.
+- Responses are SPOKEN ALOUD: keep them under 120 words, plain text, no markdown, no lists, no symbols. Conversational sentences only.
+- Reference his actual numbers when relevant.`;
+  }
+
+  async function sendToPolaris(text) {
+    const key = anthropicKeyRef.current.trim();
+    const history = [...chatRef.current, { role: "user", content: text }];
+    setChat(history);
+    if (!key) {
+      const msg = "I need an Anthropic API key to think, sir. Add one in the SETUP tab.";
+      setChat([...history, { role: "assistant", content: msg }]);
+      setVoiceState("idle");
+      return;
+    }
+    setVoiceState("thinking");
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": key,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1000,
+          system: buildSystemPrompt(),
+          messages: history.slice(-16).map((m) => ({ role: m.role, content: m.content })),
+        }),
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        const detail = errBody && errBody.error && errBody.error.message ? errBody.error.message : "HTTP " + res.status;
+        throw new Error(detail);
+      }
+      const data = await res.json();
+      const reply = (data.content || []).map((b) => b.text || "").join(" ").trim() || "I seem to have lost my train of thought, sir. Try again.";
+      setChat([...history, { role: "assistant", content: reply }]);
+      speak(reply);
+      if (!voiceOutRef.current) setVoiceState("idle");
+    } catch (e) {
+      const err = "Mainframe error: " + (e.message || "connection failed") + ". Check the API key in SETUP.";
+      setChat([...history, { role: "assistant", content: err }]);
+      setVoiceState("idle");
+    }
+  }
+
+  function sendDraft() {
+    const t = draft.trim();
+    if (!t || voiceState === "thinking") return;
+    setDraft("");
+    sendToPolaris(t);
+  }
+
+  const statusLine = {
+    idle: "STANDING BY — TAP THE CORE TO SPEAK",
+    listening: "LISTENING…",
+    thinking: "PROCESSING…",
+    speaking: "SPEAKING — TAP TO INTERRUPT",
+  }[voiceState];
+
+  const tabs = ["POLARIS", "MARKET", "DESK", "LOG", "JOURNAL", "RISK", "SETUP"];
+
+  return (
+    <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 700px at 50% -10%, #06182B 0%, ${C.bg} 55%)`, color: C.text, fontFamily: mono }}>
+      <Backdrop />
+      {/* status bar */}
+      <div style={{ borderBottom: `1px solid ${C.border}`, background: "rgba(5,14,26,0.85)", padding: "10px 16px", display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", position: "sticky", top: 0, zIndex: 5, backdropFilter: "blur(8px)" }}>
+        <span style={{ fontFamily: disp, fontWeight: 700, fontSize: 19, letterSpacing: "0.22em", color: C.cyan, textShadow: `0 0 14px rgba(0,212,255,0.6)` }}>
+          POLARIS
+        </span>
+        <span style={{ fontSize: 10, color: C.faint, letterSpacing: "0.1em" }}>NQ TRADE SYSTEMS · {new Date().toDateString().toUpperCase()}</span>
+        <span style={{ marginLeft: "auto", fontSize: 13, color: stats ? pnlColor(stats.net) : C.muted }}>
+          NET {stats ? fmt$(stats.net) : "$0"}
+          <span style={{ color: C.cyan, animation: "blink 1.2s step-end infinite" }}>▌</span>
+        </span>
+      </div>
+
+      {/* tabs */}
+      <div style={{ display: "flex", gap: 4, padding: "10px 12px", overflowX: "auto", borderBottom: `1px solid ${C.border}`, position: "relative", zIndex: 1 }}>
+        {tabs.map((t) => (
+          <button key={t} onClick={() => setTab(t)}
+            style={{
+              fontFamily: mono, fontSize: 12, letterSpacing: "0.12em", padding: "8px 14px",
+              background: tab === t ? "rgba(0,212,255,0.14)" : "transparent",
+              color: tab === t ? C.cyan : C.muted,
+              border: `1px solid ${tab === t ? C.borderBright : C.border}`,
+              borderRadius: 4, cursor: "pointer", fontWeight: 600, whiteSpace: "nowrap",
+              boxShadow: tab === t ? "0 0 12px rgba(0,212,255,0.25)" : "none",
+            }}>
+            {t}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ maxWidth: 1080, margin: "0 auto", padding: 16, display: "flex", flexDirection: "column", gap: 14, position: "relative", zIndex: 1 }}>
+        {toast && (
+          <div style={{ background: C.panel2, border: `1px solid ${C.gold}`, color: C.gold, padding: "8px 12px", borderRadius: 4, fontSize: 12 }}>
+            {toast}
+          </div>
+        )}
+
+        {/* ================= POLARIS ================= */}
+        {tab === "POLARIS" && (
+          <React.Fragment>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "14px 0 4px" }}>
+              <Reactor state={voiceState} onClick={toggleListening} />
+              <div style={{ marginTop: 10, fontSize: 11, letterSpacing: "0.18em", color: voiceState === "listening" ? C.gold : C.cyan, textTransform: "uppercase" }}>
+                {statusLine}
+              </div>
+              {interim && (
+                <div style={{ marginTop: 8, fontSize: 13, color: C.gold, fontStyle: "italic", textAlign: "center", padding: "0 20px" }}>
+                  “{interim}”
+                </div>
+              )}
+              {!speechSupported && (
+                <div style={{ marginTop: 8, fontSize: 11, color: C.muted, textAlign: "center", padding: "0 20px" }}>
+                  Voice input isn't available in this browser — type below and I'll still answer out loud.
+                </div>
+              )}
+            </div>
+
+            {/* transcript */}
+            <Panel style={{ maxHeight: 320, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}>
+              {!chat.length && (
+                <div style={{ color: C.faint, fontSize: 12, textAlign: "center", padding: 16, lineHeight: 1.7 }}>
+                  Good {new Date().getHours() < 12 ? "morning" : new Date().getHours() < 18 ? "afternoon" : "evening"}, sir. All systems online.<br />
+                  {anthropicKey ? "Ask about your stats, review a trade, or talk through the plan for the session." : "Add your Anthropic API key in the SETUP tab so I can think."}
+                </div>
+              )}
+              {chat.map((m, i) => (
+                <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "88%" }}>
+                  <div style={{ fontSize: 9, letterSpacing: "0.14em", color: m.role === "user" ? C.gold : C.cyan, marginBottom: 3, textAlign: m.role === "user" ? "right" : "left" }}>
+                    {m.role === "user" ? "LANDEN" : "POLARIS"}
+                  </div>
+                  <div style={{
+                    fontSize: 13, lineHeight: 1.6, padding: "10px 12px", borderRadius: 8,
+                    background: m.role === "user" ? "rgba(245,200,107,0.08)" : "rgba(0,212,255,0.07)",
+                    border: `1px solid ${m.role === "user" ? "rgba(245,200,107,0.25)" : C.border}`,
+                    whiteSpace: "pre-wrap",
+                  }}>
+                    {m.content}
+                  </div>
+                </div>
+              ))}
+              {voiceState === "thinking" && (
+                <div style={{ alignSelf: "flex-start", fontSize: 12, color: C.cyan, animation: "pulse 1s ease-in-out infinite" }}>
+                  ◈ processing…
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </Panel>
+
+            {/* text input */}
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") sendDraft(); }}
+                placeholder="Or type to POLARIS…"
+                style={{ ...inputStyle, flex: 1 }}
+              />
+              <button onClick={sendDraft} disabled={voiceState === "thinking"}
+                style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "0 18px", fontFamily: mono, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+                SEND
+              </button>
+            </div>
+            <div style={{ fontSize: 10, color: C.faint, lineHeight: 1.6 }}>
+              POLARIS analyzes your journal and process — educational, not financial advice, and never trade signals. Voice and API settings live in SETUP.
+            </div>
+          </React.Fragment>
+        )}
+
+        {/* ================= DESK ================= */}
+        {tab === "DESK" && (
+          <React.Fragment>
+            {!stats ? (
+              <Panel>
+                <div style={{ textAlign: "center", padding: "30px 10px" }}>
+                  <div style={{ fontFamily: disp, fontSize: 20, fontWeight: 700, color: C.cyan, marginBottom: 8, letterSpacing: "0.1em" }}>EMPTY BOOK</div>
+                  <div style={{ color: C.muted, fontSize: 13, marginBottom: 18 }}>Log your first NQ trade to bring the desk online.</div>
+                  <button onClick={() => setTab("LOG")} style={{ background: C.cyan, color: "#04121C", border: "none", borderRadius: 4, padding: "12px 22px", fontFamily: mono, fontWeight: 600, fontSize: 13, letterSpacing: "0.08em", cursor: "pointer" }}>
+                    LOG A TRADE
+                  </button>
+                </div>
+              </Panel>
+            ) : (
+              <React.Fragment>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+                  {[
+                    ["NET P&L", fmt$(stats.net), pnlColor(stats.net)],
+                    ["WIN RATE", stats.winRate.toFixed(1) + "%", stats.winRate >= 50 ? C.green : C.gold],
+                    ["PROFIT FACTOR", stats.pf === Infinity ? "∞" : stats.pf.toFixed(2), stats.pf >= 1.5 ? C.green : stats.pf >= 1 ? C.gold : C.red],
+                    ["EXPECTANCY", fmt$(stats.expectancy) + "/trade", pnlColor(stats.expectancy)],
+                    ["AVG WIN", fmt$(stats.avgWin), C.green],
+                    ["AVG LOSS", fmt$(stats.avgLoss), C.red],
+                    ["STREAK", (stats.streak > 0 ? "+" : "") + stats.streak, pnlColor(stats.streak)],
+                    ["TRADES", String(stats.count), C.text],
+                  ].map(([l, v, col]) => (
+                    <Panel key={l} style={{ padding: "12px 14px" }}>
+                      <Label>{l}</Label>
+                      <div style={{ fontSize: 20, fontWeight: 600, color: col }}>{v}</div>
+                    </Panel>
+                  ))}
+                </div>
+                <Panel>
+                  <Label color={C.cyan}>Equity curve</Label>
+                  <EquityCurve trades={trades} />
+                </Panel>
+              </React.Fragment>
+            )}
+          </React.Fragment>
+        )}
+
+        {/* ================= LOG ================= */}
+        {tab === "LOG" && (
+          <Panel>
+            <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 14 }}>ORDER TICKET · JOURNAL ENTRY</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <Label>Date</Label>
+                <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} style={inputStyle} />
+              </div>
+              <div>
+                <Label>Instrument</Label>
+                <select value={form.instrument} onChange={(e) => setForm({ ...form, instrument: e.target.value })} style={inputStyle}>
+                  <option value="NQ">NQ ($20/pt)</option>
+                  <option value="MNQ">MNQ ($2/pt)</option>
+                </select>
+              </div>
+              <div>
+                <Label>Direction</Label>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {["LONG", "SHORT"].map((d) => (
+                    <button key={d} onClick={() => setForm({ ...form, direction: d })}
+                      style={{ flex: 1, padding: "10px 0", fontFamily: mono, fontSize: 13, fontWeight: 600, borderRadius: 4, cursor: "pointer",
+                        background: form.direction === d ? (d === "LONG" ? C.green : C.red) : "rgba(3,10,20,0.8)",
+                        color: form.direction === d ? "#04121C" : C.muted,
+                        border: `1px solid ${form.direction === d ? "transparent" : C.border}` }}>
+                      {d}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <Label>Contracts</Label>
+                <input type="number" min="1" value={form.contracts} onChange={(e) => setForm({ ...form, contracts: e.target.value })} style={inputStyle} />
+              </div>
+              <div>
+                <Label>Entry price</Label>
+                <input type="number" step="0.25" placeholder="21540.25" value={form.entry} onChange={(e) => setForm({ ...form, entry: e.target.value })} style={inputStyle} />
+              </div>
+              <div>
+                <Label>Exit price</Label>
+                <input type="number" step="0.25" placeholder="21582.50" value={form.exit} onChange={(e) => setForm({ ...form, exit: e.target.value })} style={inputStyle} />
+              </div>
+              <div>
+                <Label>Stop (optional)</Label>
+                <input type="number" step="0.25" placeholder="21520.00" value={form.stop} onChange={(e) => setForm({ ...form, stop: e.target.value })} style={inputStyle} />
+              </div>
+              <div>
+                <Label>Setup</Label>
+                <select value={form.setup} onChange={(e) => setForm({ ...form, setup: e.target.value })} style={inputStyle}>
+                  {SETUPS.map((s) => <option key={s}>{s}</option>)}
+                </select>
+              </div>
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <Label>Notes — what you saw, how you felt, what you'd repeat or change</Label>
+              <textarea rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} style={{ ...inputStyle, resize: "vertical" }} />
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 16, flexWrap: "wrap" }}>
+              <button onClick={addTrade} style={{ background: C.cyan, color: "#04121C", border: "none", borderRadius: 4, padding: "12px 24px", fontFamily: mono, fontWeight: 600, fontSize: 13, letterSpacing: "0.08em", cursor: "pointer", boxShadow: "0 0 16px rgba(0,212,255,0.35)" }}>
+                LOG TRADE
+              </button>
+              {livePnl !== null && (
+                <span style={{ fontSize: 16, fontWeight: 600, color: pnlColor(livePnl) }}>
+                  {fmt$2(livePnl)} <span style={{ color: C.faint, fontSize: 12 }}>({calcPoints(form).toFixed(2)} pts)</span>
+                </span>
+              )}
+            </div>
+          </Panel>
+        )}
+
+        {/* ================= JOURNAL ================= */}
+        {tab === "JOURNAL" && (
+          <React.Fragment>
+            {!trades.length ? (
+              <Panel><div style={{ color: C.muted, fontSize: 13, textAlign: "center", padding: 20 }}>No trades on record. The LOG tab is where the book begins.</div></Panel>
+            ) : (
+              trades.map((t) => {
+                const p = calcPnl(t);
+                return (
+                  <Panel key={t.id} style={{ padding: "12px 14px" }}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+                      <span style={{ color: C.faint, fontSize: 11 }}>{t.date}</span>
+                      <span style={{ fontWeight: 600, fontSize: 13, color: t.direction === "LONG" ? C.green : C.red }}>{t.direction}</span>
+                      <span style={{ fontSize: 13 }}>{t.contracts}× {t.instrument}</span>
+                      <span style={{ fontSize: 12, color: C.muted }}>{t.entry} → {t.exit}</span>
+                      <span style={{ marginLeft: "auto", fontWeight: 600, fontSize: 15, color: pnlColor(p) }}>{fmt$2(p)}</span>
+                    </div>
+                    <div style={{ display: "flex", gap: 10, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 10, letterSpacing: "0.1em", color: C.cyan, border: `1px solid ${C.border}`, borderRadius: 3, padding: "2px 8px" }}>{t.setup.toUpperCase()}</span>
+                      {t.notes && <span style={{ fontSize: 12, color: C.muted, flex: 1 }}>{t.notes}</span>}
+                      <button onClick={() => deleteTrade(t.id)} style={{ background: "transparent", border: "none", color: C.faint, fontFamily: mono, fontSize: 11, cursor: "pointer" }}>
+                        DELETE
+                      </button>
+                    </div>
+                  </Panel>
+                );
+              })
+            )}
+          </React.Fragment>
+        )}
+
+        {/* ================= RISK ================= */}
+        {tab === "RISK" && (
+          <Panel>
+            <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>POSITION SIZER</div>
+            <div style={{ color: C.muted, fontSize: 12, marginBottom: 14 }}>Know your size before you click. Non-negotiable.</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <Label>Account size ($)</Label>
+                <input type="number" value={risk.account} onChange={(e) => setRisk({ ...risk, account: e.target.value })} style={inputStyle} />
+              </div>
+              <div>
+                <Label>Risk per trade (%)</Label>
+                <input type="number" step="0.25" value={risk.pct} onChange={(e) => setRisk({ ...risk, pct: e.target.value })} style={inputStyle} />
+              </div>
+              <div>
+                <Label>Stop distance (points)</Label>
+                <input type="number" step="0.25" value={risk.stopPts} onChange={(e) => setRisk({ ...risk, stopPts: e.target.value })} style={inputStyle} />
+              </div>
+              <div>
+                <Label>Instrument</Label>
+                <select value={risk.instrument} onChange={(e) => setRisk({ ...risk, instrument: e.target.value })} style={inputStyle}>
+                  <option value="NQ">NQ ($20/pt)</option>
+                  <option value="MNQ">MNQ ($2/pt)</option>
+                </select>
+              </div>
+            </div>
+            <div style={{ marginTop: 16, background: "rgba(3,10,20,0.8)", border: `1px solid ${C.border}`, borderRadius: 6, padding: 16, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 14 }}>
+              <div>
+                <Label>Max risk</Label>
+                <div style={{ fontSize: 18, fontWeight: 600, color: C.gold }}>{fmt$(riskDollars)}</div>
+              </div>
+              <div>
+                <Label>Risk / contract</Label>
+                <div style={{ fontSize: 18, fontWeight: 600 }}>{fmt$(perContractRisk)}</div>
+              </div>
+              <div>
+                <Label>Max contracts</Label>
+                <div style={{ fontSize: 26, fontWeight: 600, color: maxContracts > 0 ? C.green : C.red }}>{maxContracts}</div>
+              </div>
+            </div>
+            {maxContracts === 0 && perContractRisk > 0 && (
+              <div style={{ marginTop: 10, fontSize: 12, color: C.red }}>
+                Stop too wide for this risk budget — tighten the stop, drop to MNQ, or reduce risk %.
+              </div>
+            )}
+          </Panel>
+        )}
+
+        {/* ================= MARKET ================= */}
+        {tab === "MARKET" && (
+          <React.Fragment>
+            <Panel>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 14, flexWrap: "wrap" }}>
+                <span style={{ fontFamily: disp, fontSize: 18, fontWeight: 700, letterSpacing: "0.1em", color: C.cyan }}>{symbol.toUpperCase()}</span>
+                <span style={{ fontSize: 22, fontWeight: 600 }}>{lastPx != null ? lastPx.toFixed(2) : "—"}</span>
+                {dayPct != null && <span style={{ fontSize: 13, fontWeight: 600, color: pnlColor(dayPct) }}>DAY {dayPct >= 0 ? "+" : ""}{dayPct.toFixed(2)}%</span>}
+                {weekPct != null && <span style={{ fontSize: 13, fontWeight: 600, color: pnlColor(weekPct) }}>WK {weekPct >= 0 ? "+" : ""}{weekPct.toFixed(2)}%</span>}
+              </div>
+              <div style={{ fontSize: 10, color: C.faint, marginTop: 4 }}>{symbol.toUpperCase() === "QQQ" ? "NQ PROXY — MOVES WITH THE NASDAQ 100" : "CUSTOM SYMBOL"}{mktStatus ? " · " + mktStatus.toUpperCase() : ""}</div>
+              <div style={{ marginTop: 12 }}>
+                <CandleChart cs={candles} seq={seqView} />
+              </div>
+            </Panel>
+
+            <Panel>
+              <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>SETUP SCANNER</div>
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
+                Your model, encoded: liquidity sweep → change in state of delivery → retrace into the imbalance → rejection. Polaris announces each stage out loud. Scans only while this app is open on screen.
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+                <div>
+                  <Label>Symbol</Label>
+                  <input value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} disabled={scanning} style={{ ...inputStyle, opacity: scanning ? 0.5 : 1 }} />
+                </div>
+                <div>
+                  <Label>Timeframe</Label>
+                  <select value={tf} onChange={(e) => setTf(e.target.value)} disabled={scanning} style={{ ...inputStyle, opacity: scanning ? 0.5 : 1 }}>
+                    <option value="1min">1 minute</option>
+                    <option value="5min">5 minute</option>
+                    <option value="15min">15 minute</option>
+                  </select>
+                </div>
+              </div>
+              <button onClick={toggleScan}
+                style={{
+                  width: "100%", padding: "14px 0", fontFamily: mono, fontWeight: 600, fontSize: 13, letterSpacing: "0.12em", borderRadius: 4, cursor: "pointer",
+                  background: scanning ? "rgba(255,85,102,0.15)" : C.cyan,
+                  color: scanning ? C.red : "#04121C",
+                  border: scanning ? `1px solid ${C.red}` : "none",
+                  boxShadow: scanning ? "none" : "0 0 16px rgba(0,212,255,0.35)",
+                }}>
+                {scanning ? "■ STOP SCANNER" : "▶ START SCANNER"}
+              </button>
+              {scanning && seqView && (
+                <div style={{ marginTop: 10, fontSize: 12, color: C.gold, letterSpacing: "0.06em" }}>
+                  ACTIVE SEQUENCE: {seqView.dir.toUpperCase()} · PHASE: {seqView.phase.toUpperCase()} · LEVEL {seqView.level.toFixed(2)}{seqView.fvg ? ` · FVG ${seqView.fvg.lo.toFixed(2)}–${seqView.fvg.hi.toFixed(2)}` : ""}
+                </div>
+              )}
+              {scanning && !seqView && (
+                <div style={{ marginTop: 10, fontSize: 12, color: C.muted, animation: "pulse 2s ease-in-out infinite" }}>
+                  ◈ Scanning for a sweep of the marked liquidity…
+                </div>
+              )}
+            </Panel>
+
+            {scanEvents.length > 0 && (
+              <Panel style={{ maxHeight: 260, overflowY: "auto" }}>
+                <Label color={C.cyan}>Scanner feed</Label>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {scanEvents.map((e, i) => (
+                    <div key={i} style={{ display: "flex", gap: 10, fontSize: 12, alignItems: "baseline" }}>
+                      <span style={{ color: C.faint, fontSize: 10, whiteSpace: "nowrap" }}>{e.time.slice(11, 16) || e.time}</span>
+                      <span style={{
+                        color: e.type === "complete" ? C.gold : e.type === "invalidated" || e.type === "expired" ? C.faint : e.dir === "bear" ? C.red : C.green,
+                        fontWeight: e.type === "complete" ? 700 : 400, lineHeight: 1.5,
+                      }}>
+                        {e.msg}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            )}
+
+            <div style={{ fontSize: 10, color: C.faint, lineHeight: 1.7 }}>
+              The scanner detects when your conditions print — it is not a signal service and doesn't judge whether the trade is worth taking. Confirm on your own charts; QQQ levels won't match NQ prices, only the structure.
+            </div>
+          </React.Fragment>
+        )}
+
+        {/* ================= SETUP ================= */}
+        {tab === "SETUP" && (
+          <React.Fragment>
+            <Panel>
+              <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>THE BRAIN — ANTHROPIC API</div>
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
+                Polaris thinks with Claude. Get a key at console.anthropic.com → API Keys (requires API credits, separate from a Claude subscription).
+              </div>
+              <Label>Anthropic API key</Label>
+              <input
+                type="password"
+                value={anthropicKey}
+                onChange={(e) => saveAnthropicKey(e.target.value)}
+                placeholder="sk-ant-…"
+                style={inputStyle}
+              />
+              <div style={{ fontSize: 11, marginTop: 8, color: anthropicKey ? C.green : C.gold }}>
+                {anthropicKey ? "✓ Key saved — the brain is online" : "No key yet — Polaris can't respond without one"}
+              </div>
+            </Panel>
+
+            <Panel>
+              <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>THE FEED — MARKET DATA</div>
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
+                Powers the MARKET tab and the setup scanner. Free key at twelvedata.com — sign up, and your API key is on the dashboard. Free tier covers US stocks/ETFs like QQQ (the NQ proxy); CME futures data isn't on free plans anywhere.
+              </div>
+              <Label>Twelve Data API key</Label>
+              <input
+                type="password"
+                value={tdKey}
+                onChange={(e) => saveTdKey(e.target.value)}
+                placeholder="paste key…"
+                style={inputStyle}
+              />
+              <div style={{ fontSize: 11, marginTop: 8, color: tdKey ? C.green : C.gold }}>
+                {tdKey ? "✓ Key saved — the feed is ready" : "No key yet — MARKET tab won't have data"}
+              </div>
+            </Panel>
+
+            <Panel>
+              <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 12 }}>THE VOICE</div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: C.muted, cursor: "pointer", marginBottom: 12 }}>
+                <input type="checkbox" checked={voiceOut} onChange={(e) => setVoiceOut(e.target.checked)} style={{ accentColor: C.cyan }} />
+                SPOKEN REPLIES {voiceOut ? "ON" : "OFF"}
+              </label>
+              {voiceOut && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  <div>
+                    <Label>Voice engine</Label>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      {[["device", "DEVICE"], ["elevenlabs", "ELEVENLABS"]].map(([val, lbl]) => (
+                        <button key={val} onClick={() => { setEngine(val); saveElConfig({ engine: val }); }}
+                          style={{ flex: 1, padding: "9px 0", fontFamily: mono, fontSize: 12, fontWeight: 600, letterSpacing: "0.08em", borderRadius: 4, cursor: "pointer",
+                            background: engine === val ? "rgba(0,212,255,0.14)" : "transparent",
+                            color: engine === val ? C.cyan : C.muted,
+                            border: `1px solid ${engine === val ? C.borderBright : C.border}` }}>
+                          {lbl}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {engine === "device" && voiceList.length > 0 && (
+                    <div>
+                      <Label>Device voice</Label>
+                      <select value={voiceURI} onChange={(e) => pickVoice(e.target.value)} style={inputStyle}>
+                        {voiceList.map((v) => (
+                          <option key={v.voiceURI} value={v.voiceURI}>{v.name} ({v.lang})</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {engine === "elevenlabs" && (
+                    <React.Fragment>
+                      <div>
+                        <Label>ElevenLabs API key</Label>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <input
+                            type="password"
+                            value={elKey}
+                            onChange={(e) => setElKey(e.target.value)}
+                            placeholder="xi-…"
+                            style={{ ...inputStyle, flex: 1 }}
+                          />
+                          <button onClick={loadElVoices}
+                            style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "0 14px", fontFamily: mono, fontWeight: 600, fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }}>
+                            LOAD VOICES
+                          </button>
+                        </div>
+                        {elStatus && <div style={{ fontSize: 11, color: C.gold, marginTop: 6 }}>{elStatus}</div>}
+                      </div>
+                      {elVoices.length > 0 && (
+                        <div>
+                          <Label>ElevenLabs voice</Label>
+                          <select value={elVoiceId} onChange={(e) => { setElVoiceId(e.target.value); saveElConfig({ voiceId: e.target.value }); }} style={inputStyle}>
+                            {elVoices.map((v) => (
+                              <option key={v.id} value={v.id}>{v.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </React.Fragment>
+                  )}
+
+                  <button
+                    onClick={() => speak("Systems online. This is how I'll sound, sir.")}
+                    style={{ alignSelf: "flex-start", background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "10px 20px", fontFamily: mono, fontWeight: 600, fontSize: 12, cursor: "pointer" }}
+                  >
+                    TEST VOICE
+                  </button>
+                </div>
+              )}
+            </Panel>
+
+            <Panel>
+              <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>THE VAULT — BACKUP</div>
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
+                Your journal lives only in this browser — clearing browser data erases it. Export a backup regularly; restore merges it back in without duplicating trades.
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button onClick={exportJSON}
+                  style={{ background: C.cyan, color: "#04121C", border: "none", borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                  EXPORT BACKUP
+                </button>
+                <button onClick={exportCSV}
+                  style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                  EXPORT CSV
+                </button>
+                <label style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                  RESTORE
+                  <input type="file" accept=".json,application/json" onChange={importJSON} style={{ display: "none" }} />
+                </label>
+              </div>
+              <div style={{ fontSize: 11, marginTop: 10, color: trades.length ? C.green : C.gold }}>
+                {trades.length ? trades.length + " trades in the book" : "Book is empty — nothing to back up yet"}
+              </div>
+            </Panel>
+
+            <Panel>
+              <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.8 }}>
+                Keys and your journal are stored only in this browser on this device — nothing is uploaded anywhere except directly to Anthropic and ElevenLabs when Polaris thinks or speaks. Don't share this device's browser profile or your keys. API usage bills to your own accounts.
+              </div>
+            </Panel>
+          </React.Fragment>
+        )}
+
+        <div style={{ textAlign: "center", color: C.faint, fontSize: 10, letterSpacing: "0.1em", padding: "6px 0 20px" }}>
+          NQ $20/PT · MNQ $2/PT · TICK 0.25 · STANDALONE MODE — DATA SAVED IN THIS BROWSER
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
