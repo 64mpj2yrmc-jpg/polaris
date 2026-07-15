@@ -456,59 +456,77 @@ function EquityCurve({ trades }) {
   );
 }
 
-// ---------- P&L calendar heatmap ----------
-function PnlHeatmap({ trades }) {
-  const WEEKS = 18;
+// ---------- P&L calendar (monthly, day + month totals) ----------
+function PnlCalendar({ trades }) {
+  const [viewDate, setViewDate] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  });
+
   const byDate = {};
   trades.forEach((t) => { byDate[t.date] = (byDate[t.date] || 0) + calcPnl(t); });
-  const maxAbs = Math.max(1, ...Object.values(byDate).map((v) => Math.abs(v)));
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const endDow = today.getDay();
-  const gridEnd = new Date(today);
-  gridEnd.setDate(gridEnd.getDate() + (6 - endDow));
-  const gridStart = new Date(gridEnd);
-  gridStart.setDate(gridStart.getDate() - (WEEKS * 7 - 1));
+  const year = viewDate.getFullYear(), month = viewDate.getMonth();
+  const monthNames = ["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"];
+  const pad2 = (n) => String(n).padStart(2, "0");
+  const firstDow = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const todayISO = new Date().toISOString().slice(0, 10);
 
-  const cols = [];
-  for (let w = 0; w < WEEKS; w++) {
-    const col = [];
-    for (let d = 0; d < 7; d++) {
-      const dt = new Date(gridStart);
-      dt.setDate(dt.getDate() + w * 7 + d);
-      const iso = dt.toISOString().slice(0, 10);
-      col.push({ iso, pnl: byDate[iso] || 0, hasTrades: iso in byDate, future: dt > today });
-    }
-    cols.push(col);
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  let monthTotal = 0, monthDays = 0;
+  for (let d = 1; d <= daysInMonth; d++) {
+    const iso = `${year}-${pad2(month + 1)}-${pad2(d)}`;
+    if (iso in byDate) { monthTotal += byDate[iso]; monthDays++; }
   }
 
-  const cellColor = (cell) => {
-    if (cell.future) return "transparent";
-    if (!cell.hasTrades) return "rgba(255,255,255,0.045)";
-    if (cell.pnl === 0) return "rgba(0,212,255,0.3)";
-    const a = 0.18 + 0.68 * Math.min(1, Math.abs(cell.pnl) / maxAbs);
-    return cell.pnl > 0 ? `rgba(47,224,138,${a})` : `rgba(255,85,102,${a})`;
-  };
-
-  if (!trades.length) {
-    return (
-      <div style={{ height: 100, display: "flex", alignItems: "center", justifyContent: "center", color: C.faint, fontFamily: mono, fontSize: 12 }}>
-        Log trades to populate the calendar
-      </div>
-    );
-  }
+  const navBtn = { background: "rgba(0,212,255,0.1)", color: C.cyan, border: `1px solid ${C.border}`, borderRadius: 4, width: 30, height: 30, cursor: "pointer", fontFamily: mono, fontSize: 13 };
 
   return (
-    <div style={{ display: "flex", gap: 3, overflowX: "auto", padding: "4px 2px" }}>
-      {cols.map((col, ci) => (
-        <div key={ci} style={{ display: "flex", flexDirection: "column", gap: 3, flexShrink: 0 }}>
-          {col.map((cell, ri) => (
-            <div key={ri} title={cell.future ? "" : `${cell.iso} — ${cell.hasTrades ? fmt$(cell.pnl) : "no trades"}`}
-              style={{ width: 11, height: 11, borderRadius: 2, background: cellColor(cell), border: cell.future ? "none" : `1px solid ${C.border}` }} />
-          ))}
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button onClick={() => setViewDate(new Date(year, month - 1, 1))} style={navBtn}>◀</button>
+          <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.08em", color: C.cyan, minWidth: 170, textAlign: "center" }}>
+            {monthNames[month]} {year}
+          </div>
+          <button onClick={() => setViewDate(new Date(year, month + 1, 1))} style={navBtn}>▶</button>
         </div>
-      ))}
+        <div style={{ fontSize: 13, fontWeight: 700, color: monthDays ? pnlColor(monthTotal) : C.faint }}>
+          MONTH NET {fmt$(monthTotal)}{monthDays ? ` · ${monthDays} day${monthDays > 1 ? "s" : ""} traded` : ""}
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6, marginBottom: 6 }}>
+        {["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"].map((d) => (
+          <div key={d} style={{ textAlign: "center", fontSize: 10, letterSpacing: "0.1em", color: C.faint }}>{d}</div>
+        ))}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
+        {cells.map((d, i) => {
+          if (d == null) return <div key={i} />;
+          const iso = `${year}-${pad2(month + 1)}-${pad2(d)}`;
+          const pnl = byDate[iso];
+          const has = iso in byDate;
+          const isToday = iso === todayISO;
+          return (
+            <div key={i} style={{
+              minHeight: 76, borderRadius: 6, padding: "8px",
+              border: `1px solid ${isToday ? C.borderBright : C.border}`,
+              background: has ? (pnl > 0 ? "rgba(47,224,138,0.1)" : pnl < 0 ? "rgba(255,85,102,0.1)" : "rgba(0,212,255,0.08)") : "rgba(255,255,255,0.02)",
+              display: "flex", flexDirection: "column", justifyContent: "space-between",
+            }}>
+              <div style={{ fontSize: 10, color: isToday ? C.cyan : C.faint }}>{d}</div>
+              {has && <div style={{ fontSize: 13, fontWeight: 700, color: pnlColor(pnl) }}>{fmt$(pnl)}</div>}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1627,15 +1645,8 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                   <EquityCurve trades={trades} />
                 </Panel>
                 <Panel>
-                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
-                    <Label color={C.cyan}>P&L calendar</Label>
-                    <div style={{ display: "flex", gap: 10, fontSize: 10, color: C.faint, alignItems: "center" }}>
-                      <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 9, height: 9, borderRadius: 2, background: "rgba(255,85,102,0.7)", display: "inline-block" }} />LOSS</span>
-                      <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 9, height: 9, borderRadius: 2, background: "rgba(255,255,255,0.045)", border: `1px solid ${C.border}`, display: "inline-block" }} />NONE</span>
-                      <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 9, height: 9, borderRadius: 2, background: "rgba(47,224,138,0.7)", display: "inline-block" }} />WIN</span>
-                    </div>
-                  </div>
-                  <PnlHeatmap trades={trades} />
+                  <Label color={C.cyan}>P&L calendar</Label>
+                  <PnlCalendar trades={trades} />
                 </Panel>
               </React.Fragment>
             )}
