@@ -685,6 +685,20 @@ function App() {
   const rulesRef = useRef(rules); rulesRef.current = rules;
   const [deskBusy, setDeskBusy] = useState(false);
 
+  // ----- cross-device sync -----
+  const [syncToken, setSyncToken] = useState("");
+  const [gistId, setGistId] = useState("");
+  const [gistIdDraft, setGistIdDraft] = useState("");
+  const [syncEnabled, setSyncEnabled] = useState(false);
+  const [syncStatus, setSyncStatus] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
+  const syncTokenRef = useRef(syncToken); syncTokenRef.current = syncToken;
+  const gistIdRef = useRef(gistId); gistIdRef.current = gistId;
+  const syncEnabledRef = useRef(syncEnabled); syncEnabledRef.current = syncEnabled;
+  const syncReadyRef = useRef(false);
+  const applyingRemoteRef = useRef(false);
+  const lastSyncBlobUpdatedAtRef = useRef(0);
+
   // keys + engine
   const [anthropicKey, setAnthropicKey] = useState("");
   const [engine, setEngine] = useState("device");
@@ -749,6 +763,9 @@ function App() {
       chatLoadedRef.current = true;
       try { const m = await S.get("polaris-memory"); if (m && m.value) setMemory(m.value); } catch (e) {}
       try { const ru = await S.get("polaris-rules"); if (ru && ru.value) setRules({ ...DEFAULT_RULES, ...JSON.parse(ru.value) }); } catch (e) {}
+      try { const st = await S.get("polaris-sync-token"); if (st && st.value) setSyncToken(st.value); } catch (e) {}
+      try { const gi = await S.get("polaris-sync-gistid"); if (gi && gi.value) setGistId(gi.value); } catch (e) {}
+      try { const se = await S.get("polaris-sync-enabled"); if (se && se.value) setSyncEnabled(se.value === "true"); } catch (e) {}
       try {
         const el = await S.get("polaris-elevenlabs");
         if (el && el.value) {
@@ -790,6 +807,23 @@ function App() {
     return () => clearInterval(id);
   }, []);
 
+  useEffect(() => {
+    if (syncReadyRef.current) return;
+    if (!syncEnabled) { syncReadyRef.current = true; return; }
+    if (!gistId || !syncToken) return;
+    pullAndMergeSync().finally(() => { syncReadyRef.current = true; });
+  }, [syncEnabled, gistId, syncToken]);
+
+  useEffect(() => {
+    if (!syncReadyRef.current || !syncEnabledRef.current || !gistIdRef.current || !syncTokenRef.current.trim() || applyingRemoteRef.current) return;
+    const id = setTimeout(() => pushSync(), 3000);
+    return () => clearTimeout(id);
+  }, [trades, memory, rules, chat, anthropicKey, elKey, elVoiceId, engine, tdKey]);
+
+  useEffect(() => {
+    if (gistId && !gistIdDraft) setGistIdDraft(gistId);
+  }, [gistId]);
+
   async function persist(next) {
     setTrades(next);
     try { await S.set("nq-trades", JSON.stringify(next)); } catch (e) { flash("Save failed"); }
@@ -820,6 +854,173 @@ function App() {
     rulesRef.current = next;
     try { await S.set("polaris-rules", JSON.stringify(next)); } catch (e) {}
   }
+
+  async function saveSyncToken(v) {
+    setSyncToken(v);
+    syncTokenRef.current = v;
+    try { await S.set("polaris-sync-token", v); } catch (e) {}
+  }
+  async function saveGistId(v) {
+    setGistId(v);
+    gistIdRef.current = v;
+    try { await S.set("polaris-sync-gistid", v); } catch (e) {}
+  }
+  async function saveSyncEnabled(v) {
+    setSyncEnabled(v);
+    syncEnabledRef.current = v;
+    try { await S.set("polaris-sync-enabled", String(v)); } catch (e) {}
+  }
+
+  async function githubGistRequest(method, path, body) {
+    const res = await fetch("https://api.github.com" + path, {
+      method,
+      headers: {
+        "Authorization": "token " + syncTokenRef.current.trim(),
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => null);
+      throw new Error((errBody && errBody.message) || ("HTTP " + res.status));
+    }
+    return res.json();
+  }
+
+  function buildSyncBlob() {
+    return {
+      updatedAt: Date.now(),
+      anthropicKey: anthropicKeyRef.current,
+      elKey: elKeyRef.current,
+      elVoiceId: elVoiceIdRef.current,
+      engine: engineRef.current,
+      tdKey: tdKeyRef.current,
+      memory: memoryRef.current,
+      rules: rulesRef.current,
+      chat: chatRef.current,
+      trades: tradesRef.current,
+    };
+  }
+
+  function applySyncBlob(remote) {
+    if (!remote) return null;
+    applyingRemoteRef.current = true;
+    let mergedBlob = null;
+    try {
+      const map = new Map(tradesRef.current.map((t) => [t.id, t]));
+      (remote.trades || []).forEach((t) => { if (t && t.id != null && !map.has(t.id)) map.set(t.id, t); });
+      const mergedTrades = [...map.values()].sort((a, b) => b.id - a.id);
+      persist(mergedTrades);
+
+      const remoteWins = (remote.updatedAt || 0) > lastSyncBlobUpdatedAtRef.current;
+      const resolved = {
+        anthropicKey: remoteWins && remote.anthropicKey !== undefined ? remote.anthropicKey : anthropicKeyRef.current,
+        tdKey: remoteWins && remote.tdKey !== undefined ? remote.tdKey : tdKeyRef.current,
+        memory: remoteWins && remote.memory !== undefined ? remote.memory : memoryRef.current,
+        rules: remoteWins && remote.rules ? { ...DEFAULT_RULES, ...remote.rules } : rulesRef.current,
+        chat: remoteWins && remote.chat ? remote.chat : chatRef.current,
+        elKey: remoteWins && remote.elKey !== undefined ? remote.elKey : elKeyRef.current,
+        elVoiceId: remoteWins && remote.elVoiceId !== undefined ? remote.elVoiceId : elVoiceIdRef.current,
+        engine: remoteWins && remote.engine !== undefined ? remote.engine : engineRef.current,
+      };
+      if (remoteWins) {
+        if (resolved.anthropicKey !== anthropicKeyRef.current) saveAnthropicKey(resolved.anthropicKey);
+        if (resolved.tdKey !== tdKeyRef.current) saveTdKey(resolved.tdKey);
+        if (resolved.memory !== memoryRef.current) saveMemory(resolved.memory);
+        saveRules(resolved.rules);
+        setChat(resolved.chat);
+        setElKey(resolved.elKey);
+        setElVoiceId(resolved.elVoiceId);
+        setEngine(resolved.engine);
+        saveElConfig({ key: resolved.elKey, voiceId: resolved.elVoiceId, engine: resolved.engine });
+      }
+      lastSyncBlobUpdatedAtRef.current = Math.max(lastSyncBlobUpdatedAtRef.current, remote.updatedAt || 0);
+      mergedBlob = { updatedAt: Date.now(), ...resolved, trades: mergedTrades };
+    } finally {
+      setTimeout(() => { applyingRemoteRef.current = false; }, 0);
+    }
+    return mergedBlob;
+  }
+
+  async function pushSyncBlob(blob) {
+    if (!syncTokenRef.current.trim() || !gistIdRef.current) return;
+    try {
+      await githubGistRequest("PATCH", "/gists/" + gistIdRef.current, {
+        files: { "polaris-sync.json": { content: JSON.stringify(blob, null, 2) } },
+      });
+      lastSyncBlobUpdatedAtRef.current = blob.updatedAt;
+      setSyncStatus("Synced " + new Date().toLocaleTimeString());
+    } catch (e) {
+      setSyncStatus("Sync error: " + (e.message || "push failed"));
+    }
+  }
+
+  async function createSyncGist() {
+    const blob = buildSyncBlob();
+    const data = await githubGistRequest("POST", "/gists", {
+      description: "Polaris sync data — do not edit manually",
+      public: false,
+      files: { "polaris-sync.json": { content: JSON.stringify(blob, null, 2) } },
+    });
+    lastSyncBlobUpdatedAtRef.current = blob.updatedAt;
+    return data.id;
+  }
+
+  async function fetchSyncGist(id) {
+    const data = await githubGistRequest("GET", "/gists/" + id);
+    const file = data.files && data.files["polaris-sync.json"];
+    if (!file) throw new Error("Gist doesn't contain polaris-sync.json");
+    return JSON.parse(file.content);
+  }
+
+  async function pushSync() {
+    await pushSyncBlob(buildSyncBlob());
+  }
+
+  async function pullAndMergeSync() {
+    if (!syncTokenRef.current.trim() || !gistIdRef.current) return;
+    try {
+      const remote = await fetchSyncGist(gistIdRef.current);
+      const merged = applySyncBlob(remote);
+      if (merged) await pushSyncBlob(merged);
+      else setSyncStatus("Synced " + new Date().toLocaleTimeString());
+    } catch (e) {
+      setSyncStatus("Sync error: " + (e.message || "pull failed"));
+    }
+  }
+
+  async function connectSync() {
+    const token = syncToken.trim();
+    if (!token) { flash("Paste a GitHub token first"); return; }
+    setSyncBusy(true);
+    setSyncStatus("Connecting…");
+    try {
+      await saveSyncToken(token);
+      const targetId = gistIdDraft.trim();
+      if (targetId) {
+        await saveGistId(targetId);
+        await pullAndMergeSync();
+      } else {
+        const newId = await createSyncGist();
+        await saveGistId(newId);
+        setSyncStatus("Created new sync gist — copy the Gist ID below to your other device");
+      }
+      await saveSyncEnabled(true);
+      syncReadyRef.current = true;
+      flash("Sync connected");
+    } catch (e) {
+      setSyncStatus("Connection failed: " + (e.message || "check token and try again"));
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+
+  function disconnectSync() {
+    saveSyncEnabled(false);
+    setSyncStatus("Sync paused");
+  }
+
   async function pickVoice(uri) {
     setVoiceURI(uri);
     try { await S.set("polaris-voice", uri); } catch (e) {}
@@ -2127,8 +2328,52 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
             </Panel>
 
             <Panel>
+              <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>SYNC — CROSS-DEVICE</div>
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
+                Keeps keys, journal, memory, chat, and rules in sync between devices using a private GitHub Gist you control. Off by default — turning it on means this data leaves the device and lives in your GitHub account.
+              </div>
+              <div style={{ background: "rgba(245,200,107,0.08)", border: "1px solid rgba(245,200,107,0.3)", borderRadius: 6, padding: 12, marginBottom: 12, fontSize: 11, color: C.gold, lineHeight: 1.6 }}>
+                Create a token at github.com/settings/tokens → "Generate new token (classic)" → check ONLY the "gist" scope, nothing else. That limits what a leaked token could ever touch.
+              </div>
+              <Label>GitHub personal access token</Label>
+              <input type="password" value={syncToken} onChange={(e) => setSyncToken(e.target.value)} placeholder="ghp_…" style={inputStyle} />
+              <div style={{ marginTop: 10 }}>
+                <Label>{gistId ? "Gist ID — copy this into your other device" : "Gist ID (leave blank on your first device)"}</Label>
+                <input value={gistIdDraft} onChange={(e) => setGistIdDraft(e.target.value)} onClick={(e) => gistId && e.target.select()}
+                  placeholder="paste an existing gist ID to connect a second device" style={{ ...inputStyle, color: gistId ? C.gold : C.text }} />
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
+                {!syncEnabled ? (
+                  <button onClick={connectSync} disabled={syncBusy}
+                    style={{ background: C.cyan, color: "#04121C", border: "none", borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                    {syncBusy ? "CONNECTING…" : gistId ? "RECONNECT" : "CONNECT SYNC"}
+                  </button>
+                ) : (
+                  <React.Fragment>
+                    <button onClick={() => pullAndMergeSync()} disabled={syncBusy}
+                      style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                      SYNC NOW
+                    </button>
+                    <button onClick={disconnectSync}
+                      style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                      PAUSE SYNC
+                    </button>
+                  </React.Fragment>
+                )}
+              </div>
+              {syncStatus && (
+                <div style={{ fontSize: 11, marginTop: 10, color: syncStatus.toLowerCase().includes("error") || syncStatus.toLowerCase().includes("failed") ? C.red : C.green }}>
+                  {syncStatus}
+                </div>
+              )}
+              <div style={{ fontSize: 11, marginTop: 8, color: syncEnabled ? C.green : C.faint }}>
+                {syncEnabled ? "✓ Sync active — auto-syncs a few seconds after any change" : "Sync is off — your data stays local-only"}
+              </div>
+            </Panel>
+
+            <Panel>
               <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.8 }}>
-                Keys and your journal are stored only in this browser on this device — nothing is uploaded anywhere except directly to Anthropic and ElevenLabs when Polaris thinks or speaks. Don't share this device's browser profile or your keys. API usage bills to your own accounts.
+                Keys and your journal are stored only in this browser on this device — nothing is uploaded anywhere except directly to Anthropic and ElevenLabs when Polaris thinks or speaks, or to your own GitHub Gist if you've turned Sync on above. Don't share this device's browser profile, your keys, or your GitHub token. API and sync usage bills to your own accounts.
               </div>
             </Panel>
           </React.Fragment>
