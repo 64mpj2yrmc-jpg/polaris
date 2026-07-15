@@ -92,6 +92,33 @@ const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", {
 const fmt$2 = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const pnlColor = (n) => (n > 0 ? C.green : n < 0 ? C.red : C.muted);
 
+function isRegularUSHours(d) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", hour12: false, weekday: "short", hour: "numeric", minute: "numeric",
+  }).formatToParts(d || new Date());
+  const map = {};
+  parts.forEach((p) => { map[p.type] = p.value; });
+  const isWeekday = map.weekday !== "Sat" && map.weekday !== "Sun";
+  const minutesNow = Number(map.hour) * 60 + Number(map.minute);
+  return isWeekday && minutesNow >= 9 * 60 + 30 && minutesNow < 16 * 60;
+}
+
+async function fetchViaRelay(targetUrl) {
+  const relays = [
+    "https://corsproxy.io/?url=" + encodeURIComponent(targetUrl),
+    "https://api.allorigins.win/raw?url=" + encodeURIComponent(targetUrl),
+  ];
+  let lastErr;
+  for (const relayUrl of relays) {
+    try {
+      const res = await fetch(relayUrl);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return await res.json();
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error("all relays failed");
+}
+
 function calcPnl(t) {
   const dir = t.direction === "LONG" ? 1 : -1;
   return (Number(t.exit) - Number(t.entry)) * dir * POINT_VALUE[t.instrument] * Number(t.contracts);
@@ -663,6 +690,7 @@ function App() {
   const [scanEvents, setScanEvents] = useState([]);
   const [seqView, setSeqView] = useState(null);
   const [mktStatus, setMktStatus] = useState("");
+  const [source, setSource] = useState("AUTO");
   const tdKeyRef = useRef(tdKey); tdKeyRef.current = tdKey;
   const symbolRef = useRef(symbol); symbolRef.current = symbol;
   const tfRef = useRef(tf); tfRef.current = tf;
@@ -672,6 +700,8 @@ function App() {
   const scanEventsRef = useRef(scanEvents); scanEventsRef.current = scanEvents;
   const seqRef = useRef(null);
   const processedRef = useRef(null);
+  const activeSource = useMemo(() => (source === "AUTO" ? (isRegularUSHours(new Date(now)) ? "QQQ" : "NQ") : source), [source, now]);
+  const activeSourceRef = useRef(activeSource); activeSourceRef.current = activeSource;
 
   function rankVoices(vs) {
     const score = (v) =>
@@ -1033,7 +1063,7 @@ function App() {
     const emit = (type, dir, price, i) => {
       const dirWord = dir === "bear" ? "bearish" : "bullish";
       const msgs = {
-        sweep: `${dir === "bear" ? "Buy-side" : "Sell-side"} liquidity swept at ${price.toFixed(2)} — watching for a shift in delivery`,
+        sweep: `${dir === "bear" ? "Buy-side" : "Sell-side"} liquidity swept at ${price.toFixed(2)} — watching for a shift in delivery${activeSourceRef.current === "NQ" ? ". Heads up, sir — this feed is running ten to fifteen minutes delayed." : ""}`,
         cisd: `Change in the state of delivery confirmed — ${dirWord}`,
         retrace: `Price retracing into the ${dirWord} imbalance`,
         complete: `SETUP COMPLETE — ${dirWord} model: sweep, shift, and rejection from the imbalance at ${price.toFixed(2)}`,
@@ -1053,7 +1083,9 @@ function App() {
     processedRef.current = cs[cs.length - 1].t;
   }
 
-  async function fetchIntraday(silent) {
+  const YF_INTERVAL = { "1min": "1m", "5min": "5m", "15min": "15m" };
+
+  async function fetchIntradayTwelveData(silent) {
     const key = tdKeyRef.current.trim();
     if (!key) { setMktStatus("Add a Twelve Data API key in SETUP"); return; }
     try {
@@ -1063,14 +1095,14 @@ function App() {
       const cs = data.values.map((v) => ({ t: v.datetime, o: +v.open, h: +v.high, l: +v.low, c: +v.close })).reverse();
       const closed = cs.slice(0, -1);
       setCandles(closed);
-      setMktStatus("Updated " + new Date().toLocaleTimeString());
+      setMktStatus("Updated " + new Date().toLocaleTimeString() + " · via QQQ");
       runScanner(closed, silent);
     } catch (e) {
       setMktStatus("Feed error: " + (e.message || "check key and symbol"));
     }
   }
 
-  async function fetchDaily() {
+  async function fetchDailyTwelveData() {
     const key = tdKeyRef.current.trim();
     if (!key) return;
     try {
@@ -1087,9 +1119,63 @@ function App() {
     } catch (e) {}
   }
 
+  async function fetchIntradayYahoo(silent) {
+    try {
+      const interval = YF_INTERVAL[tfRef.current] || "5m";
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/NQ=F?interval=${interval}&range=1d`;
+      const data = await fetchViaRelay(url);
+      const result = data && data.chart && data.chart.result && data.chart.result[0];
+      if (!result) throw new Error((data && data.chart && data.chart.error && data.chart.error.description) || "no data returned");
+      const ts = result.timestamp || [];
+      const q = result.indicators.quote[0];
+      const cs = [];
+      for (let i = 0; i < ts.length; i++) {
+        if (q.open[i] == null || q.high[i] == null || q.low[i] == null || q.close[i] == null) continue;
+        const t = new Date(ts[i] * 1000).toISOString().slice(0, 19).replace("T", " ");
+        cs.push({ t, o: q.open[i], h: q.high[i], l: q.low[i], c: q.close[i] });
+      }
+      const closed = cs.slice(0, -1);
+      setCandles(closed);
+      setMktStatus("Updated " + new Date().toLocaleTimeString() + " · via NQ=F (delayed)");
+      runScanner(closed, silent);
+    } catch (e) {
+      setMktStatus("Feed error: " + (e.message || "NQ futures feed unavailable"));
+    }
+  }
+
+  async function fetchDailyYahoo() {
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/NQ=F?interval=1d&range=1mo`;
+      const data = await fetchViaRelay(url);
+      const result = data && data.chart && data.chart.result && data.chart.result[0];
+      if (!result) return;
+      const ts = result.timestamp || [];
+      const closes = result.indicators.quote[0].close;
+      const d = [];
+      for (let i = 0; i < ts.length; i++) {
+        if (closes[i] == null) continue;
+        d.push({ t: new Date(ts[i] * 1000).toISOString().slice(0, 10), c: closes[i] });
+      }
+      if (!d.length) return;
+      const last = d[d.length - 1], prev = d[d.length - 2], wk = d[Math.max(0, d.length - 6)];
+      setDayInfo({
+        prevClose: prev ? prev.c : last.c,
+        weekAgo: wk ? wk.c : last.c,
+        asOf: last.t,
+      });
+    } catch (e) {}
+  }
+
+  function fetchIntraday(silent) {
+    return activeSourceRef.current === "NQ" ? fetchIntradayYahoo(silent) : fetchIntradayTwelveData(silent);
+  }
+  function fetchDaily() {
+    return activeSourceRef.current === "NQ" ? fetchDailyYahoo() : fetchDailyTwelveData();
+  }
+
   function toggleScan() {
     if (!scanning) {
-      if (!tdKey.trim()) { flash("Add a Twelve Data key in SETUP first"); setTab("SETUP"); return; }
+      if (activeSourceRef.current !== "NQ" && !tdKey.trim()) { flash("Add a Twelve Data key in SETUP first, or switch SOURCE to NQ futures"); setTab("SETUP"); return; }
       seqRef.current = null;
       processedRef.current = null;
       setSeqView(null);
@@ -1104,7 +1190,7 @@ function App() {
     fetchIntraday(true); // first pass backfills history silently
     const id = setInterval(() => fetchIntraday(false), 60000);
     return () => clearInterval(id);
-  }, [scanning, symbol, tf]);
+  }, [scanning, symbol, tf, activeSource]);
 
   const lastPx = candles.length ? candles[candles.length - 1].c : null;
   const dayPct = lastPx && dayInfo ? ((lastPx - dayInfo.prevClose) / dayInfo.prevClose) * 100 : null;
@@ -1170,7 +1256,7 @@ Recent trades (newest first): ${JSON.stringify(recent)}
 
 Contract reference: NQ = $20/point, MNQ = $2/point, tick 0.25.
 
-MARKET FEED (${symbolRef.current} as the NQ proxy — moves directionally with NQ):
+MARKET FEED (${marketFeedLabel()}):
 ${candlesRef.current.length ? `Last ${candlesRef.current[candlesRef.current.length - 1].c}${dayInfoRef.current ? `, day ${(((candlesRef.current[candlesRef.current.length - 1].c - dayInfoRef.current.prevClose) / dayInfoRef.current.prevClose) * 100).toFixed(2)}%, week ${(((candlesRef.current[candlesRef.current.length - 1].c - dayInfoRef.current.weekAgo) / dayInfoRef.current.weekAgo) * 100).toFixed(2)}%` : ""}. Recent candles (${tfRef.current}, oldest→newest): ${JSON.stringify(candlesRef.current.slice(-20).map((c) => ({ t: c.t.slice(11, 16) || c.t, o: c.o, h: c.h, l: c.l, c: c.c })))}` : "Not connected — the feed starts when the scanner runs on the MARKET tab."}
 Scanner (his model: liquidity sweep → change in state of delivery → retrace into imbalance → rejection): ${scanningRef.current ? "ACTIVE" : "off"}. Recent events: ${scanEventsRef.current.length ? scanEventsRef.current.slice(0, 6).map((e) => `[${e.time}] ${e.msg}`).join(" | ") : "none yet"}.
 When he asks what the market is doing, describe it from this data plainly — direction, range, notable candles — without predicting what comes next.
@@ -1242,6 +1328,10 @@ Hard rules:
     }
   }
 
+  function marketFeedLabel() {
+    return activeSourceRef.current === "NQ" ? "NQ=F live CME futures, ~10-15min delayed" : `${symbolRef.current} as the NQ proxy`;
+  }
+
   function rulesSummaryText() {
     const r = rulesRef.current;
     const parts = [];
@@ -1263,7 +1353,7 @@ Hard rules:
 
 Cover briefly: current market context from the live feed, his stats and current streak, his active hard limits, and end with exactly one concrete focus for this session.
 
-MARKET FEED (${symbolRef.current} as the NQ proxy): ${last ? `Last ${last.c}${dayInfoRef.current ? `, day ${(((last.c - dayInfoRef.current.prevClose) / dayInfoRef.current.prevClose) * 100).toFixed(2)}%, week ${(((last.c - dayInfoRef.current.weekAgo) / dayInfoRef.current.weekAgo) * 100).toFixed(2)}%` : ""}. Recent candles: ${JSON.stringify(candlesRef.current.slice(-10).map((c) => ({ o: c.o, h: c.h, l: c.l, c: c.c })))}` : "Not connected — the MARKET tab scanner isn't running."}
+MARKET FEED (${marketFeedLabel()}): ${last ? `Last ${last.c}${dayInfoRef.current ? `, day ${(((last.c - dayInfoRef.current.prevClose) / dayInfoRef.current.prevClose) * 100).toFixed(2)}%, week ${(((last.c - dayInfoRef.current.weekAgo) / dayInfoRef.current.weekAgo) * 100).toFixed(2)}%` : ""}. Recent candles: ${JSON.stringify(candlesRef.current.slice(-10).map((c) => ({ o: c.o, h: c.h, l: c.l, c: c.c })))}` : "Not connected — the MARKET tab scanner isn't running."}
 
 STATS: ${s ? `${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, current streak ${s.streak}.` : "No trades logged yet."}
 
@@ -1713,12 +1803,21 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
           <React.Fragment>
             <Panel>
               <div style={{ display: "flex", alignItems: "baseline", gap: 14, flexWrap: "wrap" }}>
-                <span style={{ fontFamily: disp, fontSize: 18, fontWeight: 700, letterSpacing: "0.1em", color: C.cyan }}>{symbol.toUpperCase()}</span>
+                <span style={{ fontFamily: disp, fontSize: 18, fontWeight: 700, letterSpacing: "0.1em", color: C.cyan }}>{activeSource === "NQ" ? "NQ=F" : symbol.toUpperCase()}</span>
                 <span style={{ fontSize: 22, fontWeight: 600 }}>{lastPx != null ? lastPx.toFixed(2) : "—"}</span>
                 {dayPct != null && <span style={{ fontSize: 13, fontWeight: 600, color: pnlColor(dayPct) }}>DAY {dayPct >= 0 ? "+" : ""}{dayPct.toFixed(2)}%</span>}
                 {weekPct != null && <span style={{ fontSize: 13, fontWeight: 600, color: pnlColor(weekPct) }}>WK {weekPct >= 0 ? "+" : ""}{weekPct.toFixed(2)}%</span>}
+                {activeSource === "NQ" && (
+                  <span style={{ fontSize: 10, letterSpacing: "0.1em", fontWeight: 700, color: C.gold, border: "1px solid rgba(245,200,107,0.5)", borderRadius: 3, padding: "3px 8px", background: "rgba(245,200,107,0.08)" }}>
+                    DELAYED DATA
+                  </span>
+                )}
               </div>
-              <div style={{ fontSize: 10, color: C.faint, marginTop: 4 }}>{symbol.toUpperCase() === "QQQ" ? "NQ PROXY — MOVES WITH THE NASDAQ 100" : "CUSTOM SYMBOL"}{mktStatus ? " · " + mktStatus.toUpperCase() : ""}</div>
+              <div style={{ fontSize: 10, color: C.faint, marginTop: 4 }}>
+                {activeSource === "NQ" ? "LIVE CME FUTURES — CONTINUOUS 24HR SESSION" : symbol.toUpperCase() === "QQQ" ? "NQ PROXY — MOVES WITH THE NASDAQ 100" : "CUSTOM SYMBOL"}
+                {source === "AUTO" ? ` · AUTO (${activeSource})` : ""}
+                {mktStatus ? " · " + mktStatus.toUpperCase() : ""}
+              </div>
               <div style={{ marginTop: 12 }}>
                 <CandleChart cs={candles} seq={seqView} />
               </div>
@@ -1731,8 +1830,16 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
                 <div>
+                  <Label>Source</Label>
+                  <select value={source} onChange={(e) => setSource(e.target.value)} disabled={scanning} style={{ ...inputStyle, opacity: scanning ? 0.5 : 1 }}>
+                    <option value="AUTO">AUTO (currently {activeSource === "QQQ" ? "QQQ" : "NQ futures"})</option>
+                    <option value="QQQ">QQQ (real-time, US hours)</option>
+                    <option value="NQ">NQ futures (delayed ~10-15 min, 24hr)</option>
+                  </select>
+                </div>
+                <div>
                   <Label>Symbol</Label>
-                  <input value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} disabled={scanning} style={{ ...inputStyle, opacity: scanning ? 0.5 : 1 }} />
+                  <input value={activeSource === "NQ" ? "NQ=F" : symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} disabled={scanning || activeSource === "NQ"} style={{ ...inputStyle, opacity: scanning || activeSource === "NQ" ? 0.5 : 1 }} />
                 </div>
                 <div>
                   <Label>Timeframe</Label>
