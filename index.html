@@ -121,6 +121,26 @@ async function fetchViaRelay(targetUrl) {
   throw lastErr || new Error("all relays failed");
 }
 
+function resizeImageToDataURL(file, maxDim, quality) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxDim && width >= height) { height = Math.round(height * (maxDim / width)); width = maxDim; }
+      else if (height > maxDim) { width = Math.round(width * (maxDim / height)); height = maxDim; }
+      const canvas = document.createElement("canvas");
+      canvas.width = width; canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, width, height);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Couldn't read that image")); };
+    img.src = url;
+  });
+}
+
 function calcPnl(t) {
   const dir = t.direction === "LONG" ? 1 : -1;
   return (Number(t.exit) - Number(t.entry)) * dir * POINT_VALUE[t.instrument] * Number(t.contracts);
@@ -679,6 +699,15 @@ function App() {
   const [form, setForm] = useState(blank);
   const [risk, setRisk] = useState({ account: "50000", pct: "1", stopPts: "20", instrument: "NQ" });
 
+  // ----- screenshot-to-journal -----
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanResults, setScanResults] = useState(null);
+  const [scanMessage, setScanMessage] = useState("");
+  const [scanMissingFields, setScanMissingFields] = useState(() => new Set());
+  const [viewImage, setViewImage] = useState(null);
+  const scanThumbRef = useRef(null);
+  const fileInputRef = useRef(null);
+
   // ----- POLARIS state -----
   const [voiceState, setVoiceState] = useState("idle");
   const [chat, setChat] = useState([]);
@@ -1062,14 +1091,141 @@ function App() {
     persist([t, ...tradesRef.current]);
   }
 
+  const STORAGE_BUDGET_CHARS = 4 * 1024 * 1024;
+
   function addTrade() {
     if (form.entry === "" || form.exit === "" || !form.contracts) { flash("Entry, exit, and contracts are required"); return; }
-    const t = { ...form, id: Date.now(), contracts: Number(form.contracts) };
+    let t = { ...form, id: Date.now(), contracts: Number(form.contracts) };
+    let msg = "Trade logged";
+    if (scanThumbRef.current) {
+      const withThumb = { ...t, thumb: scanThumbRef.current };
+      const projected = JSON.stringify([withThumb, ...tradesRef.current]).length;
+      if (projected <= STORAGE_BUDGET_CHARS) {
+        t = withThumb;
+      } else {
+        msg = "Trade logged — screenshot skipped (storage nearly full, export + prune old trades)";
+      }
+    }
     logTrade(t);
     setForm({ ...blank, date: form.date, instrument: form.instrument });
-    flash("Trade logged");
+    flash(msg);
   }
   function deleteTrade(id) { persist(trades.filter((t) => t.id !== id)); }
+
+  function normalizeScanCandidate(rt) {
+    const numOrNull = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+    return {
+      instrument: rt.instrument === "NQ" || rt.instrument === "MNQ" ? rt.instrument : null,
+      direction: rt.direction === "LONG" || rt.direction === "SHORT" ? rt.direction : null,
+      contracts: numOrNull(rt.contracts),
+      entry: numOrNull(rt.entry),
+      exit: numOrNull(rt.exit),
+      stop: numOrNull(rt.stop),
+      date: typeof rt.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(rt.date) ? rt.date : null,
+      confidence: rt.confidence === "high" ? "high" : "low",
+      notes: typeof rt.notes === "string" ? rt.notes : "",
+    };
+  }
+
+  function applyScanCandidate(c) {
+    const missing = new Set();
+    ["instrument", "direction", "contracts", "entry", "exit", "stop"].forEach((k) => { if (c[k] == null) missing.add(k); });
+    setForm({
+      date: c.date || new Date().toISOString().slice(0, 10),
+      instrument: c.instrument || "NQ",
+      direction: c.direction || "LONG",
+      contracts: c.contracts != null ? c.contracts : 1,
+      entry: c.entry != null ? c.entry : "",
+      exit: c.exit != null ? c.exit : "",
+      stop: c.stop != null ? c.stop : "",
+      tp: "",
+      setup: SETUPS[0],
+      notes: c.notes || "",
+    });
+    setScanMissingFields(missing);
+    setScanMessage(`Scanned — review before logging · ${c.confidence.toUpperCase()} CONFIDENCE${c.notes ? " · " + c.notes : ""}`);
+  }
+
+  function dismissScan() {
+    setScanMessage("");
+    setScanResults(null);
+    setScanMissingFields(new Set());
+    scanThumbRef.current = null;
+  }
+
+  async function scanScreenshot(file) {
+    const key = anthropicKeyRef.current.trim();
+    if (!key) { flash("Add an Anthropic API key in SETUP first"); return; }
+    setScanBusy(true);
+    setScanMessage("");
+    setScanResults(null);
+    try {
+      const [visionImg, thumbImg] = await Promise.all([
+        resizeImageToDataURL(file, 1568, 0.8),
+        resizeImageToDataURL(file, 240, 0.6),
+      ]);
+      const base64 = visionImg.split(",")[1];
+      const sys = `You are extracting trade data from a screenshot for Landen's trading journal (POLARIS). The screenshot may be a TradingView chart with the position tool drawn, a broker fill confirmation, or an order history screen.
+
+Extract every distinct trade visible: date (YYYY-MM-DD), instrument (NQ or MNQ only — infer from context like "NQ", "MNQ", "E-mini Nasdaq", or "Micro Nasdaq"; if genuinely unclear, use null), direction (LONG or SHORT), contracts, entry price, exit price, and stop price if visible.
+
+Respond with ONLY raw JSON, no markdown code fences, no preamble, in exactly this shape:
+{"trades":[{"date":"YYYY-MM-DD"|null,"instrument":"NQ"|"MNQ"|null,"direction":"LONG"|"SHORT"|null,"contracts":N|null,"entry":N|null,"exit":N|null,"stop":N|null,"confidence":"high"|"low","notes":"..."}]}
+
+Rules:
+- Use null for any field you cannot clearly read. NEVER guess a price — a wrong number silently corrupts his P&L stats, which is worse than leaving it blank for him to fill in by hand.
+- If the image isn't a readable trade at all, respond {"trades":[]}.
+- If it shows multiple fills that are clearly one position being scaled in or out, combine them into a single trade object using the weighted-average entry/exit, and explain that combination in "notes".
+- If it shows multiple genuinely distinct trades, return one object per trade.
+- "notes" should mention anything notable you read from the image (setup context, symbol shown, timestamps, partial fills, anything ambiguous) — keep it brief.
+- Default "date" to today, ${new Date().toISOString().slice(0, 10)}, only if the trade is otherwise unambiguous but no date is visible; otherwise null.`;
+      const messages = [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
+          { type: "text", text: "Extract the trade(s) from this screenshot." },
+        ],
+      }];
+      const raw = await callAnthropic(key, sys, messages, 800);
+      const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
+      let parsed;
+      try { parsed = JSON.parse(cleaned); } catch (e) { throw new Error("Couldn't parse a response — try a clearer screenshot"); }
+      const rawTrades = Array.isArray(parsed.trades) ? parsed.trades : [];
+      const candidates = rawTrades.map(normalizeScanCandidate);
+      if (!candidates.length) {
+        setScanMessage("Couldn't read a trade from that image — try a clearer screenshot or enter it by hand.");
+        return;
+      }
+      scanThumbRef.current = thumbImg;
+      if (candidates.length === 1) {
+        applyScanCandidate(candidates[0]);
+      } else {
+        setScanResults(candidates);
+        setScanMessage(`Found ${candidates.length} trades in that screenshot — pick which to log.`);
+      }
+    } catch (e) {
+      setScanMessage("Scan failed: " + (e.message || "check your API key and connection"));
+    } finally {
+      setScanBusy(false);
+    }
+  }
+
+  function onScanFileChange(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (file) scanScreenshot(file);
+  }
+
+  function updateFormField(key, value) {
+    setForm((f) => ({ ...f, [key]: value }));
+    setScanMissingFields((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+  }
+  const scanFieldStyle = (name) => (scanMissingFields.has(name) ? { ...inputStyle, border: `1px solid ${C.gold}`, boxShadow: `0 0 0 1px rgba(245,200,107,0.35)` } : inputStyle);
 
   const stats = useMemo(() => computeStats(trades), [trades]);
   const badges = useMemo(() => computeBadges(trades, stats), [trades, stats]);
@@ -1703,6 +1859,12 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
 
       {badgeBurst && <BadgeBurst key={badgeBurst.key} label={badgeBurst.label} />}
 
+      {viewImage && (
+        <div onClick={() => setViewImage(null)} style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(3,10,20,0.92)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: 24 }}>
+          <img src={viewImage} alt="Trade screenshot, enlarged" style={{ maxWidth: "min(90vw, 480px)", maxHeight: "80vh", width: "100%", objectFit: "contain", borderRadius: 8, border: `1px solid ${C.borderBright}`, boxShadow: "0 0 40px rgba(0,212,255,0.25)" }} />
+        </div>
+      )}
+
       {/* stand down banner */}
       {breaches.length > 0 && (
         <div style={{ background: "linear-gradient(90deg, rgba(255,85,102,0.22), rgba(255,85,102,0.08), rgba(255,85,102,0.22))", backgroundSize: "200% 100%", animation: "shimmer 3s linear infinite", borderBottom: `1px solid ${C.red}`, color: C.red, padding: "10px 16px", fontFamily: mono, fontWeight: 700, letterSpacing: "0.08em", fontSize: 12, textAlign: "center", position: "relative", zIndex: 4 }}>
@@ -1902,7 +2064,37 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
         {/* ================= LOG ================= */}
         {tab === "LOG" && (
           <Panel>
-            <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 14 }}>ORDER TICKET · JOURNAL ENTRY</div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+              <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan }}>ORDER TICKET · JOURNAL ENTRY</div>
+              <button onClick={() => fileInputRef.current && fileInputRef.current.click()} disabled={scanBusy}
+                style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "10px 16px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                {scanBusy ? "READING THE TAPE…" : "◈ SCAN SCREENSHOT"}
+              </button>
+              <input ref={fileInputRef} type="file" accept="image/*" onChange={onScanFileChange} style={{ display: "none" }} />
+            </div>
+
+            {scanMessage && (
+              <div style={{ background: "rgba(245,200,107,0.08)", border: `1px solid rgba(245,200,107,0.35)`, borderRadius: 6, padding: "10px 12px", marginBottom: 14, fontSize: 12, color: C.gold, lineHeight: 1.6, display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+                <span>{scanMessage}</span>
+                <button onClick={dismissScan} style={{ background: "transparent", border: "none", color: C.gold, fontFamily: mono, fontSize: 14, cursor: "pointer", lineHeight: 1, padding: 0 }}>×</button>
+              </div>
+            )}
+            {scanResults && scanResults.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+                {scanResults.map((c, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, background: "rgba(3,10,20,0.8)", border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 10px", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12, color: C.muted }}>
+                      {c.date || "date?"} · <span style={{ color: c.direction === "SHORT" ? C.red : C.green }}>{c.direction || "dir?"}</span> · {c.contracts != null ? c.contracts : "?"}× {c.instrument || "?"} · {c.entry != null ? c.entry : "?"} → {c.exit != null ? c.exit : "?"}
+                    </span>
+                    <button onClick={() => applyScanCandidate(c)}
+                      style={{ marginLeft: "auto", background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "6px 14px", fontFamily: mono, fontWeight: 600, fontSize: 11, cursor: "pointer" }}>
+                      USE
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <div>
                 <Label>Date</Label>
@@ -1910,16 +2102,16 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
               </div>
               <div>
                 <Label>Instrument</Label>
-                <select value={form.instrument} onChange={(e) => setForm({ ...form, instrument: e.target.value })} style={inputStyle}>
+                <select value={form.instrument} onChange={(e) => updateFormField("instrument", e.target.value)} style={scanFieldStyle("instrument")}>
                   <option value="NQ">NQ ($20/pt)</option>
                   <option value="MNQ">MNQ ($2/pt)</option>
                 </select>
               </div>
               <div>
                 <Label>Direction</Label>
-                <div style={{ display: "flex", gap: 6 }}>
+                <div style={{ display: "flex", gap: 6, ...(scanMissingFields.has("direction") ? { borderRadius: 4, boxShadow: `0 0 0 1px rgba(245,200,107,0.35)`, border: `1px solid ${C.gold}`, padding: 2 } : {}) }}>
                   {["LONG", "SHORT"].map((d) => (
-                    <button key={d} onClick={() => setForm({ ...form, direction: d })}
+                    <button key={d} onClick={() => updateFormField("direction", d)}
                       style={{ flex: 1, padding: "10px 0", fontFamily: mono, fontSize: 13, fontWeight: 600, borderRadius: 4, cursor: "pointer",
                         background: form.direction === d ? (d === "LONG" ? C.green : C.red) : "rgba(3,10,20,0.8)",
                         color: form.direction === d ? "#04121C" : C.muted,
@@ -1931,19 +2123,19 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
               </div>
               <div>
                 <Label>Contracts</Label>
-                <input type="number" min="1" value={form.contracts} onChange={(e) => setForm({ ...form, contracts: e.target.value })} style={inputStyle} />
+                <input type="number" min="1" value={form.contracts} onChange={(e) => updateFormField("contracts", e.target.value)} style={scanFieldStyle("contracts")} />
               </div>
               <div>
                 <Label>Entry price</Label>
-                <input type="number" step="0.25" placeholder="21540.25" value={form.entry} onChange={(e) => setForm({ ...form, entry: e.target.value })} style={inputStyle} />
+                <input type="number" step="0.25" placeholder="21540.25" value={form.entry} onChange={(e) => updateFormField("entry", e.target.value)} style={scanFieldStyle("entry")} />
               </div>
               <div>
                 <Label>Exit price</Label>
-                <input type="number" step="0.25" placeholder="21582.50" value={form.exit} onChange={(e) => setForm({ ...form, exit: e.target.value })} style={inputStyle} />
+                <input type="number" step="0.25" placeholder="21582.50" value={form.exit} onChange={(e) => updateFormField("exit", e.target.value)} style={scanFieldStyle("exit")} />
               </div>
               <div>
                 <Label>Stop (optional)</Label>
-                <input type="number" step="0.25" placeholder="21520.00" value={form.stop} onChange={(e) => setForm({ ...form, stop: e.target.value })} style={inputStyle} />
+                <input type="number" step="0.25" placeholder="21520.00" value={form.stop} onChange={(e) => updateFormField("stop", e.target.value)} style={scanFieldStyle("stop")} />
               </div>
               <div>
                 <Label>Take profit (optional)</Label>
@@ -1984,21 +2176,29 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                 const r = calcR(t);
                 return (
                   <Panel key={t.id} style={{ padding: "12px 14px" }}>
-                    <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-                      <span style={{ color: C.faint, fontSize: 11 }}>{t.date}</span>
-                      <span style={{ fontWeight: 600, fontSize: 13, color: t.direction === "LONG" ? C.green : C.red }}>{t.direction}</span>
-                      <span style={{ fontSize: 13 }}>{t.contracts}× {t.instrument}</span>
-                      <span style={{ fontSize: 12, color: C.muted }}>{t.entry} → {t.exit}</span>
-                      {t.tp !== undefined && t.tp !== "" && <span style={{ fontSize: 11, color: C.faint }}>TP {t.tp}</span>}
-                      <span style={{ marginLeft: "auto", fontWeight: 600, fontSize: 15, color: pnlColor(p) }}>{fmt$2(p)}</span>
-                      {r != null && <span style={{ fontSize: 11, color: pnlColor(r), border: `1px solid ${C.border}`, borderRadius: 3, padding: "2px 6px" }}>{(r >= 0 ? "+" : "") + r.toFixed(2)}R</span>}
-                    </div>
-                    <div style={{ display: "flex", gap: 10, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
-                      <span style={{ fontSize: 10, letterSpacing: "0.1em", color: C.cyan, border: `1px solid ${C.border}`, borderRadius: 3, padding: "2px 8px" }}>{t.setup.toUpperCase()}</span>
-                      {t.notes && <span style={{ fontSize: 12, color: C.muted, flex: 1 }}>{t.notes}</span>}
-                      <button onClick={() => deleteTrade(t.id)} style={{ background: "transparent", border: "none", color: C.faint, fontFamily: mono, fontSize: 11, cursor: "pointer" }}>
-                        DELETE
-                      </button>
+                    <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                      {t.thumb && (
+                        <img src={t.thumb} onClick={() => setViewImage(t.thumb)} alt="Trade screenshot"
+                          style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 4, border: `1px solid ${C.border}`, cursor: "pointer", flexShrink: 0 }} />
+                      )}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+                          <span style={{ color: C.faint, fontSize: 11 }}>{t.date}</span>
+                          <span style={{ fontWeight: 600, fontSize: 13, color: t.direction === "LONG" ? C.green : C.red }}>{t.direction}</span>
+                          <span style={{ fontSize: 13 }}>{t.contracts}× {t.instrument}</span>
+                          <span style={{ fontSize: 12, color: C.muted }}>{t.entry} → {t.exit}</span>
+                          {t.tp !== undefined && t.tp !== "" && <span style={{ fontSize: 11, color: C.faint }}>TP {t.tp}</span>}
+                          <span style={{ marginLeft: "auto", fontWeight: 600, fontSize: 15, color: pnlColor(p) }}>{fmt$2(p)}</span>
+                          {r != null && <span style={{ fontSize: 11, color: pnlColor(r), border: `1px solid ${C.border}`, borderRadius: 3, padding: "2px 6px" }}>{(r >= 0 ? "+" : "") + r.toFixed(2)}R</span>}
+                        </div>
+                        <div style={{ display: "flex", gap: 10, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 10, letterSpacing: "0.1em", color: C.cyan, border: `1px solid ${C.border}`, borderRadius: 3, padding: "2px 8px" }}>{t.setup.toUpperCase()}</span>
+                          {t.notes && <span style={{ fontSize: 12, color: C.muted, flex: 1 }}>{t.notes}</span>}
+                          <button onClick={() => deleteTrade(t.id)} style={{ background: "transparent", border: "none", color: C.faint, fontFamily: mono, fontSize: 11, cursor: "pointer" }}>
+                            DELETE
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   </Panel>
                 );
