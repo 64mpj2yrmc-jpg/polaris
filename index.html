@@ -3,39 +3,38 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<meta name="theme-color" content="#0A0A08" />
+<meta name="theme-color" content="#030710" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="POLARIS" />
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%230A0A08'/%3E%3Cpath d='M50 12 L57 43 L88 50 L57 57 L50 88 L43 57 L12 50 L43 43 Z' fill='%23D9B25E'/%3E%3C/svg%3E" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%23030710'/%3E%3Cpath d='M50 12 L57 43 L88 50 L57 57 L50 88 L43 57 L12 50 L43 43 Z' fill='%2300D4FF'/%3E%3C/svg%3E" />
 <title>POLARIS · NQ Trade Systems</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Orbitron:wght@500;700&display=swap');
-  html, body { margin: 0; padding: 0; background: #0A0A08; }
+  html, body { margin: 0; padding: 0; background: #030710; }
   * { -webkit-tap-highlight-color: transparent; }
-  input:focus, select:focus, textarea:focus, button:focus-visible { border-color: rgba(212,175,90,0.55) !important; outline: 2px solid rgba(212,175,90,0.3); outline-offset: 0; }
+  input:focus, select:focus, textarea:focus, button:focus-visible { border-color: rgba(0,212,255,0.55) !important; outline: 2px solid rgba(0,212,255,0.3); outline-offset: 0; }
   select { appearance: none; -webkit-appearance: none; }
   @keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
   @keyframes spinrev { from { transform: rotate(360deg);} to { transform: rotate(0deg);} }
-  @keyframes twinkle { 0%,100% { opacity: 0.06; } 50% { opacity: 0.55; } }
-  @keyframes breathe { 0%,100% { opacity: 0.12; } 50% { opacity: 0.55; } }
-  @keyframes sweep { 0% { top: -160px; } 100% { top: 110%; } }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
   @keyframes blink { 0%,49% {opacity:1} 50%,100% {opacity:0} }
   @keyframes panelIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
   @keyframes panelSweep { 0%, 100% { left: -45%; } 50% { left: 110%; } }
   @keyframes tabIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes glowFlash { 0% { filter: drop-shadow(0 0 0 currentColor); } 30% { filter: drop-shadow(0 0 6px currentColor); } 100% { filter: drop-shadow(0 0 0 currentColor); } }
   @keyframes eqDraw { to { stroke-dashoffset: 0; } }
+  @keyframes auroraDrift1 { 0% { transform: translate(-4%, -4%) scale(1); } 50% { transform: translate(5%, 4%) scale(1.15); } 100% { transform: translate(-4%, -4%) scale(1); } }
+  @keyframes auroraDrift2 { 0% { transform: translate(3%, 5%) scale(1.08); } 50% { transform: translate(-5%, -3%) scale(0.95); } 100% { transform: translate(3%, 5%) scale(1.08); } }
+  @keyframes auroraDrift3 { 0% { transform: translate(0%, 0%) scale(1); } 50% { transform: translate(-4%, 6%) scale(1.2); } 100% { transform: translate(0%, 0%) scale(1); } }
   @keyframes burstParticle { 0% { transform: translate(0, 0) scale(1); opacity: 1; } 100% { transform: translate(var(--bx), var(--by)) scale(0.3); opacity: 0; } }
   @keyframes burstPop { 0% { transform: scale(0.6); opacity: 0; } 40% { transform: scale(1.08); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
   ::-webkit-scrollbar { height: 6px; width: 6px; }
-  ::-webkit-scrollbar-thumb { background: #7A6230; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb { background: #0A6E8A; border-radius: 3px; }
   button { transition: filter 0.15s ease, transform 0.08s ease, box-shadow 0.15s ease, background 0.15s ease, border-color 0.15s ease; }
   button:hover:not(:disabled) { filter: brightness(1.14); }
   button:active:not(:disabled) { transform: translateY(1px) scale(0.99); }
@@ -72,17 +71,17 @@ const DEFAULT_RULES = {
 };
 
 const C = {
-  bg: "#0A0A08",
-  panel: "rgba(24, 21, 15, 0.72)",
-  panel2: "#171410",
-  border: "rgba(212, 175, 90, 0.22)",
-  borderBright: "rgba(212, 175, 90, 0.55)",
-  cyan: "#D9B25E",
-  cyanDim: "#7A6230",
+  bg: "#030710",
+  panel: "rgba(10, 22, 40, 0.72)",
+  panel2: "#0B1626",
+  border: "rgba(0, 212, 255, 0.22)",
+  borderBright: "rgba(0, 212, 255, 0.55)",
+  cyan: "#00D4FF",
+  cyanDim: "#0A6E8A",
   gold: "#F5C86B",
-  text: "#F2EFE6",
-  muted: "#9C9686",
-  faint: "#5C5648",
+  text: "#DDF3FF",
+  muted: "#6E93AD",
+  faint: "#3A5570",
   green: "#2FE08A",
   red: "#FF5566",
 };
@@ -341,7 +340,7 @@ function CandleChart({ cs, seq }) {
   return (
     <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: 180, display: "block" }}>
       {seq && seq.fvg && seq.fvg.hi >= min && seq.fvg.lo <= max && (
-        <rect x={pad} width={w - pad * 2} y={y(Math.min(seq.fvg.hi, max))} height={Math.max(2, y(Math.max(seq.fvg.lo, min)) - y(Math.min(seq.fvg.hi, max)))} fill="rgba(212,175,90,0.1)" stroke={C.border} />
+        <rect x={pad} width={w - pad * 2} y={y(Math.min(seq.fvg.hi, max))} height={Math.max(2, y(Math.max(seq.fvg.lo, min)) - y(Math.min(seq.fvg.hi, max)))} fill="rgba(0,212,255,0.1)" stroke={C.border} />
       )}
       {seq && seq.level >= min && seq.level <= max && (
         <line x1={pad} x2={w - pad} y1={y(seq.level)} y2={y(seq.level)} stroke={C.gold} strokeDasharray="4 4" strokeWidth="1" />
@@ -396,7 +395,7 @@ function AnimatedNumber({ value, format }) {
 const inputStyle = {
   width: "100%",
   boxSizing: "border-box",
-  background: "rgba(12, 11, 8, 0.8)",
+  background: "rgba(3, 10, 20, 0.8)",
   border: `1px solid ${C.border}`,
   borderRadius: 4,
   color: C.text,
@@ -406,21 +405,31 @@ const inputStyle = {
   outline: "none",
 };
 
+const PANEL_CORNERS = [
+  { top: 6, left: 6, borderWidth: "1px 0 0 1px" },
+  { top: 6, right: 6, borderWidth: "1px 1px 0 0" },
+  { bottom: 6, left: 6, borderWidth: "0 0 1px 1px" },
+  { bottom: 6, right: 6, borderWidth: "0 1px 1px 0" },
+];
+
 const Panel = ({ children, style }) => (
   <div style={{
     position: "relative",
-    background: "linear-gradient(160deg, rgba(30,26,16,0.78) 0%, rgba(20,17,12,0.72) 55%, rgba(16,14,10,0.78) 100%)",
+    background: "linear-gradient(160deg, rgba(14,30,52,0.78) 0%, rgba(8,18,34,0.72) 55%, rgba(6,14,28,0.78) 100%)",
     border: `1px solid ${C.border}`,
     borderRadius: 8,
     padding: 16,
     backdropFilter: "blur(6px)",
-    boxShadow: "0 10px 34px rgba(0,0,0,0.45), 0 0 24px rgba(212,175,90,0.05), inset 0 1px 0 rgba(212,175,90,0.12)",
+    boxShadow: "0 10px 34px rgba(0,0,0,0.45), 0 0 24px rgba(0,212,255,0.05), inset 0 1px 0 rgba(0,212,255,0.12), inset 0 0 0 1px rgba(0,212,255,0.05)",
     animation: "panelIn 0.4s ease both",
     ...style,
   }}>
     <div aria-hidden="true" style={{ position: "absolute", inset: 0, overflow: "hidden", borderRadius: "inherit", pointerEvents: "none" }}>
-      <div style={{ position: "absolute", top: 0, bottom: 0, left: "-45%", width: "35%", background: "linear-gradient(90deg, transparent, rgba(212,175,90,0.07), transparent)", transform: "skewX(-18deg)", animation: "panelSweep 7s ease-in-out infinite" }} />
+      <div style={{ position: "absolute", top: 0, bottom: 0, left: "-45%", width: "35%", background: "linear-gradient(90deg, transparent, rgba(0,212,255,0.07), transparent)", transform: "skewX(-18deg)", animation: "panelSweep 7s ease-in-out infinite" }} />
     </div>
+    {PANEL_CORNERS.map((s, i) => (
+      <div key={i} aria-hidden="true" style={{ position: "absolute", width: 10, height: 10, borderColor: C.borderBright, borderStyle: "solid", pointerEvents: "none", opacity: 0.65, ...s }} />
+    ))}
     <div style={{ display: "contents" }}>{children}</div>
   </div>
 );
@@ -465,7 +474,7 @@ function EquityCurveSvg({ path, w, h, pad, x, y, pts, last, color }) {
       <path d={`${path} L ${x(pts.length - 1)},${h - pad} L ${x(0)},${h - pad} Z`} fill="url(#eqglow)" />
       <path ref={pathRef} d={path} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round"
         style={{
-          filter: "drop-shadow(0 0 4px rgba(212,175,90,0.6))",
+          filter: "drop-shadow(0 0 4px rgba(0,212,255,0.6))",
           strokeDasharray: pathLen || 1,
           strokeDashoffset: pathLen || 1,
           animation: pathLen ? "eqDraw 1.4s cubic-bezier(0.22,1,0.36,1) forwards" : "none",
@@ -508,7 +517,7 @@ function BadgeBurst({ label }) {
         ))}
       </div>
       <div style={{
-        position: "absolute", background: "rgba(16,14,10,0.92)", border: `1px solid ${C.borderBright}`,
+        position: "absolute", background: "rgba(6,14,28,0.92)", border: `1px solid ${C.borderBright}`,
         borderRadius: 8, padding: "16px 28px", textAlign: "center",
         boxShadow: "0 0 30px rgba(245,200,107,0.35)",
         animation: "burstPop 0.5s cubic-bezier(0.22,1,0.36,1) both",
@@ -550,7 +559,7 @@ function PnlCalendar({ trades }) {
     if (iso in byDate) { monthTotal += byDate[iso]; monthDays++; }
   }
 
-  const navBtn = { background: "rgba(212,175,90,0.1)", color: C.cyan, border: `1px solid ${C.border}`, borderRadius: 4, width: 30, height: 30, cursor: "pointer", fontFamily: mono, fontSize: 13 };
+  const navBtn = { background: "rgba(0,212,255,0.1)", color: C.cyan, border: `1px solid ${C.border}`, borderRadius: 4, width: 30, height: 30, cursor: "pointer", fontFamily: mono, fontSize: 13 };
 
   return (
     <div>
@@ -582,7 +591,7 @@ function PnlCalendar({ trades }) {
             <div key={i} style={{
               minHeight: 76, borderRadius: 6, padding: "8px",
               border: `1px solid ${isToday ? C.borderBright : C.border}`,
-              background: has ? (pnl > 0 ? "rgba(47,224,138,0.1)" : pnl < 0 ? "rgba(255,85,102,0.1)" : "rgba(212,175,90,0.08)") : "rgba(255,255,255,0.02)",
+              background: has ? (pnl > 0 ? "rgba(47,224,138,0.1)" : pnl < 0 ? "rgba(255,85,102,0.1)" : "rgba(0,212,255,0.08)") : "rgba(255,255,255,0.02)",
               display: "flex", flexDirection: "column", justifyContent: "space-between",
             }}>
               <div style={{ fontSize: 10, color: isToday ? C.cyan : C.faint }}>{d}</div>
@@ -641,66 +650,15 @@ function Reactor({ state, onClick, size = 150 }) {
 }
 
 // ---------- ambient backdrop ----------
-const STARS = Array.from({ length: 80 }, (_, i) => ({
-  x: (i * 137.508) % 100,
-  y: (i * 61.803) % 100,
-  s: 1 + (i % 3),
-  d: 3 + (i % 7),
-  delay: (i % 10) * 0.4,
-}));
-
 function Backdrop() {
   return (
     <div aria-hidden="true" style={{ position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none", overflow: "hidden" }}>
-      {/* ambient glows */}
-      <div style={{ position: "absolute", inset: 0, background:
-        "radial-gradient(900px 520px at 50% -8%, rgba(212,175,90,0.10) 0%, transparent 60%)," +
-        "radial-gradient(720px 520px at 106% 112%, rgba(150,120,50,0.13) 0%, transparent 60%)," +
-        "radial-gradient(620px 420px at -6% 102%, rgba(212,175,90,0.06) 0%, transparent 60%)" }} />
-      {/* blueprint grid — fine + major */}
-      <div style={{ position: "absolute", inset: 0, backgroundImage:
-        "linear-gradient(rgba(212,175,90,0.03) 1px, transparent 1px)," +
-        "linear-gradient(90deg, rgba(212,175,90,0.03) 1px, transparent 1px)," +
-        "linear-gradient(rgba(212,175,90,0.055) 1px, transparent 1px)," +
-        "linear-gradient(90deg, rgba(212,175,90,0.055) 1px, transparent 1px)",
-        backgroundSize: "24px 24px, 24px 24px, 120px 120px, 120px 120px" }} />
-      {/* starfield */}
-      {STARS.map((st, i) => (
-        <div key={i} style={{ position: "absolute", left: st.x + "%", top: st.y + "%", width: st.s, height: st.s, borderRadius: "50%", background: "#D9B25E", animation: `twinkle ${st.d}s ease-in-out infinite`, animationDelay: st.delay + "s" }} />
-      ))}
-      {/* large HUD ring — upper right */}
-      <svg viewBox="0 0 400 400" style={{ position: "absolute", width: 560, height: 560, top: -180, right: -170, opacity: 0.16, animation: "spin 90s linear infinite" }}>
-        <circle cx="200" cy="200" r="190" fill="none" stroke="#D9B25E" strokeWidth="1" strokeDasharray="2 6" />
-        <circle cx="200" cy="200" r="160" fill="none" stroke="#D9B25E" strokeWidth="1" strokeDasharray="60 20 10 20" />
-        <circle cx="200" cy="200" r="120" fill="none" stroke="#D9B25E" strokeWidth="0.7" strokeDasharray="4 10" />
-        {[...Array(24)].map((_, i) => {
-          const a = (i / 24) * Math.PI * 2;
-          return <line key={i} x1={200 + Math.cos(a) * 172} y1={200 + Math.sin(a) * 172} x2={200 + Math.cos(a) * 182} y2={200 + Math.sin(a) * 182} stroke="#D9B25E" strokeWidth="1.5" />;
-        })}
-      </svg>
-      {/* large HUD ring — lower left, counter-rotating */}
-      <svg viewBox="0 0 400 400" style={{ position: "absolute", width: 660, height: 660, bottom: -280, left: -240, opacity: 0.11, animation: "spinrev 140s linear infinite" }}>
-        <circle cx="200" cy="200" r="190" fill="none" stroke="#D9B25E" strokeWidth="1" strokeDasharray="40 14 6 14" />
-        <circle cx="200" cy="200" r="150" fill="none" stroke="#D9B25E" strokeWidth="0.7" strokeDasharray="3 9" />
-        <circle cx="200" cy="200" r="100" fill="none" stroke="#D9B25E" strokeWidth="1" strokeDasharray="80 40" />
-        {[...Array(12)].map((_, i) => {
-          const a = (i / 12) * Math.PI * 2;
-          return <line key={i} x1={200 + Math.cos(a) * 140} y1={200 + Math.sin(a) * 140} x2={200 + Math.cos(a) * 148} y2={200 + Math.sin(a) * 148} stroke="#D9B25E" strokeWidth="1.5" />;
-        })}
-      </svg>
-      {/* vertical data filaments */}
-      {[7, 24, 71, 92].map((x, i) => (
-        <div key={i} style={{ position: "absolute", left: x + "%", top: 0, bottom: 0, width: 1, background: "linear-gradient(180deg, transparent, rgba(212,175,90,0.22), transparent)", animation: `breathe ${13 + i * 4}s ease-in-out infinite`, animationDelay: i * 2.5 + "s" }} />
-      ))}
-      {/* radar sweep */}
-      <div style={{ position: "absolute", left: 0, right: 0, top: -160, height: 150, background: "linear-gradient(180deg, transparent, rgba(212,175,90,0.05), transparent)", animation: "sweep 12s linear infinite" }} />
-      {/* corner brackets */}
-      <div style={{ position: "absolute", top: 8, left: 8, width: 34, height: 34, borderStyle: "solid", borderColor: "rgba(212,175,90,0.45)", borderWidth: "1px 0 0 1px" }} />
-      <div style={{ position: "absolute", top: 8, right: 8, width: 34, height: 34, borderStyle: "solid", borderColor: "rgba(212,175,90,0.45)", borderWidth: "1px 1px 0 0" }} />
-      <div style={{ position: "absolute", bottom: 8, left: 8, width: 34, height: 34, borderStyle: "solid", borderColor: "rgba(212,175,90,0.45)", borderWidth: "0 0 1px 1px" }} />
-      <div style={{ position: "absolute", bottom: 8, right: 8, width: 34, height: 34, borderStyle: "solid", borderColor: "rgba(212,175,90,0.45)", borderWidth: "0 1px 1px 0" }} />
-      {/* vignette for depth */}
-      <div style={{ position: "absolute", inset: 0, background: "radial-gradient(130% 110% at 50% 45%, transparent 55%, rgba(0,0,0,0.5) 100%)" }} />
+      <div style={{ position: "absolute", width: "70%", height: "70%", top: "-18%", left: "-12%", background: "radial-gradient(circle, rgba(0,212,255,0.17) 0%, transparent 70%)", filter: "blur(70px)", animation: "auroraDrift1 32s ease-in-out infinite" }} />
+      <div style={{ position: "absolute", width: "65%", height: "65%", bottom: "-22%", right: "-12%", background: "radial-gradient(circle, rgba(64,74,190,0.19) 0%, transparent 70%)", filter: "blur(85px)", animation: "auroraDrift2 40s ease-in-out infinite" }} />
+      <div style={{ position: "absolute", width: "52%", height: "52%", top: "28%", left: "32%", background: "radial-gradient(circle, rgba(0,212,255,0.10) 0%, transparent 70%)", filter: "blur(90px)", animation: "auroraDrift3 26s ease-in-out infinite" }} />
+      <div style={{ position: "absolute", width: "42%", height: "42%", top: "2%", right: "2%", background: "radial-gradient(circle, rgba(128,96,224,0.13) 0%, transparent 70%)", filter: "blur(65px)", animation: "auroraDrift2 36s ease-in-out infinite reverse" }} />
+      <div style={{ position: "absolute", width: "38%", height: "38%", bottom: "8%", left: "-6%", background: "radial-gradient(circle, rgba(0,212,255,0.09) 0%, transparent 70%)", filter: "blur(60px)", animation: "auroraDrift1 24s ease-in-out infinite reverse" }} />
+      <div style={{ position: "absolute", inset: 0, background: "radial-gradient(130% 110% at 50% 45%, transparent 45%, rgba(0,0,0,0.55) 100%)" }} />
     </div>
   );
 }
@@ -1729,11 +1687,11 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
   const tabs = ["POLARIS", "MARKET", "DESK", "LOG", "JOURNAL", "RISK", "SETUP"];
 
   return (
-    <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 700px at 50% -10%, #1C1810 0%, ${C.bg} 55%)`, color: C.text, fontFamily: mono }}>
+    <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 700px at 50% -10%, #06182B 0%, ${C.bg} 55%)`, color: C.text, fontFamily: mono }}>
       <Backdrop />
       {/* status bar */}
-      <div style={{ borderBottom: `1px solid ${breaches.length ? C.red : C.border}`, background: breaches.length ? "rgba(40,8,12,0.85)" : "rgba(16,14,10,0.85)", padding: "10px 16px", display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", position: "sticky", top: 0, zIndex: 5, backdropFilter: "blur(8px)" }}>
-        <span style={{ fontFamily: disp, fontWeight: 700, fontSize: 19, letterSpacing: "0.22em", color: breaches.length ? C.red : C.cyan, textShadow: breaches.length ? `0 0 14px rgba(255,85,102,0.6)` : `0 0 14px rgba(212,175,90,0.6)` }}>
+      <div style={{ borderBottom: `1px solid ${breaches.length ? C.red : C.border}`, background: breaches.length ? "rgba(40,8,12,0.85)" : "rgba(5,14,26,0.85)", padding: "10px 16px", display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", position: "sticky", top: 0, zIndex: 5, backdropFilter: "blur(8px)" }}>
+        <span style={{ fontFamily: disp, fontWeight: 700, fontSize: 19, letterSpacing: "0.22em", color: breaches.length ? C.red : C.cyan, textShadow: breaches.length ? `0 0 14px rgba(255,85,102,0.6)` : `0 0 14px rgba(0,212,255,0.6)` }}>
           POLARIS
         </span>
         <span style={{ fontSize: 10, color: C.faint, letterSpacing: "0.1em" }}>NQ TRADE SYSTEMS · {new Date().toDateString().toUpperCase()}</span>
@@ -1757,14 +1715,18 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
         {tabs.map((t) => (
           <button key={t} onClick={() => { if (t !== tab) tabTick(); setTab(t); }}
             style={{
+              position: "relative",
               fontFamily: mono, fontSize: 12, letterSpacing: "0.12em", padding: "8px 14px",
-              background: tab === t ? "rgba(212,175,90,0.14)" : "transparent",
+              background: tab === t ? "rgba(0,212,255,0.14)" : "transparent",
               color: tab === t ? C.cyan : C.muted,
               border: `1px solid ${tab === t ? C.borderBright : C.border}`,
               borderRadius: 4, cursor: "pointer", fontWeight: 600, whiteSpace: "nowrap",
-              boxShadow: tab === t ? "0 0 12px rgba(212,175,90,0.25)" : "none",
+              boxShadow: tab === t ? "0 0 12px rgba(0,212,255,0.25)" : "none",
             }}>
             {t}
+            {tab === t && (
+              <span aria-hidden="true" style={{ position: "absolute", left: "20%", right: "20%", bottom: -11, height: 2, background: C.cyan, boxShadow: `0 0 8px ${C.cyan}`, borderRadius: 2, animation: "pulse 2s ease-in-out infinite" }} />
+            )}
           </button>
         ))}
       </div>
@@ -1806,7 +1768,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button onClick={openDesk} disabled={!anthropicKey || deskBusy}
                 style={{ flex: 1, minWidth: 160, padding: "12px 0", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.1em", borderRadius: 4, cursor: "pointer",
-                  background: "rgba(212,175,90,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}` }}>
+                  background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}` }}>
                 ☀ OPEN THE DESK
               </button>
               <button onClick={closeDesk} disabled={!anthropicKey || deskBusy}
@@ -1836,7 +1798,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                   </div>
                   <div style={{
                     fontSize: 13, lineHeight: 1.6, padding: "10px 12px", borderRadius: 8,
-                    background: m.role === "user" ? "rgba(245,200,107,0.08)" : "rgba(212,175,90,0.07)",
+                    background: m.role === "user" ? "rgba(245,200,107,0.08)" : "rgba(0,212,255,0.07)",
                     border: `1px solid ${m.role === "user" ? "rgba(245,200,107,0.25)" : C.border}`,
                     whiteSpace: "pre-wrap",
                   }}>
@@ -1862,7 +1824,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                 style={{ ...inputStyle, flex: 1 }}
               />
               <button onClick={sendDraft} disabled={voiceState === "thinking"}
-                style={{ background: "rgba(212,175,90,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "0 18px", fontFamily: mono, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+                style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "0 18px", fontFamily: mono, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
                 SEND
               </button>
             </div>
@@ -1880,7 +1842,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                 <div style={{ textAlign: "center", padding: "30px 10px" }}>
                   <div style={{ fontFamily: disp, fontSize: 20, fontWeight: 700, color: C.cyan, marginBottom: 8, letterSpacing: "0.1em" }}>EMPTY BOOK</div>
                   <div style={{ color: C.muted, fontSize: 13, marginBottom: 18 }}>Log your first NQ trade to bring the desk online.</div>
-                  <button onClick={() => setTab("LOG")} style={{ background: C.cyan, color: "#14110A", border: "none", borderRadius: 4, padding: "12px 22px", fontFamily: mono, fontWeight: 600, fontSize: 13, letterSpacing: "0.08em", cursor: "pointer" }}>
+                  <button onClick={() => setTab("LOG")} style={{ background: C.cyan, color: "#04121C", border: "none", borderRadius: 4, padding: "12px 22px", fontFamily: mono, fontWeight: 600, fontSize: 13, letterSpacing: "0.08em", cursor: "pointer" }}>
                     LOG A TRADE
                   </button>
                 </div>
@@ -1959,8 +1921,8 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                   {["LONG", "SHORT"].map((d) => (
                     <button key={d} onClick={() => setForm({ ...form, direction: d })}
                       style={{ flex: 1, padding: "10px 0", fontFamily: mono, fontSize: 13, fontWeight: 600, borderRadius: 4, cursor: "pointer",
-                        background: form.direction === d ? (d === "LONG" ? C.green : C.red) : "rgba(12,11,8,0.8)",
-                        color: form.direction === d ? "#14110A" : C.muted,
+                        background: form.direction === d ? (d === "LONG" ? C.green : C.red) : "rgba(3,10,20,0.8)",
+                        color: form.direction === d ? "#04121C" : C.muted,
                         border: `1px solid ${form.direction === d ? "transparent" : C.border}` }}>
                       {d}
                     </button>
@@ -1999,7 +1961,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
               <textarea rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} style={{ ...inputStyle, resize: "vertical" }} />
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 16, flexWrap: "wrap" }}>
-              <button onClick={addTrade} style={{ background: C.cyan, color: "#14110A", border: "none", borderRadius: 4, padding: "12px 24px", fontFamily: mono, fontWeight: 600, fontSize: 13, letterSpacing: "0.08em", cursor: "pointer", boxShadow: "0 0 16px rgba(212,175,90,0.35)" }}>
+              <button onClick={addTrade} style={{ background: C.cyan, color: "#04121C", border: "none", borderRadius: 4, padding: "12px 24px", fontFamily: mono, fontWeight: 600, fontSize: 13, letterSpacing: "0.08em", cursor: "pointer", boxShadow: "0 0 16px rgba(0,212,255,0.35)" }}>
                 LOG TRADE
               </button>
               {livePnl !== null && (
@@ -2071,7 +2033,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                 </select>
               </div>
             </div>
-            <div style={{ marginTop: 16, background: "rgba(12,11,8,0.8)", border: `1px solid ${C.border}`, borderRadius: 6, padding: 16, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 14 }}>
+            <div style={{ marginTop: 16, background: "rgba(3,10,20,0.8)", border: `1px solid ${C.border}`, borderRadius: 6, padding: 16, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 14 }}>
               <div>
                 <Label>Max risk</Label>
                 <div style={{ fontSize: 18, fontWeight: 600, color: C.gold }}>{fmt$(riskDollars)}</div>
@@ -2149,9 +2111,9 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                 style={{
                   width: "100%", padding: "14px 0", fontFamily: mono, fontWeight: 600, fontSize: 13, letterSpacing: "0.12em", borderRadius: 4, cursor: "pointer",
                   background: scanning ? "rgba(255,85,102,0.15)" : C.cyan,
-                  color: scanning ? C.red : "#14110A",
+                  color: scanning ? C.red : "#04121C",
                   border: scanning ? `1px solid ${C.red}` : "none",
-                  boxShadow: scanning ? "none" : "0 0 16px rgba(212,175,90,0.35)",
+                  boxShadow: scanning ? "none" : "0 0 16px rgba(0,212,255,0.35)",
                 }}>
                 {scanning ? "■ STOP SCANNER" : "▶ START SCANNER"}
               </button>
@@ -2248,7 +2210,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                       {[["device", "DEVICE"], ["elevenlabs", "ELEVENLABS"]].map(([val, lbl]) => (
                         <button key={val} onClick={() => { setEngine(val); saveElConfig({ engine: val }); }}
                           style={{ flex: 1, padding: "9px 0", fontFamily: mono, fontSize: 12, fontWeight: 600, letterSpacing: "0.08em", borderRadius: 4, cursor: "pointer",
-                            background: engine === val ? "rgba(212,175,90,0.14)" : "transparent",
+                            background: engine === val ? "rgba(0,212,255,0.14)" : "transparent",
                             color: engine === val ? C.cyan : C.muted,
                             border: `1px solid ${engine === val ? C.borderBright : C.border}` }}>
                           {lbl}
@@ -2281,7 +2243,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                             style={{ ...inputStyle, flex: 1 }}
                           />
                           <button onClick={loadElVoices}
-                            style={{ background: "rgba(212,175,90,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "0 14px", fontFamily: mono, fontWeight: 600, fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }}>
+                            style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "0 14px", fontFamily: mono, fontWeight: 600, fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }}>
                             LOAD VOICES
                           </button>
                         </div>
@@ -2302,7 +2264,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
 
                   <button
                     onClick={() => speak("Systems online. This is how I'll sound, sir.")}
-                    style={{ alignSelf: "flex-start", background: "rgba(212,175,90,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "10px 20px", fontFamily: mono, fontWeight: 600, fontSize: 12, cursor: "pointer" }}
+                    style={{ alignSelf: "flex-start", background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "10px 20px", fontFamily: mono, fontWeight: 600, fontSize: 12, cursor: "pointer" }}
                   >
                     TEST VOICE
                   </button>
@@ -2325,7 +2287,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                   <textarea rows={7} value={memoryDraft} onChange={(e) => setMemoryDraft(e.target.value)} style={{ ...inputStyle, resize: "vertical" }} />
                   <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
                     <button onClick={() => { saveMemory(memoryDraft.trim()); setMemoryEditing(false); flash("Memory saved"); }}
-                      style={{ background: C.cyan, color: "#14110A", border: "none", borderRadius: 4, padding: "10px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                      style={{ background: C.cyan, color: "#04121C", border: "none", borderRadius: 4, padding: "10px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
                       SAVE
                     </button>
                     <button onClick={() => setMemoryEditing(false)}
@@ -2336,12 +2298,12 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                 </React.Fragment>
               ) : (
                 <React.Fragment>
-                  <div style={{ background: "rgba(12,11,8,0.8)", border: `1px solid ${C.border}`, borderRadius: 6, padding: 12, fontSize: 12, lineHeight: 1.7, color: memory ? C.text : C.faint, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto" }}>
+                  <div style={{ background: "rgba(3,10,20,0.8)", border: `1px solid ${C.border}`, borderRadius: 6, padding: 12, fontSize: 12, lineHeight: 1.7, color: memory ? C.text : C.faint, whiteSpace: "pre-wrap", maxHeight: 180, overflowY: "auto" }}>
                     {memory || "Nothing recorded yet — Polaris starts learning after your first conversation."}
                   </div>
                   <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
                     <button onClick={() => { setMemoryDraft(memory); setMemoryEditing(true); }}
-                      style={{ background: "rgba(212,175,90,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "10px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                      style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "10px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
                       EDIT
                     </button>
                     <button onClick={wipeMemory}
@@ -2393,14 +2355,14 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button onClick={exportJSON}
-                  style={{ background: C.cyan, color: "#14110A", border: "none", borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                  style={{ background: C.cyan, color: "#04121C", border: "none", borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
                   EXPORT BACKUP
                 </button>
                 <button onClick={exportCSV}
-                  style={{ background: "rgba(212,175,90,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                  style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
                   EXPORT CSV
                 </button>
-                <label style={{ background: "rgba(212,175,90,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                <label style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
                   RESTORE
                   <input type="file" accept=".json,application/json" onChange={importJSON} style={{ display: "none" }} />
                 </label>
@@ -2428,13 +2390,13 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
               <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
                 {!syncEnabled ? (
                   <button onClick={connectSync} disabled={syncBusy}
-                    style={{ background: C.cyan, color: "#14110A", border: "none", borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                    style={{ background: C.cyan, color: "#04121C", border: "none", borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
                     {syncBusy ? "CONNECTING…" : gistId ? "RECONNECT" : "CONNECT SYNC"}
                   </button>
                 ) : (
                   <React.Fragment>
                     <button onClick={() => pullAndMergeSync()} disabled={syncBusy}
-                      style={{ background: "rgba(212,175,90,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                      style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
                       SYNC NOW
                     </button>
                     <button onClick={disconnectSync}
