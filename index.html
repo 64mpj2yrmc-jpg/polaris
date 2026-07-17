@@ -94,6 +94,42 @@ const fmt$ = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", {
 const fmt$2 = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const pnlColor = (n) => (n > 0 ? C.green : n < 0 ? C.red : C.muted);
 
+// splits streamed text into complete sentences, holding back a trailing partial
+// sentence until either more punctuation arrives or isFinal flushes the remainder.
+function splitReadySentences(tail, isFinal) {
+  const sentences = [];
+  let start = 0;
+  for (let i = 0; i < tail.length; i++) {
+    const ch = tail[i];
+    if (ch === "." || ch === "!" || ch === "?") {
+      const next = tail[i + 1];
+      const boundary = next === undefined ? isFinal : /\s/.test(next);
+      if (boundary) {
+        const s = tail.slice(start, i + 1).trim();
+        if (s) sentences.push(s);
+        start = i + 1;
+      }
+    }
+  }
+  if (isFinal && start < tail.length) {
+    const rest = tail.slice(start).trim();
+    if (rest) sentences.push(rest);
+    start = tail.length;
+  }
+  return { sentences, consumed: start };
+}
+
+// while a stream is still arriving, hides a trailing fragment that could be
+// the start of the <trade> tag forming character-by-character (e.g. "<", "<tr")
+// so it's never flashed into the transcript before the full tag is confirmed.
+function trimPotentialTagPrefix(s) {
+  const tag = "<trade";
+  for (let len = Math.min(tag.length - 1, s.length); len > 0; len--) {
+    if (s.slice(-len) === tag.slice(0, len)) return s.slice(0, s.length - len);
+  }
+  return s;
+}
+
 function isRegularUSHours(d) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York", hour12: false, weekday: "short", hour: "numeric", minute: "numeric",
@@ -789,6 +825,11 @@ function App() {
   const elKeyRef = useRef(elKey); elKeyRef.current = elKey;
   const elVoiceIdRef = useRef(elVoiceId); elVoiceIdRef.current = elVoiceId;
   const audioRef = useRef(null);
+  const streamAbortRef = useRef(null);
+  const ttsQueueRef = useRef([]);
+  const ttsPlayingRef = useRef(false);
+  const ttsInterruptedRef = useRef(false);
+  const streamFinishedRef = useRef(true);
 
   // market + scanner
   const [tdKey, setTdKey] = useState("");
@@ -1402,10 +1443,110 @@ Rules:
     else speakDevice(text);
   }
 
-  function stopSpeaking() {
+  function haltAllSpeech() {
+    if (streamAbortRef.current) { try { streamAbortRef.current.abort(); } catch (e) {} streamAbortRef.current = null; }
+    ttsQueueRef.current.forEach((item) => { if (item.controller) { try { item.controller.abort(); } catch (e) {} } });
+    ttsQueueRef.current = [];
+    ttsPlayingRef.current = false;
     try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
     try { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } } catch (e) {}
+  }
+
+  function stopSpeaking() {
+    ttsInterruptedRef.current = true;
+    streamFinishedRef.current = true;
+    haltAllSpeech();
     setVoiceState("idle");
+  }
+
+  // resets the queue for a fresh streamed reply (as opposed to stopSpeaking, which halts and stays idle)
+  function resetTtsPipeline() {
+    haltAllSpeech();
+    ttsInterruptedRef.current = false;
+    streamFinishedRef.current = false;
+  }
+
+  function fetchElevenAudio(text) {
+    const key = elKeyRef.current.trim();
+    const voiceId = elVoiceIdRef.current;
+    const controller = new AbortController();
+    const promise = (async () => {
+      const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`, {
+        method: "POST",
+        headers: { "xi-api-key": key, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text,
+          model_id: "eleven_turbo_v2_5",
+          voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error("tts failed");
+      const blob = await res.blob();
+      return URL.createObjectURL(blob);
+    })();
+    return { promise, controller };
+  }
+
+  function pumpTtsQueue() {
+    if (ttsInterruptedRef.current || ttsPlayingRef.current) return;
+    const item = ttsQueueRef.current.shift();
+    if (!item) {
+      if (streamFinishedRef.current) setVoiceState("idle");
+      return;
+    }
+    ttsPlayingRef.current = true;
+    setVoiceState("speaking");
+    const advance = () => {
+      ttsPlayingRef.current = false;
+      if (!ttsInterruptedRef.current) pumpTtsQueue();
+    };
+    if (item.kind === "device") {
+      if (!window.speechSynthesis) { advance(); return; }
+      try {
+        const u = new SpeechSynthesisUtterance(item.text);
+        const all = window.speechSynthesis.getVoices();
+        const chosen = all.find((v) => v.voiceURI === voiceURIRef.current) || rankVoices(all)[0] || null;
+        if (chosen) u.voice = chosen;
+        u.rate = 1.0;
+        u.pitch = 1.0;
+        u.onend = advance;
+        u.onerror = advance;
+        window.speechSynthesis.speak(u);
+      } catch (e) { advance(); }
+    } else {
+      item.promise.then((url) => {
+        if (ttsInterruptedRef.current) { URL.revokeObjectURL(url); advance(); return; }
+        const audio = new Audio(url);
+        audioRef.current = audio;
+        audio.onended = () => { URL.revokeObjectURL(url); advance(); };
+        audio.onerror = () => { URL.revokeObjectURL(url); advance(); };
+        audio.play().catch(() => advance());
+      }).catch((e) => {
+        if (e.name !== "AbortError" && !ttsInterruptedRef.current) {
+          setElStatus("ElevenLabs playback failed — using device voice");
+          ttsQueueRef.current.unshift({ text: item.text, kind: "device" });
+        }
+        advance();
+      });
+    }
+  }
+
+  function enqueueSentence(text) {
+    const t = (text || "").trim();
+    if (!t || !voiceOutRef.current || ttsInterruptedRef.current) return;
+    if (engineRef.current === "elevenlabs" && elKeyRef.current.trim() && elVoiceIdRef.current) {
+      const { promise, controller } = fetchElevenAudio(t);
+      ttsQueueRef.current.push({ text: t, kind: "eleven", promise, controller });
+    } else {
+      ttsQueueRef.current.push({ text: t, kind: "device" });
+    }
+    pumpTtsQueue();
+  }
+
+  function finishStreamSpeech() {
+    streamFinishedRef.current = true;
+    pumpTtsQueue();
   }
 
   function startListening() {
@@ -1776,6 +1917,58 @@ Rules:
     return (data.content || []).map((b) => b.text || "").join(" ").trim();
   }
 
+  async function streamAnthropicChat(key, system, messages, maxTokens, { onDelta, signal } = {}) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: maxTokens || 1000,
+        system,
+        messages,
+        stream: true,
+      }),
+      signal,
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => null);
+      const detail = errBody && errBody.error && errBody.error.message ? errBody.error.message : "HTTP " + res.status;
+      throw new Error(detail);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let full = "";
+    const processFrame = (frame) => {
+      for (const line of frame.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const jsonStr = line.slice(5).trim();
+        if (!jsonStr) continue;
+        let evt;
+        try { evt = JSON.parse(jsonStr); } catch (e) { continue; }
+        if (evt.type === "content_block_delta" && evt.delta && evt.delta.type === "text_delta") {
+          full += evt.delta.text;
+          if (onDelta) onDelta(evt.delta.text, full);
+        }
+      }
+    };
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const frames = buf.split("\n\n");
+      buf = frames.pop();
+      frames.forEach(processFrame);
+    }
+    if (buf.trim()) processFrame(buf);
+    return full;
+  }
+
   async function updateMemory(exchangeLabel, userText, assistantText) {
     const key = anthropicKeyRef.current.trim();
     if (!key) return;
@@ -1863,22 +2056,52 @@ Hard rules:
       return;
     }
     setVoiceState("thinking");
+    const msgId = Date.now();
+    setChat([...history, { role: "assistant", content: "", id: msgId }]);
+    resetTtsPipeline();
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
+    let rawFull = "";
+    let spokenOffset = 0;
+    const setMsgContent = (content) => {
+      setChat((prev) => prev.map((m) => (m.id === msgId ? { ...m, content } : m)));
+    };
+    const handleVisible = (isFinal) => {
+      const tradeIdx = rawFull.indexOf("<trade");
+      const visible = tradeIdx !== -1 ? rawFull.slice(0, tradeIdx) : isFinal ? rawFull : trimPotentialTagPrefix(rawFull);
+      setMsgContent(visible.trimStart());
+      const { sentences, consumed } = splitReadySentences(visible.slice(spokenOffset), isFinal);
+      spokenOffset += consumed;
+      sentences.forEach((s) => enqueueSentence(s));
+    };
     try {
-      const raw = (await callAnthropic(key, buildSystemPrompt(), history.slice(-16).map((m) => ({ role: m.role, content: m.content })), 1000)) || "I seem to have lost my train of thought, sir. Try again.";
-      const { cleanText, trade } = parseTradeBlock(raw);
-      let reply = cleanText || "Logged, sir.";
+      await streamAnthropicChat(key, buildSystemPrompt(), history.slice(-16).map((m) => ({ role: m.role, content: m.content })), 1000, {
+        signal: controller.signal,
+        onDelta: (chunk, full) => { rawFull = full; handleVisible(false); },
+      });
+      handleVisible(true);
+      const { cleanText, trade } = parseTradeBlock(rawFull);
+      let reply = cleanText || (rawFull.trim() ? rawFull.trim() : "I seem to have lost my train of thought, sir. Try again.");
       if (trade) {
         logTrade(trade);
-        reply += ` Logged: ${trade.direction} ${trade.contracts} ${trade.instrument} for ${fmt$2(calcPnl(trade))}.`;
+        const suffix = ` Logged: ${trade.direction} ${trade.contracts} ${trade.instrument} for ${fmt$2(calcPnl(trade))}.`;
+        reply += suffix;
+        setMsgContent(reply);
+        enqueueSentence(suffix);
         flash("Trade logged — via voice");
+      } else {
+        setMsgContent(reply);
       }
-      setChat([...history, { role: "assistant", content: reply }]);
-      speak(reply);
+      if (streamAbortRef.current === controller) streamAbortRef.current = null;
+      finishStreamSpeech();
       if (!voiceOutRef.current) setVoiceState("idle");
       updateMemory("chat", text, reply);
     } catch (e) {
+      if (streamAbortRef.current === controller) streamAbortRef.current = null;
+      if (e.name === "AbortError") { finishStreamSpeech(); return; }
       const err = "Mainframe error: " + (e.message || "connection failed") + ". Check the API key in SETUP.";
-      setChat([...history, { role: "assistant", content: err }]);
+      setMsgContent(err);
+      finishStreamSpeech();
       setVoiceState("idle");
     }
   }
