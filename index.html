@@ -342,6 +342,19 @@ function tabTick() {
     o.start(); o.stop(ctx.currentTime + 0.09);
   } catch (e) {}
 }
+function wakeChime() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.type = "sine";
+    o.frequency.value = 1100;
+    g.gain.setValueAtTime(0.0001, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.28);
+    o.start(); o.stop(ctx.currentTime + 0.3);
+  } catch (e) {}
+}
 
 // ---------- candle chart ----------
 function CandleChart({ cs, seq }) {
@@ -625,12 +638,13 @@ function PnlCalendar({ trades }) {
 }
 
 // ---------- wayfinder mark (astrolabe + north star) ----------
-function Reactor({ state, onClick, size = 150 }) {
-  const core = state === "listening" ? C.gold : state === "thinking" ? C.cyanDim : C.cyan;
-  const ringSpeed = state === "thinking" ? "3s" : state === "speaking" ? "6s" : state === "listening" ? "8s" : "18s";
-  const ring2Speed = state === "thinking" ? "4.5s" : state === "speaking" ? "9s" : state === "listening" ? "12s" : "27s";
-  const ring3Speed = state === "thinking" ? "2s" : state === "speaking" ? "4s" : state === "listening" ? "5.5s" : "12s";
+function Reactor({ state, onClick, size = 150, awake }) {
+  const core = awake ? C.gold : state === "listening" ? C.gold : state === "thinking" ? C.cyanDim : C.cyan;
+  const ringSpeed = awake ? "5s" : state === "thinking" ? "3s" : state === "speaking" ? "6s" : state === "listening" ? "8s" : "18s";
+  const ring2Speed = awake ? "7s" : state === "thinking" ? "4.5s" : state === "speaking" ? "9s" : state === "listening" ? "12s" : "27s";
+  const ring3Speed = awake ? "1.5s" : state === "thinking" ? "2s" : state === "speaking" ? "4s" : state === "listening" ? "5.5s" : "12s";
   const pulse =
+    awake ? "pulse 0.3s ease-in-out infinite" :
     state === "listening" ? "pulse 0.8s ease-in-out infinite" :
     state === "speaking" ? "pulse 0.45s ease-in-out infinite" :
     "pulse 3.2s ease-in-out infinite";
@@ -724,6 +738,19 @@ function App() {
   const chatLoadedRef = useRef(false);
   const voiceOutRef = useRef(voiceOut); voiceOutRef.current = voiceOut;
   const voiceURIRef = useRef(voiceURI); voiceURIRef.current = voiceURI;
+  const voiceStateRef = useRef("idle"); voiceStateRef.current = voiceState;
+
+  // ----- wake word ("Polaris") -----
+  const [earsOn, setEarsOn] = useState(false);
+  const earsOnRef = useRef(false); earsOnRef.current = earsOn;
+  const [wakeFlash, setWakeFlash] = useState(false);
+  const [appVisible, setAppVisible] = useState(() => !document.hidden);
+  const appVisibleRef = useRef(true); appVisibleRef.current = appVisible;
+  const wakeRecogRef = useRef(null);
+  const wakeBackoffRef = useRef(300);
+  const wakeErrorStreakRef = useRef({ count: 0, since: 0 });
+  const wakeNoticeShownRef = useRef(false);
+  const wakeRestartTimerRef = useRef(null);
 
   // ----- long-term memory -----
   const [memory, setMemory] = useState("");
@@ -809,6 +836,7 @@ function App() {
     (async () => {
       try { const r = await S.get("nq-trades"); if (r && r.value) setTrades(JSON.parse(r.value)); } catch (e) {}
       try { const v = await S.get("polaris-voice"); if (v && v.value) setVoiceURI(v.value); } catch (e) {}
+      try { const eo = await S.get("polaris-ears-on"); if (eo && eo.value) setEarsOn(eo.value === "true"); } catch (e) {}
       try { const a = await S.get("polaris-anthropic-key"); if (a && a.value) setAnthropicKey(a.value); } catch (e) {}
       try { const ch = await S.get("polaris-chat"); if (ch && ch.value) setChat(JSON.parse(ch.value)); } catch (e) {}
       chatLoadedRef.current = true;
@@ -856,6 +884,12 @@ function App() {
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 15000);
     return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const onVis = () => setAppVisible(!document.hidden);
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
 
   useEffect(() => {
@@ -1075,6 +1109,11 @@ function App() {
   async function pickVoice(uri) {
     setVoiceURI(uri);
     try { await S.set("polaris-voice", uri); } catch (e) {}
+  }
+  async function saveEarsOn(v) {
+    setEarsOn(v);
+    earsOnRef.current = v;
+    try { await S.set("polaris-ears-on", String(v)); } catch (e) {}
   }
   async function saveElConfig(next) {
     try {
@@ -1369,13 +1408,7 @@ Rules:
     setVoiceState("idle");
   }
 
-  function toggleListening() {
-    if (voiceState === "speaking") { stopSpeaking(); return; }
-    if (voiceState === "listening") {
-      try { recogRef.current && recogRef.current.stop(); } catch (e) {}
-      return;
-    }
-    if (voiceState === "thinking") return;
+  function startListening() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { flash("Voice input isn't supported in this browser — type below"); return; }
     try {
@@ -1404,6 +1437,114 @@ Rules:
       setVoiceState("listening");
     } catch (e) { flash("Couldn't start the mic"); setVoiceState("idle"); }
   }
+
+  function toggleListening() {
+    if (voiceState === "speaking") { stopSpeaking(); return; }
+    if (voiceState === "listening") {
+      try { recogRef.current && recogRef.current.stop(); } catch (e) {}
+      return;
+    }
+    if (voiceState === "thinking") return;
+    startListening();
+  }
+
+  // ---------- wake word ("Polaris") ----------
+  function stopWakeLoop() {
+    if (wakeRestartTimerRef.current) { clearTimeout(wakeRestartTimerRef.current); wakeRestartTimerRef.current = null; }
+    if (wakeRecogRef.current) {
+      try {
+        wakeRecogRef.current.onend = null;
+        wakeRecogRef.current.onerror = null;
+        wakeRecogRef.current.onresult = null;
+        wakeRecogRef.current.stop();
+      } catch (e) {}
+      wakeRecogRef.current = null;
+    }
+  }
+
+  function scheduleWakeRestart() {
+    if (wakeRestartTimerRef.current) return;
+    const delay = wakeBackoffRef.current;
+    wakeBackoffRef.current = Math.min(delay * 2, 2000);
+    wakeRestartTimerRef.current = setTimeout(() => {
+      wakeRestartTimerRef.current = null;
+      startWakeLoop();
+    }, delay);
+  }
+
+  function startWakeLoop() {
+    if (!earsOnRef.current || !appVisibleRef.current || voiceStateRef.current !== "idle" || wakeRecogRef.current) return;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    try {
+      const rec = new SR();
+      wakeRecogRef.current = rec;
+      rec.lang = "en-US";
+      rec.continuous = true;
+      rec.interimResults = true;
+      let followup = false;
+      rec.onresult = (e) => {
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          if (!e.results[i].isFinal) continue;
+          const txt = (e.results[i][0].transcript || "").trim();
+          if (!txt) continue;
+          if (followup) {
+            followup = false;
+            stopWakeLoop();
+            sendToPolaris(txt);
+            return;
+          }
+          const idx = txt.toLowerCase().indexOf("polaris");
+          if (idx === -1) continue;
+          wakeBackoffRef.current = 300;
+          wakeErrorStreakRef.current = { count: 0, since: 0 };
+          const after = txt.slice(idx + "polaris".length).replace(/^[\s,.:;!?-]+/, "").trim();
+          wakeChime();
+          setWakeFlash(true);
+          setTimeout(() => setWakeFlash(false), 650);
+          if (after) {
+            stopWakeLoop();
+            sendToPolaris(after);
+          } else {
+            followup = true;
+          }
+          return;
+        }
+      };
+      rec.onend = () => {
+        wakeRecogRef.current = null;
+        if (earsOnRef.current && appVisibleRef.current && voiceStateRef.current === "idle") scheduleWakeRestart();
+      };
+      rec.onerror = (e) => {
+        const now = Date.now();
+        const streak = wakeErrorStreakRef.current;
+        if (now - streak.since < 5000) streak.count++; else { streak.count = 1; streak.since = now; }
+        wakeErrorStreakRef.current = streak;
+        if (e.error === "not-allowed" || e.error === "service-not-allowed" || streak.count >= 3) {
+          wakeRecogRef.current = null;
+          saveEarsOn(false);
+          if (!wakeNoticeShownRef.current) {
+            wakeNoticeShownRef.current = true;
+            flash("Hands-free mode isn't supported here — tap the reactor to talk instead");
+          }
+        }
+      };
+      rec.start();
+    } catch (e) {
+      wakeRecogRef.current = null;
+    }
+  }
+
+  useEffect(() => {
+    if (earsOn && appVisible && voiceState === "idle" && speechSupported) {
+      wakeBackoffRef.current = 300;
+      startWakeLoop();
+    } else {
+      stopWakeLoop();
+    }
+  }, [earsOn, appVisible, voiceState, speechSupported]);
+
+  useEffect(() => () => stopWakeLoop(), []);
 
   // ---------- backup / restore ----------
   function download(name, text, type) {
@@ -1850,6 +1991,9 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
         <span style={{ fontFamily: disp, fontWeight: 700, fontSize: 19, letterSpacing: "0.22em", color: breaches.length ? C.red : C.cyan, textShadow: breaches.length ? `0 0 14px rgba(255,85,102,0.6)` : `0 0 14px rgba(0,212,255,0.6)` }}>
           POLARIS
         </span>
+        {earsOn && (
+          <span title="Hands-free ears on" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: C.gold, boxShadow: `0 0 6px ${C.gold}`, animation: "pulse 1.6s ease-in-out infinite" }} />
+        )}
         <span style={{ fontSize: 10, color: C.faint, letterSpacing: "0.1em" }}>NQ TRADE SYSTEMS · {new Date().toDateString().toUpperCase()}</span>
         <span style={{ marginLeft: "auto", fontSize: 13, color: stats ? pnlColor(stats.net) : C.muted }}>
           NET <AnimatedNumber value={stats ? stats.net : 0} format={fmt$} />
@@ -1910,7 +2054,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
         {tab === "POLARIS" && (
           <React.Fragment>
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "14px 0 4px" }}>
-              <Reactor state={voiceState} onClick={toggleListening} />
+              <Reactor state={voiceState} onClick={toggleListening} awake={wakeFlash} />
               <div style={{ marginTop: 10, fontSize: 11, letterSpacing: "0.18em", color: voiceState === "listening" ? C.gold : C.cyan, textTransform: "uppercase" }}>
                 {statusLine}
               </div>
@@ -1923,6 +2067,19 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                 <div style={{ marginTop: 8, fontSize: 11, color: C.muted, textAlign: "center", padding: "0 20px" }}>
                   Voice input isn't available in this browser — type below and I'll still answer out loud.
                 </div>
+              )}
+              {speechSupported && (
+                <button onClick={() => saveEarsOn(!earsOn)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8, marginTop: 12, padding: "8px 16px",
+                    fontFamily: mono, fontSize: 11, fontWeight: 600, letterSpacing: "0.12em", borderRadius: 20, cursor: "pointer",
+                    background: earsOn ? "rgba(0,212,255,0.14)" : "transparent",
+                    color: earsOn ? C.cyan : C.muted,
+                    border: `1px solid ${earsOn ? C.borderBright : C.border}`,
+                  }}>
+                  <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: "50%", background: earsOn ? C.gold : C.faint, boxShadow: earsOn ? `0 0 6px ${C.gold}` : "none", animation: earsOn ? "pulse 1.6s ease-in-out infinite" : "none" }} />
+                  EARS {earsOn ? "ON" : "OFF"} — SAY “POLARIS”
+                </button>
               )}
             </div>
 
