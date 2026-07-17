@@ -679,13 +679,25 @@ function PnlCalendar({ trades }) {
 }
 
 // ---------- wayfinder mark (astrolabe + north star) ----------
-function Reactor({ state, onClick, size = 150, awake }) {
-  const core = awake ? C.gold : state === "listening" ? C.gold : state === "thinking" ? C.cyanDim : C.cyan;
-  const ringSpeed = awake ? "5s" : state === "thinking" ? "3s" : state === "speaking" ? "6s" : state === "listening" ? "8s" : "18s";
-  const ring2Speed = awake ? "7s" : state === "thinking" ? "4.5s" : state === "speaking" ? "9s" : state === "listening" ? "12s" : "27s";
-  const ring3Speed = awake ? "1.5s" : state === "thinking" ? "2s" : state === "speaking" ? "4s" : state === "listening" ? "5.5s" : "12s";
+function Reactor({ state, onClick, size = 150, awake, seqPhase, flash }) {
+  // while idle (no active voice interaction), let scanner activity drive the ambient pulse:
+  // sweep < cisd < retrace speed up progressively, and a completed setup flashes gold.
+  const PHASE_SPEED = {
+    sweep: { ring: "12s", ring2: "18s", ring3: "8s", pulse: "2.2s" },
+    cisd: { ring: "8s", ring2: "12s", ring3: "5s", pulse: "1.6s" },
+    retrace: { ring: "5s", ring2: "8s", ring3: "3s", pulse: "1.1s" },
+  };
+  const scannerMood = state !== "idle" || awake ? null :
+    flash ? { core: C.gold, ring: "3s", ring2: "4.5s", ring3: "1.5s", pulse: "0.3s" } :
+    seqPhase && PHASE_SPEED[seqPhase] ? { core: C.cyan, ...PHASE_SPEED[seqPhase] } : null;
+
+  const core = awake ? C.gold : scannerMood ? scannerMood.core : state === "listening" ? C.gold : state === "thinking" ? C.cyanDim : C.cyan;
+  const ringSpeed = awake ? "5s" : scannerMood ? scannerMood.ring : state === "thinking" ? "3s" : state === "speaking" ? "6s" : state === "listening" ? "8s" : "18s";
+  const ring2Speed = awake ? "7s" : scannerMood ? scannerMood.ring2 : state === "thinking" ? "4.5s" : state === "speaking" ? "9s" : state === "listening" ? "12s" : "27s";
+  const ring3Speed = awake ? "1.5s" : scannerMood ? scannerMood.ring3 : state === "thinking" ? "2s" : state === "speaking" ? "4s" : state === "listening" ? "5.5s" : "12s";
   const pulse =
     awake ? "pulse 0.3s ease-in-out infinite" :
+    scannerMood ? `pulse ${scannerMood.pulse} ease-in-out infinite` :
     state === "listening" ? "pulse 0.8s ease-in-out infinite" :
     state === "speaking" ? "pulse 0.45s ease-in-out infinite" :
     "pulse 3.2s ease-in-out infinite";
@@ -725,7 +737,9 @@ function Reactor({ state, onClick, size = 150, awake }) {
 }
 
 // ---------- ambient backdrop ----------
-function Backdrop() {
+function Backdrop({ dayPct }) {
+  const mood = dayPct == null || !Number.isFinite(dayPct) ? null : dayPct > 0 ? C.green : dayPct < 0 ? C.red : null;
+  const moodOpacity = mood ? Math.min(Math.abs(dayPct) / 2, 1) * 0.06 : 0;
   return (
     <div aria-hidden="true" style={{ position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none", overflow: "hidden" }}>
       <div style={{ position: "absolute", width: "70%", height: "70%", top: "-18%", left: "-12%", background: "radial-gradient(circle, rgba(0,212,255,0.17) 0%, transparent 70%)", filter: "blur(70px)", animation: "auroraDrift1 32s ease-in-out infinite" }} />
@@ -733,6 +747,9 @@ function Backdrop() {
       <div style={{ position: "absolute", width: "52%", height: "52%", top: "28%", left: "32%", background: "radial-gradient(circle, rgba(0,212,255,0.10) 0%, transparent 70%)", filter: "blur(90px)", animation: "auroraDrift3 26s ease-in-out infinite" }} />
       <div style={{ position: "absolute", width: "42%", height: "42%", top: "2%", right: "2%", background: "radial-gradient(circle, rgba(128,96,224,0.13) 0%, transparent 70%)", filter: "blur(65px)", animation: "auroraDrift2 36s ease-in-out infinite reverse" }} />
       <div style={{ position: "absolute", width: "38%", height: "38%", bottom: "8%", left: "-6%", background: "radial-gradient(circle, rgba(0,212,255,0.09) 0%, transparent 70%)", filter: "blur(60px)", animation: "auroraDrift1 24s ease-in-out infinite reverse" }} />
+      {mood && (
+        <div style={{ position: "absolute", inset: 0, background: `radial-gradient(120% 90% at 50% 40%, ${mood} 0%, transparent 65%)`, opacity: moodOpacity, transition: "opacity 3s ease" }} />
+      )}
       <div style={{ position: "absolute", inset: 0, background: "radial-gradient(130% 110% at 50% 45%, transparent 45%, rgba(0,0,0,0.55) 100%)" }} />
     </div>
   );
@@ -857,6 +874,7 @@ function App() {
   const [scanning, setScanning] = useState(false);
   const [scanEvents, setScanEvents] = useState([]);
   const [seqView, setSeqView] = useState(null);
+  const [reactorFlash, setReactorFlash] = useState(false);
   const [mktStatus, setMktStatus] = useState("");
   const [source, setSource] = useState("AUTO");
   const tdKeyRef = useRef(tdKey); tdKeyRef.current = tdKey;
@@ -1884,7 +1902,12 @@ Rules:
       };
       addScanEvent({ time: cs[i].t, type, dir, msg: msgs[type] });
       if (!silent && scanningRef.current) {
-        if (type === "complete") { chime(3); speak(`Sir, your setup is complete on ${symbolRef.current}. The ${dirWord} model delivered: sweep, shift, and rejection from the imbalance.`); }
+        if (type === "complete") {
+          chime(3);
+          speak(`Sir, your setup is complete on ${symbolRef.current}. The ${dirWord} model delivered: sweep, shift, and rejection from the imbalance.`);
+          setReactorFlash(true);
+          setTimeout(() => setReactorFlash(false), 5000);
+        }
         else if (type === "sweep" || type === "cisd" || type === "retrace") { chime(1); speak(msgs[type]); }
       }
     };
@@ -2326,7 +2349,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
 
   return (
     <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 700px at 50% -10%, #06182B 0%, ${C.bg} 55%)`, color: C.text, fontFamily: mono }}>
-      <Backdrop />
+      <Backdrop dayPct={dayPct} />
       {/* status bar */}
       <div style={{ borderBottom: `1px solid ${breaches.length ? C.red : C.border}`, background: breaches.length ? "rgba(40,8,12,0.85)" : "rgba(5,14,26,0.85)", padding: "10px 16px", display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", position: "sticky", top: 0, zIndex: 5, backdropFilter: "blur(8px)" }}>
         <span style={{ fontFamily: disp, fontWeight: 700, fontSize: 19, letterSpacing: "0.22em", color: breaches.length ? C.red : C.cyan, textShadow: breaches.length ? `0 0 14px rgba(255,85,102,0.6)` : `0 0 14px rgba(0,212,255,0.6)` }}>
@@ -2336,6 +2359,15 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
           <span title="Hands-free ears on" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: C.gold, boxShadow: `0 0 6px ${C.gold}`, animation: "pulse 1.6s ease-in-out infinite" }} />
         )}
         <span style={{ fontSize: 10, color: C.faint, letterSpacing: "0.1em" }}>NQ TRADE SYSTEMS · {new Date().toDateString().toUpperCase()}</span>
+        {lastPx != null && (
+          <span style={{ fontSize: 12, display: "flex", alignItems: "baseline", gap: 6 }}>
+            <span style={{ color: C.muted }}>{activeSource === "NQ" ? "NQ=F" : symbol.toUpperCase()}</span>
+            <span style={{ color: C.text, fontWeight: 600 }}>{lastPx.toFixed(2)}</span>
+            {dayPct != null && (
+              <span style={{ color: pnlColor(dayPct), fontWeight: 600 }}>{dayPct >= 0 ? "+" : ""}{dayPct.toFixed(2)}%</span>
+            )}
+          </span>
+        )}
         <span style={{ marginLeft: "auto", fontSize: 13, color: stats ? pnlColor(stats.net) : C.muted }}>
           NET <AnimatedNumber value={stats ? stats.net : 0} format={fmt$} />
           <span style={{ color: C.cyan, animation: "blink 1.2s step-end infinite" }}>▌</span>
@@ -2395,7 +2427,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
         {tab === "POLARIS" && (
           <React.Fragment>
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "14px 0 4px" }}>
-              <Reactor state={voiceState} onClick={toggleListening} awake={wakeFlash} />
+              <Reactor state={voiceState} onClick={toggleListening} awake={wakeFlash} seqPhase={scanning && seqView ? seqView.phase : null} flash={reactorFlash} />
               <div style={{ marginTop: 10, fontSize: 11, letterSpacing: "0.18em", color: voiceState === "listening" ? C.gold : C.cyan, textTransform: "uppercase" }}>
                 {statusLine}
               </div>
