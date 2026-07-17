@@ -130,14 +130,19 @@ function trimPotentialTagPrefix(s) {
   return s;
 }
 
-function isRegularUSHours(d) {
+function nyClock(d) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York", hour12: false, weekday: "short", hour: "numeric", minute: "numeric",
   }).formatToParts(d || new Date());
   const map = {};
   parts.forEach((p) => { map[p.type] = p.value; });
-  const isWeekday = map.weekday !== "Sat" && map.weekday !== "Sun";
-  const minutesNow = Number(map.hour) * 60 + Number(map.minute);
+  return { hour: Number(map.hour), minute: Number(map.minute), weekday: map.weekday };
+}
+
+function isRegularUSHours(d) {
+  const { hour, minute, weekday } = nyClock(d);
+  const isWeekday = weekday !== "Sat" && weekday !== "Sun";
+  const minutesNow = hour * 60 + minute;
   return isWeekday && minutesNow >= 9 * 60 + 30 && minutesNow < 16 * 60;
 }
 
@@ -799,6 +804,18 @@ function App() {
   const rulesRef = useRef(rules); rulesRef.current = rules;
   const [deskBusy, setDeskBusy] = useState(false);
 
+  // ----- proactive presence -----
+  const [proactiveMode, setProactiveMode] = useState(true);
+  const proactiveModeRef = useRef(true); proactiveModeRef.current = proactiveMode;
+  const [pnlMilestone, setPnlMilestone] = useState(500);
+  const pnlMilestoneRef = useRef(500); pnlMilestoneRef.current = pnlMilestone;
+  const lastProactiveAtRef = useRef(0);
+  const announcedBellsRef = useRef(new Set());
+  const announcedPreWarnRef = useRef(new Set());
+  const announcedMilestoneRef = useRef(new Set());
+  const scanStartAtRef = useRef(0);
+  const lastScanEventAtRef = useRef(0);
+
   // ----- cross-device sync -----
   const [syncToken, setSyncToken] = useState("");
   const [gistId, setGistId] = useState("");
@@ -883,6 +900,8 @@ function App() {
       chatLoadedRef.current = true;
       try { const m = await S.get("polaris-memory"); if (m && m.value) setMemory(m.value); } catch (e) {}
       try { const ru = await S.get("polaris-rules"); if (ru && ru.value) setRules({ ...DEFAULT_RULES, ...JSON.parse(ru.value) }); } catch (e) {}
+      try { const pm = await S.get("polaris-proactive-mode"); if (pm && pm.value) setProactiveMode(pm.value === "true"); } catch (e) {}
+      try { const pt = await S.get("polaris-pnl-threshold"); if (pt && pt.value) setPnlMilestone(Number(pt.value) || 500); } catch (e) {}
       try { const st = await S.get("polaris-sync-token"); if (st && st.value) setSyncToken(st.value); } catch (e) {}
       try { const gi = await S.get("polaris-sync-gistid"); if (gi && gi.value) setGistId(gi.value); } catch (e) {}
       try { const se = await S.get("polaris-sync-enabled"); if (se && se.value) setSyncEnabled(se.value === "true"); } catch (e) {}
@@ -979,6 +998,16 @@ function App() {
     setRules(next);
     rulesRef.current = next;
     try { await S.set("polaris-rules", JSON.stringify(next)); } catch (e) {}
+  }
+  async function saveProactiveMode(v) {
+    setProactiveMode(v);
+    proactiveModeRef.current = v;
+    try { await S.set("polaris-proactive-mode", String(v)); } catch (e) {}
+  }
+  async function savePnlMilestone(v) {
+    setPnlMilestone(v);
+    pnlMilestoneRef.current = v;
+    try { await S.set("polaris-pnl-threshold", String(v)); } catch (e) {}
   }
 
   async function saveSyncToken(v) {
@@ -1331,9 +1360,10 @@ Rules:
   const todaysTrades = useMemo(() => trades.filter((t) => t.date === todayISO), [trades, todayISO]);
   const todaysTradesRef = useRef(todaysTrades); todaysTradesRef.current = todaysTrades;
 
+  const netToday = useMemo(() => todaysTrades.reduce((a, t) => a + calcPnl(t), 0), [todaysTrades]);
+
   const breaches = useMemo(() => {
     const list = [];
-    const netToday = todaysTrades.reduce((a, t) => a + calcPnl(t), 0);
     if (rules.maxTrades.enabled && todaysTrades.length >= rules.maxTrades.value) {
       list.push({ key: `maxTrades:${todayISO}`, label: `MAX TRADES PER DAY (${rules.maxTrades.value})` });
     }
@@ -1350,7 +1380,7 @@ Rules:
       }
     }
     return list;
-  }, [todaysTrades, rules, now, todayISO]);
+  }, [todaysTrades, rules, now, todayISO, netToday]);
   const announcedBreachesRef = useRef(new Set());
 
   useEffect(() => {
@@ -1364,6 +1394,91 @@ Rules:
       updateMemory("rule breach", "[system: rule breach detected]", `Breach: ${b.label} on ${todayISO}.`);
     });
   }, [breaches]);
+
+  // ---------- proactive presence ----------
+  const preWarnings = useMemo(() => {
+    const list = [];
+    if (rules.maxTrades.enabled && todaysTrades.length === rules.maxTrades.value - 1) {
+      list.push({ key: `preMaxTrades:${todayISO}`, text: `Heads up, sir — one more trade puts you at your daily max of ${rules.maxTrades.value}.` });
+    }
+    if (rules.maxLoss.enabled) {
+      const limit = Math.abs(rules.maxLoss.value);
+      if (netToday <= -0.8 * limit && netToday > -limit) {
+        list.push({ key: `preMaxLoss:${todayISO}`, text: `Sir, you're within reach of your daily loss limit of ${fmt$(rules.maxLoss.value)}. Mind the size.` });
+      }
+    }
+    return list;
+  }, [todaysTrades, rules, todayISO, netToday]);
+
+  function speakProactive(text, opts) {
+    const bypassCap = !!(opts && opts.bypassCap);
+    if (!proactiveModeRef.current) return false;
+    const nowTs = Date.now();
+    if (!bypassCap && nowTs - lastProactiveAtRef.current < 10 * 60000) return false;
+    if (!bypassCap) lastProactiveAtRef.current = nowTs;
+    chime(1);
+    setChat((prev) => [...prev, { role: "assistant", content: text }]);
+    speak(text);
+    return true;
+  }
+
+  useEffect(() => {
+    preWarnings.forEach((w) => {
+      if (announcedPreWarnRef.current.has(w.key)) return;
+      announcedPreWarnRef.current.add(w.key);
+      speakProactive(w.text, { bypassCap: true });
+    });
+  }, [preWarnings]);
+
+  useEffect(() => {
+    const { hour, minute, weekday } = nyClock(new Date(now));
+    if (weekday === "Sat" || weekday === "Sun") return;
+    const dateKey = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(now));
+    const bells = [
+      { key: "open", h: 9, m: 30, lines: [
+        "Good morning, sir — the opening bell has rung. Eyes on the tape.",
+        "Sir, New York's open. Let's see what the first candles bring.",
+      ] },
+      { key: "finalhour", h: 15, m: 0, lines: [
+        "Final hour of the session, sir. Mind your process on the way out.",
+        "Sir, one hour left on the clock. Stay sharp, not hasty.",
+      ] },
+      { key: "close", h: 16, m: 0, lines: [
+        "Sir, that's the closing bell. Session's done — well fought or well learned.",
+        "Market's closed, sir. Time to review, not to chase.",
+      ] },
+    ];
+    bells.forEach((b) => {
+      if (hour !== b.h || minute !== b.m) return;
+      const dedupeKey = `${b.key}:${dateKey}`;
+      if (announcedBellsRef.current.has(dedupeKey)) return;
+      announcedBellsRef.current.add(dedupeKey);
+      speakProactive(b.lines[Math.floor(Math.random() * b.lines.length)]);
+    });
+  }, [now]);
+
+  useEffect(() => {
+    if (!scanning) return;
+    const lastActivity = lastScanEventAtRef.current || scanStartAtRef.current;
+    if (!lastActivity || Date.now() - lastActivity < 30 * 60000) return;
+    const fired = speakProactive("Still watching, sir — nothing's printed on the model yet.");
+    if (fired) lastScanEventAtRef.current = Date.now();
+  }, [now, scanning]);
+
+  useEffect(() => {
+    const threshold = Math.abs(pnlMilestoneRef.current);
+    if (!threshold) return;
+    const sign = netToday > 0 ? "up" : netToday < 0 ? "down" : null;
+    if (!sign || Math.abs(netToday) < threshold) return;
+    const key = `${todayISO}:${sign}:${threshold}`;
+    if (announcedMilestoneRef.current.has(key)) return;
+    announcedMilestoneRef.current.add(key);
+    speakProactive(
+      sign === "up"
+        ? `Sir, you've crossed ${fmt$(threshold)} up on the day. Steady hands.`
+        : `Sir, you're down ${fmt$(threshold)} on the day. Worth a pause.`
+    );
+  }, [netToday, todayISO, pnlMilestone]);
 
   const acct = Number(risk.account) || 0;
   const riskDollars = acct * ((Number(risk.pct) || 0) / 100);
@@ -1745,6 +1860,7 @@ Rules:
   }
 
   function addScanEvent(ev) {
+    lastScanEventAtRef.current = Date.now();
     setScanEvents((prev) => [ev, ...prev].slice(0, 30));
   }
 
@@ -1875,6 +1991,8 @@ Rules:
       seqRef.current = null;
       processedRef.current = null;
       setSeqView(null);
+      scanStartAtRef.current = Date.now();
+      lastScanEventAtRef.current = 0;
       chime(1);
     }
     setScanning((s) => !s);
@@ -2926,6 +3044,23 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                   ⛔ {breaches.length} rule{breaches.length > 1 ? "s" : ""} breached today — see the banner above.
                 </div>
               )}
+            </Panel>
+
+            <Panel>
+              <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>PRESENCE — SPEAKING UP UNPROMPTED</div>
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
+                Lets Polaris speak without being asked: session bells, rule pre-warnings, a scanner heartbeat, and P&amp;L milestones. Capped at one proactive line every 10 minutes — rule pre-warnings always get through regardless. No API calls for these lines.
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: proactiveMode ? C.text : C.muted, cursor: "pointer", padding: "10px 0", borderTop: `1px solid ${C.border}` }}>
+                <input type="checkbox" checked={proactiveMode} onChange={(e) => saveProactiveMode(e.target.checked)} style={{ accentColor: C.cyan }} />
+                PROACTIVE MODE {proactiveMode ? "ON" : "OFF"}
+              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 0", borderTop: `1px solid ${C.border}`, flexWrap: "wrap" }}>
+                <label style={{ fontSize: 12, color: C.text, flex: 1, minWidth: 180 }}>P&amp;L MILESTONE THRESHOLD ($)</label>
+                <input type="number" min={1} step={50} value={pnlMilestone} disabled={!proactiveMode}
+                  onChange={(e) => savePnlMilestone(Number(e.target.value) || 1)}
+                  style={{ ...inputStyle, width: 100, opacity: proactiveMode ? 1 : 0.5 }} />
+              </div>
             </Panel>
 
             <Panel>
