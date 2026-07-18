@@ -67,7 +67,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.07.18-2";
+const BUILD = "2026.07.18-3";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -179,6 +179,24 @@ async function fetchViaRelay(targetUrl) {
     } catch (e) { lastErr = e; }
   }
   throw lastErr || new Error("all relays failed");
+}
+
+// extracts a real, actionable message from a failed ElevenLabs response instead of
+// swallowing it into a generic "didn't work" — falls back to a status-code hint if the
+// body isn't parseable JSON.
+async function elevenLabsErrorMessage(res) {
+  let detail = null;
+  try {
+    const data = await res.json();
+    const d = data && data.detail;
+    detail = typeof d === "string" ? d : (d && (d.message || d.status)) || null;
+  } catch (e) {}
+  if (detail) return detail;
+  if (res.status === 401) return "invalid API key (HTTP 401)";
+  if (res.status === 403) return "not permitted on your plan (HTTP 403)";
+  if (res.status === 422) return "invalid request — check the selected voice (HTTP 422)";
+  if (res.status === 429) return "rate limit or quota exceeded (HTTP 429)";
+  return "HTTP " + res.status;
 }
 
 function resizeImageToDataURL(file, maxDim, quality) {
@@ -1543,7 +1561,7 @@ Rules:
     setElStatus("Loading voices…");
     try {
       const res = await fetch("https://api.elevenlabs.io/v1/voices", { headers: { "xi-api-key": key } });
-      if (!res.ok) throw new Error("bad key");
+      if (!res.ok) throw new Error(await elevenLabsErrorMessage(res));
       const data = await res.json();
       const vs = (data.voices || []).map((v) => ({ id: v.voice_id, name: v.name }));
       if (!vs.length) { setElStatus("Key works, but no voices in your account — add some from the Voice Library on elevenlabs.io"); return; }
@@ -1553,9 +1571,17 @@ Rules:
       setElStatus(vs.length + " voices loaded");
       saveElConfig({ key, voiceId: pick, voices: vs });
     } catch (e) {
-      setElStatus("Couldn't load voices — check the API key");
+      setElStatus("Couldn't load voices — " + (e.message || "check the API key and connection"));
     }
   }
+
+  // once a key is present and voices haven't been loaded yet, load them automatically —
+  // otherwise the engine silently falls back to device voice with no indication why.
+  useEffect(() => {
+    if (engine !== "elevenlabs" || !elKey.trim() || elVoices.length > 0) return;
+    const id = setTimeout(() => { loadElVoices(); }, 800);
+    return () => clearTimeout(id);
+  }, [engine, elKey]);
 
   function speakDevice(text) {
     if (!window.speechSynthesis) { setVoiceState("idle"); return; }
@@ -1577,7 +1603,11 @@ Rules:
   async function speakEleven(text) {
     const key = elKeyRef.current.trim();
     const voiceId = elVoiceIdRef.current;
-    if (!key || !voiceId) { speakDevice(text); return; }
+    if (!key || !voiceId) {
+      setElStatus("ElevenLabs isn't set up yet — add an API key and load a voice above. Using device voice for now.");
+      speakDevice(text);
+      return;
+    }
     setVoiceState("speaking");
     try {
       const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`, {
@@ -1589,7 +1619,7 @@ Rules:
           voice_settings: { stability: 0.5, similarity_boost: 0.75 },
         }),
       });
-      if (!res.ok) throw new Error("tts failed");
+      if (!res.ok) throw new Error(await elevenLabsErrorMessage(res));
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
@@ -1598,7 +1628,7 @@ Rules:
       audio.onerror = () => { setVoiceState("idle"); URL.revokeObjectURL(url); };
       await audio.play();
     } catch (e) {
-      setElStatus("ElevenLabs playback failed — using device voice");
+      setElStatus("ElevenLabs error: " + (e.message || "playback failed") + " — using device voice");
       speakDevice(text);
     }
   }
@@ -1647,7 +1677,7 @@ Rules:
         }),
         signal: controller.signal,
       });
-      if (!res.ok) throw new Error("tts failed");
+      if (!res.ok) throw new Error(await elevenLabsErrorMessage(res));
       const blob = await res.blob();
       return URL.createObjectURL(blob);
     })();
@@ -1690,7 +1720,7 @@ Rules:
         audio.play().catch(() => advance());
       }).catch((e) => {
         if (e.name !== "AbortError" && !ttsInterruptedRef.current) {
-          setElStatus("ElevenLabs playback failed — using device voice");
+          setElStatus("ElevenLabs error: " + (e.message || "playback failed") + " — using device voice");
           ttsQueueRef.current.unshift({ text: item.text, kind: "device" });
         }
         advance();
@@ -1701,9 +1731,14 @@ Rules:
   function enqueueSentence(text) {
     const t = (text || "").trim();
     if (!t || !voiceOutRef.current || ttsInterruptedRef.current) return;
-    if (engineRef.current === "elevenlabs" && elKeyRef.current.trim() && elVoiceIdRef.current) {
-      const { promise, controller } = fetchElevenAudio(t);
-      ttsQueueRef.current.push({ text: t, kind: "eleven", promise, controller });
+    if (engineRef.current === "elevenlabs") {
+      if (elKeyRef.current.trim() && elVoiceIdRef.current) {
+        const { promise, controller } = fetchElevenAudio(t);
+        ttsQueueRef.current.push({ text: t, kind: "eleven", promise, controller });
+      } else {
+        setElStatus("ElevenLabs isn't set up yet — add an API key and load a voice in SETUP. Using device voice for now.");
+        ttsQueueRef.current.push({ text: t, kind: "device" });
+      }
     } else {
       ttsQueueRef.current.push({ text: t, kind: "device" });
     }
