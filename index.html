@@ -62,6 +62,9 @@ const S = {
 };
 
 // ---------- constants ----------
+// bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
+// increments for additional same-day commits. Drives the in-app update check below.
+const BUILD = "2026.07.18-1";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -128,6 +131,19 @@ function trimPotentialTagPrefix(s) {
     if (s.slice(-len) === tag.slice(0, len)) return s.slice(0, s.length - len);
   }
   return s;
+}
+
+// compares two "YYYY.MM.DD-N" build stamps; returns >0 if a is newer than b, 0 if equal, <0 if older.
+// falls back to a plain string compare if either doesn't match the expected shape.
+function compareBuildStamps(a, b) {
+  const parse = (s) => {
+    const m = /^(\d{4}\.\d{2}\.\d{2})-(\d+)$/.exec(s || "");
+    return m ? { date: m[1], n: Number(m[2]) } : null;
+  };
+  const pa = parse(a), pb = parse(b);
+  if (!pa || !pb) return a === b ? 0 : a > b ? 1 : -1;
+  if (pa.date !== pb.date) return pa.date > pb.date ? 1 : -1;
+  return pa.n - pb.n;
 }
 
 function nyClock(d) {
@@ -762,6 +778,7 @@ function App() {
   const [toast, setToast] = useState("");
   const [storageOk, setStorageOk] = useState(true);
   const [now, setNow] = useState(Date.now());
+  const [updateAvailable, setUpdateAvailable] = useState(false);
 
   const blank = {
     date: new Date().toISOString().slice(0, 10),
@@ -968,6 +985,19 @@ function App() {
     const onVis = () => setAppVisible(!document.hidden);
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const noCacheUrl = window.location.href.split("#")[0].split("?")[0] + "?_=" + Date.now();
+        const res = await fetch(noCacheUrl, { cache: "no-store" });
+        if (!res.ok) return;
+        const text = await res.text();
+        const m = /BUILD\s*=\s*"([^"]+)"/.exec(text);
+        if (m && m[1] && compareBuildStamps(m[1], BUILD) > 0) setUpdateAvailable(true);
+      } catch (e) { /* offline, local file://, or no deployed copy to compare against — skip silently */ }
+    })();
   }, []);
 
   useEffect(() => {
@@ -2374,6 +2404,13 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
         </span>
       </div>
 
+      {updateAvailable && (
+        <div onClick={() => window.location.reload()} role="button" tabIndex={0}
+          style={{ cursor: "pointer", background: "linear-gradient(90deg, rgba(0,212,255,0.22), rgba(0,212,255,0.08), rgba(0,212,255,0.22))", backgroundSize: "200% 100%", animation: "shimmer 3s linear infinite", borderBottom: `1px solid ${C.borderBright}`, color: C.cyan, padding: "10px 16px", fontFamily: mono, fontWeight: 700, letterSpacing: "0.08em", fontSize: 12, textAlign: "center", position: "relative", zIndex: 4 }}>
+          ⬆ UPDATE AVAILABLE — TAP TO RELOAD
+        </div>
+      )}
+
       {badgeBurst && <BadgeBurst key={badgeBurst.key} label={badgeBurst.label} />}
 
       {viewImage && (
@@ -2887,6 +2924,9 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
         {/* ================= SETUP ================= */}
         {tab === "SETUP" && (
           <React.Fragment>
+            <div style={{ textAlign: "right", fontSize: 10, color: C.faint, letterSpacing: "0.1em" }}>
+              BUILD {BUILD}
+            </div>
             <Panel>
               <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>THE BRAIN — ANTHROPIC API</div>
               <div style={{ color: C.muted, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
@@ -3173,7 +3213,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
         </div>
 
         <div style={{ textAlign: "center", color: C.faint, fontSize: 10, letterSpacing: "0.1em", padding: "6px 0 20px" }}>
-          NQ $20/PT · MNQ $2/PT · TICK 0.25 · STANDALONE MODE — DATA SAVED IN THIS BROWSER
+          NQ $20/PT · MNQ $2/PT · TICK 0.25 · STANDALONE MODE — DATA SAVED IN THIS BROWSER · BUILD {BUILD}
         </div>
       </div>
     </div>

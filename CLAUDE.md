@@ -29,6 +29,24 @@ file in a browser (or serve it statically) and it runs.
   in the `<style>` block — any new animation done via the CSS `animation` property is automatically
   covered; no manual reduced-motion handling needed.
 
+## Build stamp — bump on every commit
+
+`index.html` defines `const BUILD = "YYYY.MM.DD-N";` near the top of the constants block. **Every
+commit that changes `index.html` must bump this value** to today's date, with `N` reset to `1` on a
+new date and incremented for additional same-day commits (e.g. `2026.07.18-1` →
+`2026.07.18-2` → `2026.07.19-1`). This is not optional — the in-app update check below fetches the
+deployed copy and compares its `BUILD` against the running one, so a commit that forgets to bump it
+will silently defeat that check for anyone still on the old copy. `BUILD` is displayed in the footer
+line and at the top of the SETUP tab.
+
+On mount, `App` fetches its own URL with `cache: "no-store"` and a cache-busting query param,
+regexes out `BUILD` from the response, and compares it against the running `BUILD` with
+`compareBuildStamps` (a small date+numeric-suffix comparator — not a plain string compare, so
+`-10` correctly sorts after `-9`). If the fetched copy is newer, a persistent "UPDATE AVAILABLE —
+TAP TO RELOAD" banner appears; tapping it calls `window.location.reload()`. The fetch is wrapped in
+try/catch and fails silently (offline, `file://`, no deployed copy to compare against) — it's a
+best-effort convenience, not a requirement for the app to function.
+
 ## Feature map
 
 - **Trade journal** (LOG/JOURNAL/DESK/RISK tabs): manual entry, CSV/JSON export/import, P&L
@@ -128,5 +146,5 @@ alone.
 
 ## Git
 
-Primary branch: `main`. This session's work landed on `claude/polaris-living-system-ahe5fl` (4
-commits, one per feature above) and has been pushed but not yet merged to `main`.
+Primary branch: `main`. This session's work landed on `claude/polaris-living-system-ahe5fl`
+(one commit per feature above) and has been pushed but not yet merged to `main`.
