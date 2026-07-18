@@ -125,6 +125,30 @@ best-effort convenience, not a requirement for the app to function.
 - Yahoo Finance via a public CORS relay (`fetchViaRelay`, NQ=F futures, delayed).
 - GitHub Gists API (optional cross-device sync, user's own PAT).
 
+## Hosting & installable app (PWA)
+
+The repo is no longer *only* `index.html` — three small files make it a hostable, installable app
+without changing anything about how it runs (still 100% client-side, no server logic, keys still
+live in the user's own browser):
+
+- `manifest.json` — name/icons/`display: "standalone"` so the browser offers "Install app"; icons
+  live in `icons/` (`icon-192.png`, `icon-512.png`, `icon-maskable-512.png`, all rendered from the
+  same north-star mark used by the favicon and the `Reactor` component).
+- `sw.js` — a minimal service worker (network-first, falls back to cache offline) registered from a
+  plain `<script>` tag at the bottom of `index.html`, right after the babel script. It's what makes
+  the app installable and gives it a basic offline shell; it does not manage versioning — that's
+  still the BUILD-stamp banner's job (see above). Keep the two mechanisms separate rather than
+  layering the service worker's own update flow on top.
+- `.nojekyll` — stops GitHub Pages from running its default Jekyll processing over the repo (mostly
+  matters for any future folder starting with `_`; cheap insurance either way).
+
+For GitHub Pages specifically: it serves whatever branch/folder is configured in
+Settings → Pages → Build and deployment, and — important — **Pages sites are public even on private
+repos** unless the repo is on a paid plan with private Pages support. `index.html` never embeds
+secrets (API keys are entered per-visitor into their own `localStorage`), so public hosting is safe
+by design, but this is still worth confirming with a human before enabling Pages on a repo they
+haven't explicitly said should be public-facing.
+
 ## Verifying changes
 
 There's no test suite or dev server. To check a change is syntactically valid before committing:
