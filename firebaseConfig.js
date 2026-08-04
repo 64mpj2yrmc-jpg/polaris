@@ -12,10 +12,10 @@
 // Firebase Hosting -> it'll show this exact object to copy.
 
 window.POLARIS_FIREBASE_CONFIG = {
-  apiKey: "REPLACE_ME",
-  authDomain: "REPLACE_ME.firebaseapp.com",
-  projectId: "REPLACE_ME",
-  storageBucket: "REPLACE_ME.appspot.com",
-  messagingSenderId: "REPLACE_ME",
-  appId: "REPLACE_ME",
+  apiKey: "AIzaSyD-ZimcFWgf2WMzjZii437ho8rae7wa6KQ",
+  authDomain: "polaris-9a924.firebaseapp.com",
+  projectId: "polaris-9a924",
+  storageBucket: "polaris-9a924.firebasestorage.app",
+  messagingSenderId: "1095754900970",
+  appId: "1:1095754900970:web:c5435264c221f645eb3e93",
 };
