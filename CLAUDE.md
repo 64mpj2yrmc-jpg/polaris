@@ -200,6 +200,14 @@ app can't receive them — hence the exception to "no server logic" above). It d
 - `DEPLOYMENT_STEPS.md` describes the CLI-based deploy path. The actual deployed service
   (`receive-alert` on Cloud Run, region set during setup) was created via Cloud Run console →
   Write a function → Node.js → inline editor, entry point `receiveAlert`.
+- `pinescript/polaris-scanner.pine` — a Pine Script v6 port of the same sweep → CISD → FVG retrace
+  → rejection model as the JS scanner (`advanceScan`/`findSwings`/`fvgAt` in `index.html`), meant
+  to run on a live TradingView chart and fire the webhook on each completed setup. Entry/stop/
+  target/confidence are **not** part of the original JS model (which only annotates chart
+  structure) — they're invented in this file specifically for the webhook payload: stop = swept
+  level ± buffer, target = entry ± risk × an R-multiple input, confidence = a simple FVG-size-vs-
+  ATR(14) heuristic. All adjustable via script inputs. Lives in TradingView's Pine Editor, not
+  deployed through this repo — pasted in by hand, no compiler available to verify it here.
 
 Phase 2 (dashboard integration, Firebase Auth in the frontend, a status-update UI) hasn't been
 built yet — ask for it explicitly when ready.
