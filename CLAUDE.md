@@ -168,6 +168,32 @@ For real verification, open `index.html` in a browser and exercise the actual fe
 this app's logic (voice, scanner, streaming, proactive timers) can't be caught by a syntax check
 alone.
 
+## Firebase backend (Pine Script alert webhook — Phase 1, not yet wired to the frontend)
+
+The repo now also contains a small, separate Firebase backend whose only job is receiving
+TradingView Pine Script alert webhooks (TradingView's servers fire these, so a client-side-only
+app can't receive them — hence the exception to "no server logic" above). It does not affect how
+`index.html` runs and nothing in it imports these files yet:
+
+- `functions/index.js` — the `receiveAlert` HTTPS Cloud Function (v2, Admin SDK). Validates the
+  payload, checks a shared secret (`WEBHOOK_SECRET`, stored in Secret Manager — never in source),
+  and writes to the Firestore `alerts` collection.
+- `firestore.rules` — deliberately does **not** allow unauthenticated client writes to `/alerts`,
+  even though that was the original ask. The Cloud Function's Admin SDK write bypasses rules
+  entirely, so it's already the real security boundary; opening Firestore itself to public writes
+  would let anyone with the (necessarily public) client config skip the webhook's secret check.
+  Reads require Firebase Auth; the dashboard may only ever flip `status` between
+  `pending`/`traded`/`missed`, never touch price/confidence fields, never create or delete.
+- `firebase.json`, `.firebaserc` (placeholder project ID — must be edited before deploying),
+  `firestore.indexes.json` — standard Firebase CLI project scaffold.
+- `firebaseConfig.js` — placeholder client SDK config for the *future* Phase 2 (dashboard reading
+  `/alerts` live via `onSnapshot`, signed in anonymously). Not imported anywhere yet.
+- See `DEPLOYMENT_STEPS.md` for the full deploy walkthrough — project creation, secret setup,
+  `firebase deploy`, TradingView alert JSON template, curl testing, log verification.
+
+Phase 2 (dashboard integration, Firebase Auth in the frontend, a status-update UI) hasn't been
+built yet — ask for it explicitly when ready.
+
 ## Git
 
 Primary branch: `main`. This session's work landed on `claude/polaris-living-system-ahe5fl`

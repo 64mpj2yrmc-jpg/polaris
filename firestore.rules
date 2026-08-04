@@ -1,0 +1,48 @@
+rules_version = '2';
+
+// ============================================================================
+// Polaris — Firestore Security Rules
+// ============================================================================
+// NOTE ON /alerts: the spec asked for rules that "allow unauthenticated POST
+// to /alerts for the Pine Script webhook." That's intentionally NOT how this
+// is wired up. TradingView's webhook never talks to Firestore directly — it
+// hits the receiveAlert Cloud Function (functions/index.js), which checks a
+// shared secret and then writes via the Admin SDK, which bypasses these
+// rules entirely. That function IS the security boundary for writes.
+//
+// If these rules also allowed public unauthenticated writes to /alerts,
+// anyone who opened the Polaris page and inspected its (necessarily public)
+// Firebase client config could write directly to Firestore, skipping the
+// webhook's secret check and validation completely. That would defeat the
+// entire point of having a secret. So: writes are Cloud-Function-only, full
+// stop. Reads (and narrow status updates) require Firebase Auth.
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /alerts/{alertId} {
+      // Polaris dashboard reads, once signed in. Anonymous Auth is enough
+      // for a single-user personal app (zero login UI needed) — swap for a
+      // real identity provider if this ever becomes multi-user.
+      allow read: if request.auth != null;
+
+      // The dashboard may flip status pending -> traded/missed and nothing
+      // else: it can't touch price levels, confidence, or any other field
+      // the webhook is responsible for, and it can't create or delete docs.
+      allow update: if request.auth != null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status"])
+        && request.resource.data.status in ["pending", "traded", "missed"];
+
+      // No client-side create/delete — the Cloud Function (Admin SDK) is
+      // the only writer that creates alert documents.
+      allow create, delete: if false;
+    }
+
+    // Deny everything else by default — add new collections' rules
+    // explicitly above as Polaris grows rather than opening this up.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
