@@ -96,10 +96,15 @@ fvgAtBull(int off) =>
     bool has = high[off + 2] < low[off]
     [has, has ? high[off + 2] : na, has ? low[off] : na]
 
+// atrVal must be computed unconditionally every bar (see call site below) --
+// ta.* calls inside a function that's only invoked conditionally trip
+// Pine's CW10003 warning, since ta.atr()'s internal history tracking needs
+// consistent per-bar evaluation. Passing it in as a plain value avoids that.
+atrVal = ta.atr(14)
+
 // heuristic only, not predictive -- bigger FVG relative to recent volatility
 // scores higher, clamped to [30, 95]
-fvgConfidence(float fvgLo, float fvgHi) =>
-    float atr = ta.atr(14)
+fvgConfidence(float fvgLo, float fvgHi, float atr) =>
     float size = fvgHi - fvgLo
     float ratio = atr > 0 ? size / atr : 0
     int conf = math.round(math.min(95, 40 + ratio * 40))
@@ -195,7 +200,7 @@ if barstate.isconfirmed
                         seqPhase := na
                     else if high >= seqFvgLo
                         if close < seqFvgLo
-                            int conf = fvgConfidence(seqFvgLo, seqFvgHi)
+                            int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
                             float entryP = close
                             float stopP = seqLevel + stopBufferPts
                             float targetP = entryP - math.abs(entryP - stopP) * rMultiple
@@ -211,7 +216,7 @@ if barstate.isconfirmed
                     seqDir := na
                     seqPhase := na
                 else if close < seqFvgLo
-                    int conf = fvgConfidence(seqFvgLo, seqFvgHi)
+                    int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
                     float entryP = close
                     float stopP = seqLevel + stopBufferPts
                     float targetP = entryP - math.abs(entryP - stopP) * rMultiple
@@ -257,7 +262,7 @@ if barstate.isconfirmed
                         seqPhase := na
                     else if low <= seqFvgHi
                         if close > seqFvgHi
-                            int conf = fvgConfidence(seqFvgLo, seqFvgHi)
+                            int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
                             float entryP = close
                             float stopP = seqLevel - stopBufferPts
                             float targetP = entryP + math.abs(entryP - stopP) * rMultiple
@@ -273,7 +278,7 @@ if barstate.isconfirmed
                     seqDir := na
                     seqPhase := na
                 else if close > seqFvgHi
-                    int conf = fvgConfidence(seqFvgLo, seqFvgHi)
+                    int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
                     float entryP = close
                     float stopP = seqLevel - stopBufferPts
                     float targetP = entryP + math.abs(entryP - stopP) * rMultiple
