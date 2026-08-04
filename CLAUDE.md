@@ -175,21 +175,31 @@ TradingView Pine Script alert webhooks (TradingView's servers fire these, so a c
 app can't receive them — hence the exception to "no server logic" above). It does not affect how
 `index.html` runs and nothing in it imports these files yet:
 
-- `functions/index.js` — the `receiveAlert` HTTPS Cloud Function (v2, Admin SDK). Validates the
-  payload, checks a shared secret (`WEBHOOK_SECRET`, stored in Secret Manager — never in source),
-  and writes to the Firestore `alerts` collection.
+- `functions/index.js` — the `receiveAlert` HTTP function. Written against
+  `@google-cloud/functions-framework` (not `firebase-functions`) — this got deployed via the Cloud
+  Run console's "Write a function" flow rather than the Firebase CLI, and that flow's inline editor
+  expects the plain Functions Framework registration style (`functions.http("receiveAlert", ...)`),
+  not `firebase-functions/v2`'s `onRequest`/`defineSecret`. `WEBHOOK_SECRET` is read from
+  `process.env.WEBHOOK_SECRET`, bound via a Secret Manager reference set in the Cloud Run console
+  (service → Edit & deploy new revision → Container(s) → Variables & Secrets → Secrets), not
+  `defineSecret`. Validates the payload and writes to the Firestore `alerts` collection via the
+  Admin SDK either way.
 - `firestore.rules` — deliberately does **not** allow unauthenticated client writes to `/alerts`,
   even though that was the original ask. The Cloud Function's Admin SDK write bypasses rules
   entirely, so it's already the real security boundary; opening Firestore itself to public writes
   would let anyone with the (necessarily public) client config skip the webhook's secret check.
   Reads require Firebase Auth; the dashboard may only ever flip `status` between
   `pending`/`traded`/`missed`, never touch price/confidence fields, never create or delete.
-- `firebase.json`, `.firebaserc` (placeholder project ID — must be edited before deploying),
-  `firestore.indexes.json` — standard Firebase CLI project scaffold.
+- `firebase.json`, `.firebaserc` (placeholder project ID), `firestore.indexes.json` — Firebase CLI
+  scaffold, kept for reference/future use, but the actual live deployment was done by hand through
+  the Cloud Run console (browser-only, no terminal), not `firebase deploy`. If a `functions/`
+  deploy is ever redone via CLI, `index.js` would need converting back to `firebase-functions/v2`
+  style — the two frameworks aren't interchangeable as-is.
 - `firebaseConfig.js` — placeholder client SDK config for the *future* Phase 2 (dashboard reading
   `/alerts` live via `onSnapshot`, signed in anonymously). Not imported anywhere yet.
-- See `DEPLOYMENT_STEPS.md` for the full deploy walkthrough — project creation, secret setup,
-  `firebase deploy`, TradingView alert JSON template, curl testing, log verification.
+- `DEPLOYMENT_STEPS.md` describes the CLI-based deploy path. The actual deployed service
+  (`receive-alert` on Cloud Run, region set during setup) was created via Cloud Run console →
+  Write a function → Node.js → inline editor, entry point `receiveAlert`.
 
 Phase 2 (dashboard integration, Firebase Auth in the frontend, a status-update UI) hasn't been
 built yet — ask for it explicitly when ready.

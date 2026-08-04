@@ -1,15 +1,22 @@
 /**
  * Polaris — Pine Script Alert Webhook Receiver
  * ============================================================================
- * HTTPS Cloud Function that receives TradingView Pine Script alert webhooks,
- * validates + normalizes the payload, and writes it to the Firestore `alerts`
- * collection using the Admin SDK.
+ * HTTPS Cloud Function (Functions Framework / Cloud Run "Write a function")
+ * that receives TradingView Pine Script alert webhooks, validates +
+ * normalizes the payload, and writes it to the Firestore `alerts` collection
+ * using the Admin SDK.
  *
  * IMPORTANT — security model: the Admin SDK write below BYPASSES Firestore
  * Security Rules entirely. This function is the actual security boundary for
  * writes to `alerts`, not firestore.rules. See firestore.rules for why
  * client-side (browser) writes to `alerts` are intentionally NOT allowed —
  * only this function, gated by WEBHOOK_SECRET, can create alert documents.
+ *
+ * WEBHOOK_SECRET is bound as an environment variable pointing at a Secret
+ * Manager secret — set this up in the Cloud Run console under this
+ * function's Source tab is NOT where secrets live; go to the service's
+ * "Edit & deploy new revision" -> Container(s) -> Variables & Secrets ->
+ * Secrets -> Reference a secret, and pick WEBHOOK_SECRET there.
  *
  * Expected Pine Script alert JSON message body (configure this as the
  * "Message" in TradingView's alert dialog — Pine Script alerts support
@@ -37,18 +44,14 @@
  *   500 { ok: false, error: "Internal error — could not store alert" }
  */
 
-const { onRequest } = require("firebase-functions/v2/https");
-const { defineSecret } = require("firebase-functions/params");
-const { logger } = require("firebase-functions");
+const functions = require("@google-cloud/functions-framework");
 const admin = require("firebase-admin");
 
 admin.initializeApp();
 const db = admin.firestore();
 
-// Set once via: firebase functions:secrets:set WEBHOOK_SECRET
-// (see DEPLOYMENT_STEPS.md). Never hardcode this — Secret Manager keeps it
-// out of source control and out of the deployed function's plaintext env.
-const WEBHOOK_SECRET = defineSecret("WEBHOOK_SECRET");
+// Bound via Secret Manager reference (see comment above) — never hardcode this.
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
 // Keep this list in sync with whatever setup labels your Pine Script emits.
 // Rejecting unknown types catches typos/drift early instead of letting junk
@@ -128,55 +131,47 @@ function validateAlertPayload(body) {
   };
 }
 
-exports.receiveAlert = onRequest(
-  {
-    secrets: [WEBHOOK_SECRET],
-    cors: true, // only relevant if something browser-based ever calls this directly; TradingView's server-to-server webhook isn't subject to CORS
-    region: "us-central1",
-    maxInstances: 10, // caps runaway cost/abuse; raise if you expect legitimate high volume
-  },
-  async (req, res) => {
-    if (req.method !== "POST") {
-      res.status(405).json({ ok: false, error: "Method not allowed — use POST" });
-      return;
-    }
-
-    const bodyBytes = Buffer.byteLength(JSON.stringify(req.body || {}));
-    if (bodyBytes > MAX_BODY_BYTES) {
-      res.status(413).json({ ok: false, error: "Payload too large" });
-      return;
-    }
-
-    // Shared-secret auth. Pine Script webhooks can't set custom headers, so
-    // the secret travels inside the JSON body instead of an Authorization
-    // header — this is the standard pattern for TradingView webhooks.
-    const providedSecret = req.body && req.body.secret;
-    if (!providedSecret || providedSecret !== WEBHOOK_SECRET.value()) {
-      logger.warn("receiveAlert: rejected — bad or missing secret", { ip: req.ip });
-      res.status(401).json({ ok: false, error: "Unauthorized" });
-      return;
-    }
-
-    const result = validateAlertPayload(req.body);
-    if (!result.ok) {
-      logger.warn("receiveAlert: validation failed", { errors: result.errors });
-      res.status(400).json({ ok: false, error: "Invalid payload", details: result.errors });
-      return;
-    }
-
-    try {
-      const docRef = await db.collection("alerts").add({
-        ...result.data,
-        status: "pending",
-        // server-authoritative — never trust a client/webhook-supplied clock
-        // for ordering; sourceTimestamp above is kept as a passthrough only.
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      });
-      logger.info("receiveAlert: stored alert", { id: docRef.id, setupType: result.data.setupType });
-      res.status(201).json({ ok: true, id: docRef.id });
-    } catch (err) {
-      logger.error("receiveAlert: Firestore write failed", err);
-      res.status(500).json({ ok: false, error: "Internal error — could not store alert" });
-    }
+functions.http("receiveAlert", async (req, res) => {
+  if (req.method !== "POST") {
+    res.status(405).json({ ok: false, error: "Method not allowed — use POST" });
+    return;
   }
-);
+
+  const bodyBytes = Buffer.byteLength(JSON.stringify(req.body || {}));
+  if (bodyBytes > MAX_BODY_BYTES) {
+    res.status(413).json({ ok: false, error: "Payload too large" });
+    return;
+  }
+
+  // Shared-secret auth. Pine Script webhooks can't set custom headers, so
+  // the secret travels inside the JSON body instead of an Authorization
+  // header — this is the standard pattern for TradingView webhooks.
+  const providedSecret = req.body && req.body.secret;
+  if (!WEBHOOK_SECRET || !providedSecret || providedSecret !== WEBHOOK_SECRET) {
+    console.warn("receiveAlert: rejected — bad or missing secret");
+    res.status(401).json({ ok: false, error: "Unauthorized" });
+    return;
+  }
+
+  const result = validateAlertPayload(req.body);
+  if (!result.ok) {
+    console.warn("receiveAlert: validation failed", result.errors);
+    res.status(400).json({ ok: false, error: "Invalid payload", details: result.errors });
+    return;
+  }
+
+  try {
+    const docRef = await db.collection("alerts").add({
+      ...result.data,
+      status: "pending",
+      // server-authoritative — never trust a client/webhook-supplied clock
+      // for ordering; sourceTimestamp above is kept as a passthrough only.
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    console.log("receiveAlert: stored alert", docRef.id, result.data.setupType);
+    res.status(201).json({ ok: true, id: docRef.id });
+  } catch (err) {
+    console.error("receiveAlert: Firestore write failed", err);
+    res.status(500).json({ ok: false, error: "Internal error — could not store alert" });
+  }
+});

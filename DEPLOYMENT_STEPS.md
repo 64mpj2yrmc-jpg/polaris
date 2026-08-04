@@ -4,6 +4,15 @@ This covers getting `functions/receiveAlert` live and receiving TradingView Pine
 into Firestore. It does not touch `index.html` — the existing client-side Polaris app is
 unaffected until Phase 2 wires the dashboard up to read `/alerts`.
 
+> **Note**: this document describes the Firebase CLI deploy path (requires a terminal). The
+> actual live deployment was instead done entirely through the **Google Cloud Console in a
+> browser** — no terminal — via **Cloud Run → Write a function → Node.js → inline editor**
+> (entry point `receiveAlert`, secret referenced from Secret Manager under Container(s) →
+> Variables & Secrets). `functions/index.js` is written for that path's `@google-cloud/functions-
+> framework` (not `firebase-functions`), so if you follow the CLI steps below instead, the code
+> needs converting to `firebase-functions/v2`'s `onRequest`/`defineSecret` style first — the two
+> aren't interchangeable as committed.
+
 ## 0. Prerequisites
 
 - A Google account.
