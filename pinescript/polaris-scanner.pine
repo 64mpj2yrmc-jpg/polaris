@@ -1,18 +1,30 @@
 //@version=6
-indicator("Polaris Scanner — Sweep / CISD / FVG", overlay=true, max_lines_count=100, max_boxes_count=100, max_labels_count=200)
+indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_lines_count=200, max_boxes_count=150, max_labels_count=250)
 
 // ============================================================================
-// Polaris Scanner (Pine port)
-// Same model as Polaris's JS scanner (advanceScan/findSwings/fvgAt in
+// Polaris Scanner (Pine port) + ICT confluence markup
+// Core model matches Polaris's JS scanner (advanceScan/findSwings/fvgAt in
 // index.html): liquidity sweep -> change in state of delivery (CISD) ->
 // retrace into the resulting fair value gap -> rejection. On a completed
 // setup, fires a webhook alert shaped for the Polaris receiveAlert Cloud
-// Function (see functions/index.js).
+// Function (see functions/index.js). That core logic is unchanged below.
+//
+// Everything else on the chart is confluence markup, independent of the
+// alert-firing state machine: order blocks, every fair value gap (flipped
+// to iFVG styling once violated), equal highs/lows (liquidity pools), a
+// premium/discount zone around the active swing range, and killzone
+// session shading. Each has its own show/hide toggle. Colors match
+// Polaris's own dark cyan/gold command-center theme:
+//   cyan   #00D4FF  -- structure / tracking (level line, entry line, HUD)
+//   gold   #F5C86B  -- attention (sweeps, liquidity pools, iFVG flips)
+//   green  #2FE08A  -- bullish / long bias
+//   red    #FF5566  -- bearish / short bias
 //
 // Entry/stop/target/confidence are NOT part of the original JS scanner
 // model (it only annotates structure, no trade parameters) -- these are
 // invented here specifically for the webhook payload:
-//   stop       = swept level +/- an optional buffer
+//   stop       = the sweep's actual extreme (the protected level -- not just
+//                the old swing price it swept) +/- an optional buffer
 //   target     = entry +/- risk * rMultiple
 //   confidence = FVG size relative to ATR(14), a rough heuristic only
 // Adjust the inputs below, or the fvgConfidence() formula, to taste.
@@ -23,21 +35,46 @@ grpScan = "Scanner"
 swingStrength = input.int(3, "Swing strength (bars each side)", minval=1, maxval=10, group=grpScan)
 maxBarsValid  = input.int(40, "Max bars before a sequence expires", minval=5, group=grpScan)
 maxSwings     = input.int(20, "Max recent swings tracked per side", minval=5, maxval=50, group=grpScan)
-showVisuals   = input.bool(true, "Show sweep/FVG markup on chart", group=grpScan)
+showVisuals   = input.bool(true, "Show sweep/CISD/trade-plan markup", group=grpScan)
+showHud       = input.bool(true, "Show status panel (top-right)", group=grpScan)
 
 grpTrade = "Trade parameters (for the webhook payload only)"
-stopBufferPts = input.float(0.0, "Stop buffer beyond swept level (points)", minval=0, group=grpTrade)
+stopBufferPts = input.float(0.0, "Stop buffer beyond the sweep extreme (points)", minval=0, group=grpTrade)
 rMultiple     = input.float(2.0, "Target = entry +/- risk x this", minval=0.1, group=grpTrade)
 
 grpHook = "Webhook"
 webhookSecret = input.string("", "Webhook secret (must match WEBHOOK_SECRET)", group=grpHook)
+
+grpFVG = "Fair Value Gaps"
+showAllFvg  = input.bool(true, "Mark every FVG on the chart", group=grpFVG)
+showIfvg    = input.bool(true, "Flip violated FVGs to iFVG styling", group=grpFVG)
+maxFvgBoxes = input.int(15, "Max FVG boxes shown", minval=1, maxval=50, group=grpFVG)
+
+grpOB = "Order Blocks"
+showOB     = input.bool(true, "Mark order blocks", group=grpOB)
+dispMult   = input.float(1.5, "Displacement threshold (x ATR)", minval=0.5, step=0.1, group=grpOB)
+obLookback = input.int(3, "Bars back to find the opposing candle", minval=1, maxval=8, group=grpOB)
+maxOB      = input.int(12, "Max order blocks shown", minval=1, maxval=40, group=grpOB)
+
+grpEQ = "Equal Highs / Lows"
+showEQ   = input.bool(true, "Mark equal highs/lows (liquidity pools)", group=grpEQ)
+eqTolPct = input.float(0.05, "Equal tolerance (% of price)", minval=0.01, step=0.01, group=grpEQ)
+
+grpPD = "Premium / Discount"
+showPD = input.bool(false, "Shade premium/discount zone", group=grpPD)
+
+grpKZ = "Killzones (New York time)"
+showKillzones = input.bool(false, "Shade killzone sessions", group=grpKZ)
+londonSession = input.session("0200-0500", "London killzone", group=grpKZ)
+nyAmSession   = input.session("0930-1100", "NY AM killzone", group=grpKZ)
+nyPmSession   = input.session("1330-1600", "NY PM killzone", group=grpKZ)
 
 // ---------- types ----------
 type Swing
     int   idx
     float price
 
-// ---------- persistent state ----------
+// ---------- persistent state: core scanner ----------
 var array<Swing> swingHighs = array.new<Swing>()
 var array<Swing> swingLows  = array.new<Swing>()
 
@@ -49,18 +86,48 @@ var int    seqSweepBar   = na
 var bool   seqHasFvg     = false
 var float  seqFvgLo      = na
 var float  seqFvgHi      = na
+var float  seqSweepExtreme = na  // actual high/low the sweep candle reached -- the real "protected" level, stop lives beyond this, not just beyond the old swing price
 
-// ---------- swing detection (mirrors findSwings) ----------
+// ---------- persistent state: confluence markup ----------
+var array<box> fvgBoxes     = array.new<box>()
+var array<float> fvgBoxLo   = array.new<float>()
+var array<float> fvgBoxHi   = array.new<float>()
+var array<string> fvgBoxDir = array.new<string>()
+var array<bool> fvgBoxDone  = array.new<bool>()
+var array<box> obBoxes      = array.new<box>()
+var box premiumBox = na
+var box discountBox = na
+var line eqLine = na
+
+// ---------- swing detection (mirrors findSwings) + equal highs/lows ----------
 ph = ta.pivothigh(swingStrength, swingStrength)
 pl = ta.pivotlow(swingStrength, swingStrength)
 
 if not na(ph)
-    array.unshift(swingHighs, Swing.new(bar_index - swingStrength, ph))
+    int newHighIdx = bar_index - swingStrength
+    if showEQ and array.size(swingHighs) > 0
+        float tol = ph * eqTolPct / 100
+        for i = 0 to array.size(swingHighs) - 1
+            Swing s = array.get(swingHighs, i)
+            if math.abs(s.price - ph) <= tol
+                line.new(s.idx, s.price, newHighIdx, ph, color=color.new(#F5C86B, 30), style=line.style_dotted, width=1)
+                label.new(newHighIdx, ph, "EQH", style=label.style_label_down, color=color.new(#0B1626, 15), textcolor=#F5C86B, size=size.tiny)
+                break
+    array.unshift(swingHighs, Swing.new(newHighIdx, ph))
     if array.size(swingHighs) > maxSwings
         array.pop(swingHighs)
 
 if not na(pl)
-    array.unshift(swingLows, Swing.new(bar_index - swingStrength, pl))
+    int newLowIdx = bar_index - swingStrength
+    if showEQ and array.size(swingLows) > 0
+        float tol = pl * eqTolPct / 100
+        for i = 0 to array.size(swingLows) - 1
+            Swing s = array.get(swingLows, i)
+            if math.abs(s.price - pl) <= tol
+                line.new(s.idx, s.price, newLowIdx, pl, color=color.new(#F5C86B, 30), style=line.style_dotted, width=1)
+                label.new(newLowIdx, pl, "EQL", style=label.style_label_up, color=color.new(#0B1626, 15), textcolor=#F5C86B, size=size.tiny)
+                break
+    array.unshift(swingLows, Swing.new(newLowIdx, pl))
     if array.size(swingLows) > maxSwings
         array.pop(swingLows)
 
@@ -96,10 +163,8 @@ fvgAtBull(int off) =>
     bool has = high[off + 2] < low[off]
     [has, has ? high[off + 2] : na, has ? low[off] : na]
 
-// atrVal must be computed unconditionally every bar (see call site below) --
-// ta.* calls inside a function that's only invoked conditionally trip
-// Pine's CW10003 warning, since ta.atr()'s internal history tracking needs
-// consistent per-bar evaluation. Passing it in as a plain value avoids that.
+// atrVal must be computed unconditionally every bar -- ta.* calls inside a
+// function that's only invoked conditionally trip Pine's CW10003 warning.
 atrVal = ta.atr(14)
 
 // heuristic only, not predictive -- bigger FVG relative to recent volatility
@@ -120,6 +185,105 @@ buildAlertMessage(string setupType, float entryPrice, float stopPrice, float tar
      ',"confidence":' + str.tostring(confidence) + ',"riskReward":' + str.tostring(rr) +
      ',"symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
 
+// ---------- order blocks (last opposing candle before a displacement move) ----------
+bool isDisplacement = math.abs(close - open) > atrVal * dispMult
+
+if showOB and barstate.isconfirmed and isDisplacement
+    if close > open
+        int k = 1
+        bool found = false
+        while k <= obLookback and not found
+            if close[k] < open[k]
+                found := true
+                box ob = box.new(bar_index - k, top=open[k], right=bar_index + 15, bottom=close[k], border_color=color.new(#2FE08A, 45), bgcolor=color.new(#2FE08A, 88), extend=extend.none, text="OB", text_size=size.tiny, text_color=color.new(#2FE08A, 10))
+                array.unshift(obBoxes, ob)
+                if array.size(obBoxes) > maxOB
+                    box.delete(array.pop(obBoxes))
+            k += 1
+    else if close < open
+        int k = 1
+        bool found = false
+        while k <= obLookback and not found
+            if close[k] > open[k]
+                found := true
+                box ob = box.new(bar_index - k, top=close[k], right=bar_index + 15, bottom=open[k], border_color=color.new(#FF5566, 45), bgcolor=color.new(#FF5566, 88), extend=extend.none, text="OB", text_size=size.tiny, text_color=color.new(#FF5566, 10))
+                array.unshift(obBoxes, ob)
+                if array.size(obBoxes) > maxOB
+                    box.delete(array.pop(obBoxes))
+            k += 1
+
+// ---------- fair value gaps everywhere (not just inside an active sequence) ----------
+if showAllFvg and barstate.isconfirmed
+    [hasBull, bLo, bHi] = fvgAtBull(0)
+    if hasBull
+        box fb = box.new(bar_index - 2, top=bHi, right=bar_index + 20, bottom=bLo, border_color=color.new(#2FE08A, 35), bgcolor=color.new(#2FE08A, 88), extend=extend.none, text="FVG", text_size=size.tiny, text_color=color.new(#2FE08A, 10))
+        array.unshift(fvgBoxes, fb)
+        array.unshift(fvgBoxLo, bLo)
+        array.unshift(fvgBoxHi, bHi)
+        array.unshift(fvgBoxDir, "bull")
+        array.unshift(fvgBoxDone, false)
+        if array.size(fvgBoxes) > maxFvgBoxes
+            box.delete(array.pop(fvgBoxes))
+            array.pop(fvgBoxLo)
+            array.pop(fvgBoxHi)
+            array.pop(fvgBoxDir)
+            array.pop(fvgBoxDone)
+
+    [hasBear, brLo, brHi] = fvgAtBear(0)
+    if hasBear
+        box fb2 = box.new(bar_index - 2, top=brHi, right=bar_index + 20, bottom=brLo, border_color=color.new(#FF5566, 35), bgcolor=color.new(#FF5566, 88), extend=extend.none, text="FVG", text_size=size.tiny, text_color=color.new(#FF5566, 10))
+        array.unshift(fvgBoxes, fb2)
+        array.unshift(fvgBoxLo, brLo)
+        array.unshift(fvgBoxHi, brHi)
+        array.unshift(fvgBoxDir, "bear")
+        array.unshift(fvgBoxDone, false)
+        if array.size(fvgBoxes) > maxFvgBoxes
+            box.delete(array.pop(fvgBoxes))
+            array.pop(fvgBoxLo)
+            array.pop(fvgBoxHi)
+            array.pop(fvgBoxDir)
+            array.pop(fvgBoxDone)
+
+    if showIfvg and array.size(fvgBoxes) > 0
+        for i = 0 to array.size(fvgBoxes) - 1
+            if not array.get(fvgBoxDone, i)
+                string d = array.get(fvgBoxDir, i)
+                float zLo = array.get(fvgBoxLo, i)
+                float zHi = array.get(fvgBoxHi, i)
+                bool violated = d == "bull" ? close < zLo : close > zHi
+                if violated
+                    box zb = array.get(fvgBoxes, i)
+                    box.set_border_color(zb, color.new(#F5C86B, 20))
+                    box.set_bgcolor(zb, color.new(#F5C86B, 85))
+                    box.set_text(zb, "iFVG")
+                    box.set_text_color(zb, color.new(#F5C86B, 10))
+                    box.set_right(zb, bar_index + 20)
+                    array.set(fvgBoxDone, i, true)
+
+// ---------- premium / discount zone (around the active swing range) ----------
+if showPD and barstate.isconfirmed and array.size(swingHighs) > 0 and array.size(swingLows) > 0
+    Swing hiS = array.get(swingHighs, 0)
+    Swing loS = array.get(swingLows, 0)
+    if hiS.price > loS.price
+        float eq = (hiS.price + loS.price) / 2
+        int leftX = math.min(hiS.idx, loS.idx)
+        if not na(premiumBox)
+            box.delete(premiumBox)
+        if not na(discountBox)
+            box.delete(discountBox)
+        if not na(eqLine)
+            line.delete(eqLine)
+        premiumBox := box.new(leftX, top=hiS.price, right=bar_index + 10, bottom=eq, border_color=color.new(#FF5566, 75), bgcolor=color.new(#FF5566, 94), extend=extend.none, text="PREMIUM", text_size=size.tiny, text_color=color.new(#FF5566, 30))
+        discountBox := box.new(leftX, top=eq, right=bar_index + 10, bottom=loS.price, border_color=color.new(#2FE08A, 75), bgcolor=color.new(#2FE08A, 94), extend=extend.none, text="DISCOUNT", text_size=size.tiny, text_color=color.new(#2FE08A, 30))
+        eqLine := line.new(leftX, eq, bar_index + 10, eq, color=color.new(#F5C86B, 40), style=line.style_dotted, width=1)
+
+// ---------- killzone sessions ----------
+inLondon = not na(time(timeframe.period, londonSession, "America/New_York"))
+inNyAm   = not na(time(timeframe.period, nyAmSession, "America/New_York"))
+inNyPm   = not na(time(timeframe.period, nyPmSession, "America/New_York"))
+bgcolor(showKillzones and inLondon ? color.new(#00D4FF, 95) : na, title="London killzone")
+bgcolor(showKillzones and (inNyAm or inNyPm) ? color.new(#F5C86B, 95) : na, title="NY killzone")
+
 // ---------- main scan (mirrors advanceScan), only on confirmed/closed bars ----------
 if barstate.isconfirmed
     if na(seqDir)
@@ -136,11 +300,12 @@ if barstate.isconfirmed
             seqDir := "bear"
             seqPhase := "sweep"
             seqLevel := bestHigh
+            seqSweepExtreme := high
             seqCisdTarget := cisdTargetBear()
             seqSweepBar := bar_index
             seqHasFvg := false
             if showVisuals
-                label.new(bar_index, high, "SWEEP", style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.tiny)
+                label.new(bar_index, high, "⚡ SWEEP", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
 
         if na(seqDir) and array.size(swingLows) > 0
             float bestLow = na
@@ -153,11 +318,12 @@ if barstate.isconfirmed
                 seqDir := "bull"
                 seqPhase := "sweep"
                 seqLevel := bestLow
+                seqSweepExtreme := low
                 seqCisdTarget := cisdTargetBull()
                 seqSweepBar := bar_index
                 seqHasFvg := false
                 if showVisuals
-                    label.new(bar_index, low, "SWEEP", style=label.style_label_up, color=color.blue, textcolor=color.white, size=size.tiny)
+                    label.new(bar_index, low, "⚡ SWEEP", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
 
     else
         if bar_index - seqSweepBar > maxBarsValid
@@ -202,11 +368,17 @@ if barstate.isconfirmed
                         if close < seqFvgLo
                             int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
                             float entryP = close
-                            float stopP = seqLevel + stopBufferPts
+                            float stopP = seqSweepExtreme + stopBufferPts
                             float targetP = entryP - math.abs(entryP - stopP) * rMultiple
                             alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
                             if showVisuals
-                                label.new(bar_index, low, "SETUP\nCOMPLETE", style=label.style_label_up, color=color.red, textcolor=color.white, size=size.small)
+                                label.new(bar_index, low, "▼ SHORT SETUP\n" + str.tostring(conf) + "%", style=label.style_label_up, color=#FF5566, textcolor=#030710, size=size.normal)
+                                line.new(bar_index, entryP, bar_index + 15, entryP, color=#00D4FF, style=line.style_solid, width=2)
+                                line.new(bar_index, stopP, bar_index + 15, stopP, color=#FF5566, style=line.style_dashed, width=1)
+                                line.new(bar_index, targetP, bar_index + 15, targetP, color=#2FE08A, style=line.style_dashed, width=1)
+                                label.new(bar_index + 15, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
+                                label.new(bar_index + 15, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
+                                label.new(bar_index + 15, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
                             seqDir := na
                             seqPhase := na
                         else
@@ -218,11 +390,17 @@ if barstate.isconfirmed
                 else if close < seqFvgLo
                     int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
                     float entryP = close
-                    float stopP = seqLevel + stopBufferPts
+                    float stopP = seqSweepExtreme + stopBufferPts
                     float targetP = entryP - math.abs(entryP - stopP) * rMultiple
                     alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
                     if showVisuals
-                        label.new(bar_index, low, "SETUP\nCOMPLETE", style=label.style_label_up, color=color.red, textcolor=color.white, size=size.small)
+                        label.new(bar_index, low, "▼ SHORT SETUP\n" + str.tostring(conf) + "%", style=label.style_label_up, color=#FF5566, textcolor=#030710, size=size.normal)
+                        line.new(bar_index, entryP, bar_index + 15, entryP, color=#00D4FF, style=line.style_solid, width=2)
+                        line.new(bar_index, stopP, bar_index + 15, stopP, color=#FF5566, style=line.style_dashed, width=1)
+                        line.new(bar_index, targetP, bar_index + 15, targetP, color=#2FE08A, style=line.style_dashed, width=1)
+                        label.new(bar_index + 15, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
+                        label.new(bar_index + 15, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
+                        label.new(bar_index + 15, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
                     seqDir := na
                     seqPhase := na
         else if seqDir == "bull"
@@ -264,11 +442,17 @@ if barstate.isconfirmed
                         if close > seqFvgHi
                             int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
                             float entryP = close
-                            float stopP = seqLevel - stopBufferPts
+                            float stopP = seqSweepExtreme - stopBufferPts
                             float targetP = entryP + math.abs(entryP - stopP) * rMultiple
                             alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
                             if showVisuals
-                                label.new(bar_index, high, "SETUP\nCOMPLETE", style=label.style_label_down, color=color.green, textcolor=color.white, size=size.small)
+                                label.new(bar_index, high, "▲ LONG SETUP\n" + str.tostring(conf) + "%", style=label.style_label_down, color=#2FE08A, textcolor=#030710, size=size.normal)
+                                line.new(bar_index, entryP, bar_index + 15, entryP, color=#00D4FF, style=line.style_solid, width=2)
+                                line.new(bar_index, stopP, bar_index + 15, stopP, color=#FF5566, style=line.style_dashed, width=1)
+                                line.new(bar_index, targetP, bar_index + 15, targetP, color=#2FE08A, style=line.style_dashed, width=1)
+                                label.new(bar_index + 15, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
+                                label.new(bar_index + 15, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
+                                label.new(bar_index + 15, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
                             seqDir := na
                             seqPhase := na
                         else
@@ -280,14 +464,31 @@ if barstate.isconfirmed
                 else if close > seqFvgHi
                     int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
                     float entryP = close
-                    float stopP = seqLevel - stopBufferPts
+                    float stopP = seqSweepExtreme - stopBufferPts
                     float targetP = entryP + math.abs(entryP - stopP) * rMultiple
                     alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
                     if showVisuals
-                        label.new(bar_index, high, "SETUP\nCOMPLETE", style=label.style_label_down, color=color.green, textcolor=color.white, size=size.small)
+                        label.new(bar_index, high, "▲ LONG SETUP\n" + str.tostring(conf) + "%", style=label.style_label_down, color=#2FE08A, textcolor=#030710, size=size.normal)
+                        line.new(bar_index, entryP, bar_index + 15, entryP, color=#00D4FF, style=line.style_solid, width=2)
+                        line.new(bar_index, stopP, bar_index + 15, stopP, color=#FF5566, style=line.style_dashed, width=1)
+                        line.new(bar_index, targetP, bar_index + 15, targetP, color=#2FE08A, style=line.style_dashed, width=1)
+                        label.new(bar_index + 15, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
+                        label.new(bar_index + 15, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
+                        label.new(bar_index + 15, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
                     seqDir := na
                     seqPhase := na
 
-// ---------- FVG box visualization while a sequence is active ----------
-if showVisuals and seqHasFvg and not na(seqFvgLo)
-    box.new(seqSweepBar, seqFvgLo, bar_index, seqFvgHi, border_color=color.new(color.purple, 40), bgcolor=color.new(color.purple, 85))
+// ---------- tracked level line while a sequence is active ----------
+if showVisuals and not na(seqPhase)
+    line.new(seqSweepBar, seqLevel, bar_index, seqLevel, color=color.new(#F5C86B, 55), style=line.style_dashed, width=1)
+
+// ---------- status HUD (top-right) ----------
+var table hud = table.new(position=position.top_right, columns=2, rows=3, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
+
+if showHud and barstate.islast
+    table.cell(hud, 0, 0, "◆ POLARIS", text_color=#F5C86B, text_size=size.small, text_halign=text.align_left)
+    table.cell(hud, 1, 0, "SCANNER", text_color=#F5C86B, text_size=size.small, text_halign=text.align_right)
+    table.cell(hud, 0, 1, "PHASE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 1, na(seqPhase) ? "IDLE" : str.upper(seqPhase), text_color=na(seqPhase) ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
+    table.cell(hud, 0, 2, "BIAS", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 2, na(seqDir) ? "--" : (seqDir == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(seqDir) ? #6E93AD : (seqDir == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)

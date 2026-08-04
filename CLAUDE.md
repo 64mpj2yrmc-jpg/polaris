@@ -205,12 +205,24 @@ app can't receive them — hence the exception to "no server logic" above). It d
   Write a function → Node.js → inline editor, entry point `receiveAlert`.
 - `pinescript/polaris-scanner.pine` — a Pine Script v6 port of the same sweep → CISD → FVG retrace
   → rejection model as the JS scanner (`advanceScan`/`findSwings`/`fvgAt` in `index.html`), meant
-  to run on a live TradingView chart and fire the webhook on each completed setup. Entry/stop/
-  target/confidence are **not** part of the original JS model (which only annotates chart
-  structure) — they're invented in this file specifically for the webhook payload: stop = swept
-  level ± buffer, target = entry ± risk × an R-multiple input, confidence = a simple FVG-size-vs-
-  ATR(14) heuristic. All adjustable via script inputs. Lives in TradingView's Pine Editor, not
-  deployed through this repo — pasted in by hand, no compiler available to verify it here.
+  to run on a live TradingView chart and fire the webhook on each completed setup. That core state
+  machine is untouched; everything else on the chart is independent confluence markup layered on
+  top, each with its own show/hide input: order blocks (last opposing candle before a
+  displacement move ≥ `dispMult` × ATR(14)), every fair value gap on the chart — not just the one
+  tied to an active sequence — flipped to gold "iFVG" styling once price closes back through it,
+  equal highs/lows (liquidity pools, dotted line + label when a new swing lands within
+  `eqTolPct`% of a prior one), a premium/discount zone shaded around the most recent swing
+  high/low with a 50% equilibrium line (off by default), and London/NY killzone session shading
+  via `time(timeframe.period, session, "America/New_York")` (off by default). A `table.new`
+  top-right HUD shows live phase/bias. Colors match Polaris's own palette (cyan `#00D4FF`
+  structure, gold `#F5C86B` attention/sweeps/iFVG, green `#2FE08A`/red `#FF5566` bull/bear) instead
+  of Pine's stock colors. Entry/stop/target/confidence are **not** part of the original JS model
+  (which only annotates chart structure) — they're invented in this file specifically for the
+  webhook payload: stop = the sweep candle's actual high/low (the real "protected" level — not
+  just the older swing price it swept) ± an optional buffer, target = entry ± risk × an R-multiple
+  input, confidence = a simple FVG-size-vs-ATR(14) heuristic. All adjustable via script inputs.
+  Lives in TradingView's Pine Editor, not deployed through this repo — pasted in by hand, no
+  compiler available to verify it here.
 
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
