@@ -16,6 +16,13 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<!-- compat build (not the modular v9+ SDK) so it exposes a plain `firebase`
+     global usable from the classic (non-module) Babel script below, same
+     pattern as React/ReactDOM above -->
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script src="firebaseConfig.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Orbitron:wght@500;700&display=swap');
   html, body { margin: 0; padding: 0; background: #030710; }
@@ -67,7 +74,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.07.18-3";
+const BUILD = "2026.08.04-1";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -927,6 +934,11 @@ function App() {
   const activeSource = useMemo(() => (source === "AUTO" ? (isRegularUSHours(new Date(now)) ? "QQQ" : "NQ") : source), [source, now]);
   const activeSourceRef = useRef(activeSource); activeSourceRef.current = activeSource;
 
+  // ----- TradingView alerts (Firestore, Phase 2) -----
+  const [tvAlerts, setTvAlerts] = useState([]);
+  const [tvAlertsStatus, setTvAlertsStatus] = useState("");
+  const firestoreDbRef = useRef(null);
+
   function rankVoices(vs) {
     const score = (v) =>
       (/premium/i.test(v.name) ? 10 : 0) +
@@ -1020,6 +1032,49 @@ function App() {
       } catch (e) { /* offline, local file://, or no deployed copy to compare against — skip silently */ }
     })();
   }, []);
+
+  // TradingView alerts: sign in anonymously and subscribe to /alerts live.
+  // No-ops entirely if firebaseConfig.js still has its placeholder values.
+  useEffect(() => {
+    const cfg = window.POLARIS_FIREBASE_CONFIG;
+    if (!cfg || !cfg.apiKey || cfg.apiKey === "REPLACE_ME") {
+      setTvAlertsStatus("Not configured — fill in firebaseConfig.js to enable TradingView alerts");
+      return;
+    }
+    if (typeof firebase === "undefined") {
+      setTvAlertsStatus("Firebase SDK failed to load — check your connection and reload");
+      return;
+    }
+    let unsubscribe = () => {};
+    try {
+      const app = firebase.apps.length ? firebase.apps[0] : firebase.initializeApp(cfg);
+      const db = app.firestore();
+      firestoreDbRef.current = db;
+      setTvAlertsStatus("Connecting…");
+      firebase.auth().signInAnonymously().then(() => {
+        unsubscribe = db.collection("alerts").orderBy("timestamp", "desc").limit(50)
+          .onSnapshot(
+            (snap) => {
+              setTvAlerts(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+              setTvAlertsStatus("");
+            },
+            (err) => setTvAlertsStatus("Live connection error: " + (err.message || "check Firestore rules"))
+          );
+      }).catch((err) => setTvAlertsStatus("Sign-in failed: " + (err.message || "check Firebase Auth is enabled")));
+    } catch (err) {
+      setTvAlertsStatus("Firebase init failed: " + (err.message || "check firebaseConfig.js"));
+    }
+    return () => unsubscribe();
+  }, []);
+
+  async function setAlertStatus(id, status) {
+    if (!firestoreDbRef.current) return;
+    try {
+      await firestoreDbRef.current.collection("alerts").doc(id).update({ status });
+    } catch (e) {
+      flash("Couldn't update alert — " + (e.message || "check your connection"));
+    }
+  }
 
   useEffect(() => {
     if (syncReadyRef.current) return;
@@ -2413,7 +2468,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
     speaking: "SPEAKING — TAP TO INTERRUPT",
   }[voiceState];
 
-  const tabs = ["POLARIS", "MARKET", "DESK", "LOG", "JOURNAL", "RISK", "SETUP"];
+  const tabs = ["POLARIS", "MARKET", "ALERTS", "DESK", "LOG", "JOURNAL", "RISK", "SETUP"];
 
   return (
     <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 700px at 50% -10%, #06182B 0%, ${C.bg} 55%)`, color: C.text, fontFamily: mono }}>
@@ -2956,6 +3011,78 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
             <div style={{ fontSize: 10, color: C.faint, lineHeight: 1.7 }}>
               The scanner detects when your conditions print — it is not a signal service and doesn't judge whether the trade is worth taking. Confirm on your own charts; QQQ levels won't match NQ prices, only the structure.
             </div>
+          </React.Fragment>
+        )}
+
+        {/* ================= ALERTS ================= */}
+        {tab === "ALERTS" && (
+          <React.Fragment>
+            <Panel>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+                <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan }}>TRADINGVIEW ALERTS</div>
+                <div style={{ fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>{tvAlerts.length} SHOWN</div>
+              </div>
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 4, lineHeight: 1.6 }}>
+                Setups fired by the Pine Script scanner on TradingView, received via the receiveAlert webhook and stored in Firestore. Not a signal service — review every one before acting.
+              </div>
+              {tvAlertsStatus && (
+                <div style={{ fontSize: 11, marginTop: 8, color: tvAlertsStatus.toLowerCase().includes("fail") || tvAlertsStatus.toLowerCase().includes("error") ? C.red : C.gold }}>
+                  {tvAlertsStatus}
+                </div>
+              )}
+            </Panel>
+
+            {!tvAlertsStatus && tvAlerts.length === 0 && (
+              <Panel>
+                <div style={{ textAlign: "center", padding: "30px 10px", color: C.faint, fontSize: 13 }}>
+                  No alerts yet — waiting on TradingView.
+                </div>
+              </Panel>
+            )}
+
+            {tvAlerts.map((a) => {
+              const isUp = (a.setupType || "").includes("UP") || (a.setupType || "").includes("BUY") || (a.setupType || "").includes("BULL");
+              const dirColor = isUp ? C.green : C.red;
+              const ts = a.timestamp && a.timestamp.toDate ? a.timestamp.toDate() : null;
+              return (
+                <Panel key={a.id} style={{ padding: "14px 16px" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                      <span style={{ fontFamily: disp, fontSize: 14, fontWeight: 700, letterSpacing: "0.06em", color: dirColor }}>{a.setupType || "UNKNOWN"}</span>
+                      <span style={{ fontSize: 12, color: C.muted }}>{a.symbol || "—"} · {a.timeframe || "—"}</span>
+                      {ts && <span style={{ fontSize: 10, color: C.faint }}>{ts.toLocaleString()}</span>}
+                    </div>
+                    <div style={{
+                      fontSize: 10, letterSpacing: "0.08em", fontWeight: 700, padding: "4px 10px", borderRadius: 4,
+                      color: a.status === "traded" ? C.green : a.status === "missed" ? C.faint : C.gold,
+                      border: `1px solid ${a.status === "traded" ? C.green : a.status === "missed" ? C.border : "rgba(245,200,107,0.5)"}`,
+                      background: a.status === "traded" ? "rgba(47,224,138,0.08)" : a.status === "missed" ? "transparent" : "rgba(245,200,107,0.08)",
+                    }}>
+                      {(a.status || "pending").toUpperCase()}
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 10, fontSize: 12 }}>
+                    <div><Label>Entry</Label><div style={{ color: C.text }}>{a.entryPrice != null ? a.entryPrice.toFixed(2) : "—"}</div></div>
+                    <div><Label>Stop</Label><div style={{ color: C.red }}>{a.stopPrice != null ? a.stopPrice.toFixed(2) : "—"}</div></div>
+                    <div><Label>Target</Label><div style={{ color: C.green }}>{a.targetPrice != null ? a.targetPrice.toFixed(2) : "—"}</div></div>
+                    <div><Label>R:R</Label><div style={{ color: C.text }}>{a.riskReward != null ? a.riskReward.toFixed(2) : "—"}</div></div>
+                    <div><Label>Confidence</Label><div style={{ color: C.text }}>{a.confidence != null ? a.confidence + "%" : "—"}</div></div>
+                  </div>
+                  {a.status === "pending" && (
+                    <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                      <button onClick={() => setAlertStatus(a.id, "traded")}
+                        style={{ background: "rgba(47,224,138,0.14)", color: C.green, border: `1px solid rgba(47,224,138,0.4)`, borderRadius: 4, padding: "8px 14px", fontFamily: mono, fontWeight: 600, fontSize: 11, letterSpacing: "0.06em", cursor: "pointer" }}>
+                        MARK TRADED
+                      </button>
+                      <button onClick={() => setAlertStatus(a.id, "missed")}
+                        style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, padding: "8px 14px", fontFamily: mono, fontWeight: 600, fontSize: 11, letterSpacing: "0.06em", cursor: "pointer" }}>
+                        MARK MISSED
+                      </button>
+                    </div>
+                  )}
+                </Panel>
+              );
+            })}
           </React.Fragment>
         )}
 

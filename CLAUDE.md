@@ -195,8 +195,11 @@ app can't receive them — hence the exception to "no server logic" above). It d
   the Cloud Run console (browser-only, no terminal), not `firebase deploy`. If a `functions/`
   deploy is ever redone via CLI, `index.js` would need converting back to `firebase-functions/v2`
   style — the two frameworks aren't interchangeable as-is.
-- `firebaseConfig.js` — placeholder client SDK config for the *future* Phase 2 (dashboard reading
-  `/alerts` live via `onSnapshot`, signed in anonymously). Not imported anywhere yet.
+- `firebaseConfig.js` — client SDK config, loaded as a plain global (`window.POLARIS_FIREBASE_CONFIG`)
+  via a `<script src="firebaseConfig.js">` tag in `index.html`'s head, not an ES module import —
+  the app has no bundler and everything else (React, Firebase itself) is loaded the same
+  script-tag-global way. Ships with placeholder values; the ALERTS tab silently no-ops with a
+  status message until real values are filled in.
 - `DEPLOYMENT_STEPS.md` describes the CLI-based deploy path. The actual deployed service
   (`receive-alert` on Cloud Run, region set during setup) was created via Cloud Run console →
   Write a function → Node.js → inline editor, entry point `receiveAlert`.
@@ -209,8 +212,15 @@ app can't receive them — hence the exception to "no server logic" above). It d
   ATR(14) heuristic. All adjustable via script inputs. Lives in TradingView's Pine Editor, not
   deployed through this repo — pasted in by hand, no compiler available to verify it here.
 
-Phase 2 (dashboard integration, Firebase Auth in the frontend, a status-update UI) hasn't been
-built yet — ask for it explicitly when ready.
+Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
+signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
+with `onSnapshot` (`tvAlerts`/`tvAlertsStatus` state, `firestoreDbRef`), rendering each alert as a
+card (setup type, symbol/timeframe/timestamp, entry/stop/target/R:R/confidence, status badge) with
+MARK TRADED/MARK MISSED buttons calling `setAlertStatus(id, status)`, which does a client-side
+`update()` restricted by `firestore.rules` to the `status` field only. Requires a real
+`firebaseConfig.js` (see above) and Anonymous auth enabled in Firebase Console → Build →
+Authentication → Sign-in method — until both are done the tab shows a status message instead of
+erroring.
 
 ## Git
 
