@@ -1,48 +1,16 @@
-/**
- * Polaris — Pine Script Alert Webhook Receiver
- * ============================================================================
- * HTTPS Cloud Function (Functions Framework / Cloud Run "Write a function")
- * that receives TradingView Pine Script alert webhooks, validates +
- * normalizes the payload, and writes it to the Firestore `alerts` collection
- * using the Admin SDK.
- *
- * IMPORTANT — security model: the Admin SDK write below BYPASSES Firestore
- * Security Rules entirely. This function is the actual security boundary for
- * writes to `alerts`, not firestore.rules. See firestore.rules for why
- * client-side (browser) writes to `alerts` are intentionally NOT allowed —
- * only this function, gated by WEBHOOK_SECRET, can create alert documents.
- *
- * WEBHOOK_SECRET is bound as an environment variable pointing at a Secret
- * Manager secret — set this up in the Cloud Run console under this
- * function's Source tab is NOT where secrets live; go to the service's
- * "Edit & deploy new revision" -> Container(s) -> Variables & Secrets ->
- * Secrets -> Reference a secret, and pick WEBHOOK_SECRET there.
- *
- * Expected Pine Script alert JSON message body (configure this as the
- * "Message" in TradingView's alert dialog — Pine Script alerts support
- * placeholders like {{close}}, {{time}}, etc. inside the JSON string):
- *
- * {
- *   "secret": "<WEBHOOK_SECRET>",
- *   "setupType": "CHoCH_UP",
- *   "entryPrice": 18452.25,
- *   "stopPrice": 18430.00,
- *   "targetPrice": 18510.00,
- *   "confidence": 78,
- *   "riskReward": 2.6,            // optional — recomputed server-side if omitted
- *   "symbol": "NQ1!",             // optional, passthrough
- *   "timeframe": "5",             // optional, passthrough
- *   "sourceTimestamp": "{{time}}" // optional, passthrough — server timestamp is authoritative
- * }
- *
- * Response shapes:
- *   201 { ok: true, id: "<firestore doc id>" }
- *   400 { ok: false, error: "Invalid payload", details: [...] }
- *   401 { ok: false, error: "Unauthorized" }
- *   405 { ok: false, error: "Method not allowed — use POST" }
- *   413 { ok: false, error: "Payload too large" }
- *   500 { ok: false, error: "Internal error — could not store alert" }
- */
+// Polaris — Pine Script Alert Webhook Receiver
+// Receives TradingView Pine Script alert webhooks, validates the payload,
+// and writes it to the Firestore "alerts" collection via the Admin SDK.
+// The Admin SDK write bypasses Firestore Security Rules entirely -- this
+// function IS the security boundary for writes, gated by WEBHOOK_SECRET.
+// WEBHOOK_SECRET is bound as an env var via a Secret Manager reference:
+// service -> Edit & deploy new revision -> Container(s) -> Variables &
+// Secrets -> Secrets -> Reference a secret -> WEBHOOK_SECRET.
+//
+// Expected Pine Script alert JSON body (set as the alert "Message" in
+// TradingView -- {{close}}, {{time}}, etc. get substituted before sending):
+//   secret, setupType, entryPrice, stopPrice, targetPrice, confidence
+//   required; riskReward, symbol, timeframe, sourceTimestamp optional.
 
 const functions = require("@google-cloud/functions-framework");
 const admin = require("firebase-admin");
@@ -73,12 +41,8 @@ const VALID_SETUP_TYPES = new Set([
 // genuine alert.
 const MAX_BODY_BYTES = 10 * 1024;
 
-/**
- * Validates and coerces the incoming payload.
- * Never throws — every path returns a result object.
- * @param {unknown} body
- * @returns {{ ok: true, data: object } | { ok: false, errors: string[] }}
- */
+// Validates and coerces the incoming payload. Never throws -- every path
+// returns a result object: { ok: true, data } or { ok: false, errors }.
 function validateAlertPayload(body) {
   const errors = [];
   if (!body || typeof body !== "object" || Array.isArray(body)) {
