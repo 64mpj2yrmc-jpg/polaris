@@ -208,18 +208,40 @@ app can't receive them — hence the exception to "no server logic" above). It d
   to run on a live TradingView chart and fire the webhook on each completed setup. That core state
   machine is untouched; everything else on the chart is independent confluence markup layered on
   top, each with its own show/hide input: order blocks (last opposing candle before a
-  displacement move ≥ `dispMult` × ATR(14)), every fair value gap on the chart — not just the one
-  tied to an active sequence — flipped to gold "iFVG" styling once price closes back through it,
-  equal highs/lows (liquidity pools, dotted line + label when a new swing lands within
-  `eqTolPct`% of a prior one), a premium/discount zone shaded around the most recent swing
-  high/low with a 50% equilibrium line (off by default), and London/NY killzone session shading
-  via `time(timeframe.period, session, "America/New_York")` (off by default). A `table.new`
-  top-right HUD shows live phase/bias. Colors match Polaris's own palette (cyan `#00D4FF`
-  structure, gold `#F5C86B` attention/sweeps/iFVG, green `#2FE08A`/red `#FF5566` bull/bear) instead
-  of Pine's stock colors. Entry/stop/target/confidence are **not** part of the original JS model
-  (which only annotates chart structure) — they're invented in this file specifically for the
-  webhook payload: stop = the sweep candle's actual high/low (the real "protected" level — not
-  just the older swing price it swept) ± an optional buffer, target = entry ± risk × an R-multiple
+  displacement move ≥ `dispMult` × ATR(14), optionally filtered to only the standing bias's
+  direction), every *significant* fair value gap on the chart (size-filtered by `minFvgSizeAtr` ×
+  ATR(14), not just the one tied to an active sequence) flipped to gold "iFVG" styling once price
+  closes back through it and deleted outright once price later reclaims the whole zone back the
+  other way, equal highs/lows (liquidity pools — a `Swing.isPool` flag, set only when a new swing
+  clusters with a prior one within `eqTolPct`%, is also what makes a swing sweep-eligible in the
+  first place, so the scanner only reacts to genuine liquidity pools, not every minor pivot), a
+  premium/discount zone shaded around the most recent swing high/low with a 50% equilibrium line
+  (off by default), and London/NY killzone session shading via
+  `time(timeframe.period, session, "America/New_York")` (off by default). A `table.new` top-right
+  HUD shows live standing bias / HTF bias / ADX regime / phase / setup direction. Colors match
+  Polaris's own palette (cyan `#00D4FF` structure, gold `#F5C86B` attention/sweeps/iFVG, green
+  `#2FE08A`/red `#FF5566` bull/bear) instead of Pine's stock colors.
+
+  Three filters gate whether a sweep is even allowed to start a new sequence: a `structureBias`
+  state var (higher high/low → bullish, lower high/low → bearish, updated independently of the
+  scanner every time a new swing forms) blocks counter-bias setups until structure actually
+  breaks the other way; an HTF bias check (`request.security` pulling a higher timeframe's close
+  vs. its own EMA, `lookahead_off` so it can't repaint) requires the higher timeframe to agree;
+  and a `ta.dmi()`-based ADX regime filter blocks new setups while the market's chopping below
+  `adxThreshold`. Pine's sandbox has no mechanism to call an LLM/API in real time — `alert()` is a
+  one-way webhook fire, nothing reads a response back into the script — so these three (plus the
+  liquidity-pool restriction above) are the extent of how "market-aware" the indicator itself can
+  be. Deeper judgment from Polaris's actual Claude brain happens downstream instead, once an
+  alert reaches the dashboard (see the ALERTS tab entry below).
+
+  The single most recently completed setup's entry/stop/target plan (`drawTradePlan()`) is
+  tracked via `var line`/`var label` refs and redrawn fresh each time, replacing whatever was
+  there before; `clearTradePlanIfInvalid()` deletes it outright once price actually trades through
+  its stop or target, so a played-out entry doesn't linger looking live. Entry/stop/target/
+  confidence are **not** part of the original JS model (which only annotates chart structure) —
+  they're invented in this file specifically for the webhook payload: stop = the sweep candle's
+  actual high/low (the real "protected" level — not just the older swing price it swept, which
+  the wick may have already run past) ± an optional buffer, target = entry ± risk × an R-multiple
   input, confidence = a simple FVG-size-vs-ATR(14) heuristic. All adjustable via script inputs.
   Lives in TradingView's Pine Editor, not deployed through this repo — pasted in by hand, no
   compiler available to verify it here.

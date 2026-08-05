@@ -10,11 +10,13 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // Function (see functions/index.js). That core logic is unchanged below.
 //
 // Everything else on the chart is confluence markup, independent of the
-// alert-firing state machine: order blocks, every fair value gap (flipped
-// to iFVG styling once violated), equal highs/lows (liquidity pools), a
-// premium/discount zone around the active swing range, and killzone
-// session shading. Each has its own show/hide toggle. Colors match
-// Polaris's own dark cyan/gold command-center theme:
+// alert-firing state machine: order blocks, every significant fair value gap
+// (flipped to iFVG styling once violated, deleted once reclaimed), equal
+// highs/lows (liquidity pools -- the ONLY swings the scanner will treat as
+// sweepable; lone/unmatched swings are ignored as noise), a premium/discount
+// zone around the active swing range, and killzone session shading. Each has
+// its own show/hide toggle. Colors match Polaris's own dark cyan/gold
+// command-center theme:
 //   cyan   #00D4FF  -- structure / tracking (level line, entry line, HUD)
 //   gold   #F5C86B  -- attention (sweeps, liquidity pools, iFVG flips)
 //   green  #2FE08A  -- bullish / long bias
@@ -28,6 +30,18 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 //   target     = entry +/- risk * rMultiple
 //   confidence = FVG size relative to ATR(14), a rough heuristic only
 // Adjust the inputs below, or the fvgConfidence() formula, to taste.
+//
+// Two more filters gate whether a sweep is even allowed to start a sequence:
+// a higher-timeframe bias check (HTF close vs its own EMA, via
+// request.security -- no short setups while the HTF is bullish and vice
+// versa) and a market-regime check (ta.dmi's ADX -- no new setups while the
+// market is chopping, below the ADX threshold). Pine indicators cannot call
+// an LLM/API in real time (no such capability exists in the Pine sandbox --
+// alert() is a one-way webhook fire, nothing reads a response back into the
+// script), so these are the two ways this indicator can be genuinely
+// "market aware" on its own. Deeper judgment from Polaris's actual Claude
+// brain happens downstream instead, in index.html, once an alert reaches
+// the dashboard.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -46,15 +60,17 @@ grpHook = "Webhook"
 webhookSecret = input.string("", "Webhook secret (must match WEBHOOK_SECRET)", group=grpHook)
 
 grpFVG = "Fair Value Gaps"
-showAllFvg  = input.bool(true, "Mark every FVG on the chart", group=grpFVG)
-showIfvg    = input.bool(true, "Flip violated FVGs to iFVG styling", group=grpFVG)
-maxFvgBoxes = input.int(15, "Max FVG boxes shown", minval=1, maxval=50, group=grpFVG)
+showAllFvg    = input.bool(true, "Mark every significant FVG on the chart", group=grpFVG)
+showIfvg      = input.bool(true, "Flip violated FVGs to iFVG styling", group=grpFVG)
+minFvgSizeAtr = input.float(0.3, "Min FVG size to mark (x ATR)", minval=0, step=0.05, group=grpFVG)
+maxFvgBoxes   = input.int(15, "Max FVG boxes shown", minval=1, maxval=50, group=grpFVG)
 
 grpOB = "Order Blocks"
-showOB     = input.bool(true, "Mark order blocks", group=grpOB)
-dispMult   = input.float(1.5, "Displacement threshold (x ATR)", minval=0.5, step=0.1, group=grpOB)
-obLookback = input.int(3, "Bars back to find the opposing candle", minval=1, maxval=8, group=grpOB)
-maxOB      = input.int(12, "Max order blocks shown", minval=1, maxval=40, group=grpOB)
+showOB       = input.bool(true, "Mark order blocks", group=grpOB)
+obBiasFilter = input.bool(true, "Only mark order blocks agreeing with the standing bias", group=grpOB)
+dispMult     = input.float(2.0, "Displacement threshold (x ATR)", minval=0.5, step=0.1, group=grpOB)
+obLookback   = input.int(3, "Bars back to find the opposing candle", minval=1, maxval=8, group=grpOB)
+maxOB        = input.int(12, "Max order blocks shown", minval=1, maxval=40, group=grpOB)
 
 grpEQ = "Equal Highs / Lows"
 showEQ   = input.bool(true, "Mark equal highs/lows (liquidity pools)", group=grpEQ)
@@ -69,14 +85,31 @@ londonSession = input.session("0200-0500", "London killzone", group=grpKZ)
 nyAmSession   = input.session("0930-1100", "NY AM killzone", group=grpKZ)
 nyPmSession   = input.session("1330-1600", "NY PM killzone", group=grpKZ)
 
+grpHTF = "Higher Timeframe Bias"
+useHtfBias   = input.bool(true, "Require higher-timeframe agreement", group=grpHTF)
+htfTimeframe = input.timeframe("60", "Higher timeframe", group=grpHTF)
+htfEmaLen    = input.int(50, "HTF EMA length", minval=5, group=grpHTF)
+
+grpRegime = "Market Regime"
+useRegimeFilter = input.bool(true, "Only scan when the market is trending (ADX filter)", group=grpRegime)
+adxLen          = input.int(14, "ADX length", minval=2, group=grpRegime)
+adxThreshold    = input.float(20, "Min ADX to allow new setups", minval=5, maxval=50, group=grpRegime)
+
 // ---------- types ----------
 type Swing
     int   idx
     float price
+    bool  isPool  // true once this swing clusters with another (an equal high/low) -- only pool swings are sweep-eligible
 
 // ---------- persistent state: core scanner ----------
 var array<Swing> swingHighs = array.new<Swing>()
 var array<Swing> swingLows  = array.new<Swing>()
+
+// standing directional filter, independent of the sweep/CISD scanner --
+// a higher high / higher low sets it bullish, a lower high / lower low sets
+// it bearish. The scanner only starts sequences that agree with it, so a
+// bull bias won't fire short setups until structure actually breaks bearish.
+var string structureBias = na   // "bull" | "bear"
 
 var string seqDir        = na   // "bull" | "bear"
 var string seqPhase      = na   // "sweep" | "cisd" | "retrace"
@@ -87,6 +120,19 @@ var bool   seqHasFvg     = false
 var float  seqFvgLo      = na
 var float  seqFvgHi      = na
 var float  seqSweepExtreme = na  // actual high/low the sweep candle reached -- the real "protected" level, stop lives beyond this, not just beyond the old swing price
+
+// ---------- persistent state: trade-plan markup (single most recent completed setup) ----------
+var line  tpEntryLine = na
+var line  tpStopLine  = na
+var line  tpTargetLine = na
+var label tpEntryLbl  = na
+var label tpStopLbl   = na
+var label tpTargetLbl = na
+var label tpSetupLbl  = na
+var string tpDir      = na   // "bull" | "bear" -- direction of the tracked plan
+var float  tpStop     = na
+var float  tpTarget   = na
+var bool   tpActive   = false
 
 // ---------- persistent state: confluence markup ----------
 var array<box> fvgBoxes     = array.new<box>()
@@ -105,29 +151,51 @@ pl = ta.pivotlow(swingStrength, swingStrength)
 
 if not na(ph)
     int newHighIdx = bar_index - swingStrength
-    if showEQ and array.size(swingHighs) > 0
+    // pool-matching runs unconditionally (it decides which swings are sweep-eligible
+    // liquidity pools) -- showEQ only controls whether the match gets drawn
+    bool poolMatch = false
+    if array.size(swingHighs) > 0
         float tol = ph * eqTolPct / 100
         for i = 0 to array.size(swingHighs) - 1
             Swing s = array.get(swingHighs, i)
             if math.abs(s.price - ph) <= tol
-                line.new(s.idx, s.price, newHighIdx, ph, color=color.new(#F5C86B, 30), style=line.style_dotted, width=1)
-                label.new(newHighIdx, ph, "EQH", style=label.style_label_down, color=color.new(#0B1626, 15), textcolor=#F5C86B, size=size.tiny)
+                poolMatch := true
+                s.isPool := true
+                if showEQ
+                    line.new(s.idx, s.price, newHighIdx, ph, color=color.new(#F5C86B, 30), style=line.style_dotted, width=1)
+                    label.new(newHighIdx, ph, "EQH", style=label.style_label_down, color=color.new(#0B1626, 15), textcolor=#F5C86B, size=size.tiny)
                 break
-    array.unshift(swingHighs, Swing.new(newHighIdx, ph))
+    if array.size(swingHighs) > 0
+        Swing prevHigh = array.get(swingHighs, 0)
+        if ph > prevHigh.price
+            structureBias := "bull"
+        else if ph < prevHigh.price
+            structureBias := "bear"
+    array.unshift(swingHighs, Swing.new(newHighIdx, ph, poolMatch))
     if array.size(swingHighs) > maxSwings
         array.pop(swingHighs)
 
 if not na(pl)
     int newLowIdx = bar_index - swingStrength
-    if showEQ and array.size(swingLows) > 0
+    bool poolMatchLow = false
+    if array.size(swingLows) > 0
         float tol = pl * eqTolPct / 100
         for i = 0 to array.size(swingLows) - 1
             Swing s = array.get(swingLows, i)
             if math.abs(s.price - pl) <= tol
-                line.new(s.idx, s.price, newLowIdx, pl, color=color.new(#F5C86B, 30), style=line.style_dotted, width=1)
-                label.new(newLowIdx, pl, "EQL", style=label.style_label_up, color=color.new(#0B1626, 15), textcolor=#F5C86B, size=size.tiny)
+                poolMatchLow := true
+                s.isPool := true
+                if showEQ
+                    line.new(s.idx, s.price, newLowIdx, pl, color=color.new(#F5C86B, 30), style=line.style_dotted, width=1)
+                    label.new(newLowIdx, pl, "EQL", style=label.style_label_up, color=color.new(#0B1626, 15), textcolor=#F5C86B, size=size.tiny)
                 break
-    array.unshift(swingLows, Swing.new(newLowIdx, pl))
+    if array.size(swingLows) > 0
+        Swing prevLow = array.get(swingLows, 0)
+        if pl < prevLow.price
+            structureBias := "bear"
+        else if pl > prevLow.price
+            structureBias := "bull"
+    array.unshift(swingLows, Swing.new(newLowIdx, pl, poolMatchLow))
     if array.size(swingLows) > maxSwings
         array.pop(swingLows)
 
@@ -163,9 +231,20 @@ fvgAtBull(int off) =>
     bool has = high[off + 2] < low[off]
     [has, has ? high[off + 2] : na, has ? low[off] : na]
 
-// atrVal must be computed unconditionally every bar -- ta.* calls inside a
-// function that's only invoked conditionally trip Pine's CW10003 warning.
+// atrVal, htfBias and adxVal must all be computed unconditionally every bar --
+// ta.*/request.security calls inside a function or if-block that's only
+// invoked conditionally trip Pine's CW10003 warning.
 atrVal = ta.atr(14)
+
+// higher-timeframe bias -- HTF close above/below its own EMA. Repaint-safe:
+// lookahead is off, so this only ever reflects the last *closed* HTF bar.
+htfClose = request.security(syminfo.tickerid, htfTimeframe, close, lookahead=barmerge.lookahead_off)
+htfEma   = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_off)
+string htfBias = htfClose > htfEma ? "bull" : htfClose < htfEma ? "bear" : na
+
+// market regime -- ADX below threshold means chop/no clear trend
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+bool regimeOk = not useRegimeFilter or adxVal >= adxThreshold
 
 // heuristic only, not predictive -- bigger FVG relative to recent volatility
 // scores higher, clamped to [30, 95]
@@ -185,11 +264,67 @@ buildAlertMessage(string setupType, float entryPrice, float stopPrice, float tar
      ',"confidence":' + str.tostring(confidence) + ',"riskReward":' + str.tostring(rr) +
      ',"symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
 
+// draws the entry/stop/target trade plan for a just-completed setup, clearing
+// out whatever plan was drawn before it -- only the single most recent
+// completed setup is ever shown on the chart at once.
+drawTradePlan(string dir, float entryP, float stopP, float targetP, int conf) =>
+    if not na(tpEntryLine)
+        line.delete(tpEntryLine)
+    if not na(tpStopLine)
+        line.delete(tpStopLine)
+    if not na(tpTargetLine)
+        line.delete(tpTargetLine)
+    if not na(tpEntryLbl)
+        label.delete(tpEntryLbl)
+    if not na(tpStopLbl)
+        label.delete(tpStopLbl)
+    if not na(tpTargetLbl)
+        label.delete(tpTargetLbl)
+    if not na(tpSetupLbl)
+        label.delete(tpSetupLbl)
+    string setupText = dir == "bull" ? "▲ LONG SETUP\n" + str.tostring(conf) + "%" : "▼ SHORT SETUP\n" + str.tostring(conf) + "%"
+    color setupColor = dir == "bull" ? #2FE08A : #FF5566
+    tpSetupLbl := label.new(bar_index, dir == "bull" ? high : low, setupText, style=dir == "bull" ? label.style_label_down : label.style_label_up, color=setupColor, textcolor=#030710, size=size.normal)
+    tpEntryLine := line.new(bar_index, entryP, bar_index + 15, entryP, color=#00D4FF, style=line.style_solid, width=2)
+    tpStopLine := line.new(bar_index, stopP, bar_index + 15, stopP, color=#FF5566, style=line.style_dashed, width=1)
+    tpTargetLine := line.new(bar_index, targetP, bar_index + 15, targetP, color=#2FE08A, style=line.style_dashed, width=1)
+    tpEntryLbl := label.new(bar_index + 15, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
+    tpStopLbl := label.new(bar_index + 15, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
+    tpTargetLbl := label.new(bar_index + 15, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
+    tpDir := dir
+    tpStop := stopP
+    tpTarget := targetP
+    tpActive := true
+
+// clears the tracked trade plan once price has actually traded through its
+// stop or target -- an entry that already played out shouldn't linger on
+// the chart as if it were still live.
+clearTradePlanIfInvalid() =>
+    if tpActive
+        bool stopped = tpDir == "bull" ? low <= tpStop : high >= tpStop
+        bool reached = tpDir == "bull" ? high >= tpTarget : low <= tpTarget
+        if stopped or reached
+            if not na(tpEntryLine)
+                line.delete(tpEntryLine)
+            if not na(tpStopLine)
+                line.delete(tpStopLine)
+            if not na(tpTargetLine)
+                line.delete(tpTargetLine)
+            if not na(tpEntryLbl)
+                label.delete(tpEntryLbl)
+            if not na(tpStopLbl)
+                label.delete(tpStopLbl)
+            if not na(tpTargetLbl)
+                label.delete(tpTargetLbl)
+            if not na(tpSetupLbl)
+                label.delete(tpSetupLbl)
+            tpActive := false
+
 // ---------- order blocks (last opposing candle before a displacement move) ----------
 bool isDisplacement = math.abs(close - open) > atrVal * dispMult
 
 if showOB and barstate.isconfirmed and isDisplacement
-    if close > open
+    if close > open and (not obBiasFilter or structureBias != "bear")
         int k = 1
         bool found = false
         while k <= obLookback and not found
@@ -200,7 +335,7 @@ if showOB and barstate.isconfirmed and isDisplacement
                 if array.size(obBoxes) > maxOB
                     box.delete(array.pop(obBoxes))
             k += 1
-    else if close < open
+    else if close < open and (not obBiasFilter or structureBias != "bull")
         int k = 1
         bool found = false
         while k <= obLookback and not found
@@ -215,7 +350,7 @@ if showOB and barstate.isconfirmed and isDisplacement
 // ---------- fair value gaps everywhere (not just inside an active sequence) ----------
 if showAllFvg and barstate.isconfirmed
     [hasBull, bLo, bHi] = fvgAtBull(0)
-    if hasBull
+    if hasBull and (bHi - bLo) >= minFvgSizeAtr * atrVal
         box fb = box.new(bar_index - 2, top=bHi, right=bar_index + 20, bottom=bLo, border_color=color.new(#2FE08A, 35), bgcolor=color.new(#2FE08A, 88), extend=extend.none, text="FVG", text_size=size.tiny, text_color=color.new(#2FE08A, 10))
         array.unshift(fvgBoxes, fb)
         array.unshift(fvgBoxLo, bLo)
@@ -230,7 +365,7 @@ if showAllFvg and barstate.isconfirmed
             array.pop(fvgBoxDone)
 
     [hasBear, brLo, brHi] = fvgAtBear(0)
-    if hasBear
+    if hasBear and (brHi - brLo) >= minFvgSizeAtr * atrVal
         box fb2 = box.new(bar_index - 2, top=brHi, right=bar_index + 20, bottom=brLo, border_color=color.new(#FF5566, 35), bgcolor=color.new(#FF5566, 88), extend=extend.none, text="FVG", text_size=size.tiny, text_color=color.new(#FF5566, 10))
         array.unshift(fvgBoxes, fb2)
         array.unshift(fvgBoxLo, brLo)
@@ -244,21 +379,36 @@ if showAllFvg and barstate.isconfirmed
             array.pop(fvgBoxDir)
             array.pop(fvgBoxDone)
 
-    if showIfvg and array.size(fvgBoxes) > 0
-        for i = 0 to array.size(fvgBoxes) - 1
-            if not array.get(fvgBoxDone, i)
-                string d = array.get(fvgBoxDir, i)
-                float zLo = array.get(fvgBoxLo, i)
-                float zHi = array.get(fvgBoxHi, i)
-                bool violated = d == "bull" ? close < zLo : close > zHi
-                if violated
-                    box zb = array.get(fvgBoxes, i)
-                    box.set_border_color(zb, color.new(#F5C86B, 20))
-                    box.set_bgcolor(zb, color.new(#F5C86B, 85))
-                    box.set_text(zb, "iFVG")
-                    box.set_text_color(zb, color.new(#F5C86B, 10))
-                    box.set_right(zb, bar_index + 20)
-                    array.set(fvgBoxDone, i, true)
+    // maintenance pass, newest-to-oldest so removals never skip an entry:
+    // un-flipped zones flip to iFVG once violated; already-flipped zones get
+    // deleted outright once price reclaims the whole zone back the other way
+    // (the iFVG is no longer relevant once that happens)
+    if array.size(fvgBoxes) > 0
+        for i = array.size(fvgBoxes) - 1 to 0
+            bool done = array.get(fvgBoxDone, i)
+            string d = array.get(fvgBoxDir, i)
+            float zLo = array.get(fvgBoxLo, i)
+            float zHi = array.get(fvgBoxHi, i)
+            box zb = array.get(fvgBoxes, i)
+            if not done
+                if showIfvg
+                    bool violated = d == "bull" ? close < zLo : close > zHi
+                    if violated
+                        box.set_border_color(zb, color.new(#F5C86B, 20))
+                        box.set_bgcolor(zb, color.new(#F5C86B, 85))
+                        box.set_text(zb, "iFVG")
+                        box.set_text_color(zb, color.new(#F5C86B, 10))
+                        box.set_right(zb, bar_index + 20)
+                        array.set(fvgBoxDone, i, true)
+            else
+                bool reclaimed = d == "bull" ? close > zHi : close < zLo
+                if reclaimed
+                    box.delete(zb)
+                    array.remove(fvgBoxes, i)
+                    array.remove(fvgBoxLo, i)
+                    array.remove(fvgBoxHi, i)
+                    array.remove(fvgBoxDir, i)
+                    array.remove(fvgBoxDone, i)
 
 // ---------- premium / discount zone (around the active swing range) ----------
 if showPD and barstate.isconfirmed and array.size(swingHighs) > 0 and array.size(swingLows) > 0
@@ -284,15 +434,22 @@ inNyPm   = not na(time(timeframe.period, nyPmSession, "America/New_York"))
 bgcolor(showKillzones and inLondon ? color.new(#00D4FF, 95) : na, title="London killzone")
 bgcolor(showKillzones and (inNyAm or inNyPm) ? color.new(#F5C86B, 95) : na, title="NY killzone")
 
+// ---------- clear the tracked trade plan once it's played out ----------
+if barstate.isconfirmed
+    clearTradePlanIfInvalid()
+
 // ---------- main scan (mirrors advanceScan), only on confirmed/closed bars ----------
 if barstate.isconfirmed
     if na(seqDir)
-        // look for a swept high (bearish setup) -- best (highest) prior swing that got wicked through and closed back under
+        // look for a swept high (bearish setup) -- best (highest) prior swing that got wicked through and closed back under.
+        // Skipped while structureBias or HTF bias is bullish, or the market isn't trending --
+        // no short setups until structure actually breaks bearish.
+        bool bearAllowed = structureBias != "bull" and (not useHtfBias or htfBias != "bull") and regimeOk
         float bestHigh = na
-        if array.size(swingHighs) > 0
+        if bearAllowed and array.size(swingHighs) > 0
             for i = 0 to array.size(swingHighs) - 1
                 Swing s = array.get(swingHighs, i)
-                if high > s.price and close < s.price
+                if s.isPool and high > s.price and close < s.price
                     if na(bestHigh) or s.price > bestHigh
                         bestHigh := s.price
 
@@ -307,11 +464,14 @@ if barstate.isconfirmed
             if showVisuals
                 label.new(bar_index, high, "⚡ SWEEP", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
 
-        if na(seqDir) and array.size(swingLows) > 0
+        // Skipped while structureBias or HTF bias is bearish, or the market isn't trending --
+        // no long setups until structure actually breaks bullish.
+        bool bullAllowed = structureBias != "bear" and (not useHtfBias or htfBias != "bear") and regimeOk
+        if na(seqDir) and bullAllowed and array.size(swingLows) > 0
             float bestLow = na
             for i = 0 to array.size(swingLows) - 1
                 Swing s = array.get(swingLows, i)
-                if low < s.price and close > s.price
+                if s.isPool and low < s.price and close > s.price
                     if na(bestLow) or s.price < bestLow
                         bestLow := s.price
             if not na(bestLow)
@@ -372,13 +532,7 @@ if barstate.isconfirmed
                             float targetP = entryP - math.abs(entryP - stopP) * rMultiple
                             alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
                             if showVisuals
-                                label.new(bar_index, low, "▼ SHORT SETUP\n" + str.tostring(conf) + "%", style=label.style_label_up, color=#FF5566, textcolor=#030710, size=size.normal)
-                                line.new(bar_index, entryP, bar_index + 15, entryP, color=#00D4FF, style=line.style_solid, width=2)
-                                line.new(bar_index, stopP, bar_index + 15, stopP, color=#FF5566, style=line.style_dashed, width=1)
-                                line.new(bar_index, targetP, bar_index + 15, targetP, color=#2FE08A, style=line.style_dashed, width=1)
-                                label.new(bar_index + 15, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
-                                label.new(bar_index + 15, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
-                                label.new(bar_index + 15, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
+                                drawTradePlan("bear", entryP, stopP, targetP, conf)
                             seqDir := na
                             seqPhase := na
                         else
@@ -394,13 +548,7 @@ if barstate.isconfirmed
                     float targetP = entryP - math.abs(entryP - stopP) * rMultiple
                     alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
                     if showVisuals
-                        label.new(bar_index, low, "▼ SHORT SETUP\n" + str.tostring(conf) + "%", style=label.style_label_up, color=#FF5566, textcolor=#030710, size=size.normal)
-                        line.new(bar_index, entryP, bar_index + 15, entryP, color=#00D4FF, style=line.style_solid, width=2)
-                        line.new(bar_index, stopP, bar_index + 15, stopP, color=#FF5566, style=line.style_dashed, width=1)
-                        line.new(bar_index, targetP, bar_index + 15, targetP, color=#2FE08A, style=line.style_dashed, width=1)
-                        label.new(bar_index + 15, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
-                        label.new(bar_index + 15, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
-                        label.new(bar_index + 15, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
+                        drawTradePlan("bear", entryP, stopP, targetP, conf)
                     seqDir := na
                     seqPhase := na
         else if seqDir == "bull"
@@ -446,13 +594,7 @@ if barstate.isconfirmed
                             float targetP = entryP + math.abs(entryP - stopP) * rMultiple
                             alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
                             if showVisuals
-                                label.new(bar_index, high, "▲ LONG SETUP\n" + str.tostring(conf) + "%", style=label.style_label_down, color=#2FE08A, textcolor=#030710, size=size.normal)
-                                line.new(bar_index, entryP, bar_index + 15, entryP, color=#00D4FF, style=line.style_solid, width=2)
-                                line.new(bar_index, stopP, bar_index + 15, stopP, color=#FF5566, style=line.style_dashed, width=1)
-                                line.new(bar_index, targetP, bar_index + 15, targetP, color=#2FE08A, style=line.style_dashed, width=1)
-                                label.new(bar_index + 15, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
-                                label.new(bar_index + 15, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
-                                label.new(bar_index + 15, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
+                                drawTradePlan("bull", entryP, stopP, targetP, conf)
                             seqDir := na
                             seqPhase := na
                         else
@@ -468,13 +610,7 @@ if barstate.isconfirmed
                     float targetP = entryP + math.abs(entryP - stopP) * rMultiple
                     alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
                     if showVisuals
-                        label.new(bar_index, high, "▲ LONG SETUP\n" + str.tostring(conf) + "%", style=label.style_label_down, color=#2FE08A, textcolor=#030710, size=size.normal)
-                        line.new(bar_index, entryP, bar_index + 15, entryP, color=#00D4FF, style=line.style_solid, width=2)
-                        line.new(bar_index, stopP, bar_index + 15, stopP, color=#FF5566, style=line.style_dashed, width=1)
-                        line.new(bar_index, targetP, bar_index + 15, targetP, color=#2FE08A, style=line.style_dashed, width=1)
-                        label.new(bar_index + 15, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
-                        label.new(bar_index + 15, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
-                        label.new(bar_index + 15, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
+                        drawTradePlan("bull", entryP, stopP, targetP, conf)
                     seqDir := na
                     seqPhase := na
 
@@ -483,12 +619,18 @@ if showVisuals and not na(seqPhase)
     line.new(seqSweepBar, seqLevel, bar_index, seqLevel, color=color.new(#F5C86B, 55), style=line.style_dashed, width=1)
 
 // ---------- status HUD (top-right) ----------
-var table hud = table.new(position=position.top_right, columns=2, rows=3, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
+var table hud = table.new(position=position.top_right, columns=2, rows=6, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
 
 if showHud and barstate.islast
     table.cell(hud, 0, 0, "◆ POLARIS", text_color=#F5C86B, text_size=size.small, text_halign=text.align_left)
     table.cell(hud, 1, 0, "SCANNER", text_color=#F5C86B, text_size=size.small, text_halign=text.align_right)
-    table.cell(hud, 0, 1, "PHASE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(hud, 1, 1, na(seqPhase) ? "IDLE" : str.upper(seqPhase), text_color=na(seqPhase) ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
-    table.cell(hud, 0, 2, "BIAS", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(hud, 1, 2, na(seqDir) ? "--" : (seqDir == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(seqDir) ? #6E93AD : (seqDir == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
+    table.cell(hud, 0, 1, "BIAS", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 1, na(structureBias) ? "--" : (structureBias == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(structureBias) ? #6E93AD : (structureBias == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
+    table.cell(hud, 0, 2, "HTF " + htfTimeframe, text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 2, na(htfBias) ? "--" : (htfBias == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(htfBias) ? #6E93AD : (htfBias == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
+    table.cell(hud, 0, 3, "ADX", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 3, str.tostring(adxVal, "#.#") + (regimeOk ? " TREND" : " CHOP"), text_color=regimeOk ? #DDF3FF : #6E93AD, text_size=size.small, text_halign=text.align_right)
+    table.cell(hud, 0, 4, "PHASE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 4, na(seqPhase) ? "IDLE" : str.upper(seqPhase), text_color=na(seqPhase) ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
+    table.cell(hud, 0, 5, "SETUP", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 5, na(seqDir) ? "--" : (seqDir == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(seqDir) ? #6E93AD : (seqDir == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
