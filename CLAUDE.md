@@ -183,7 +183,14 @@ app can't receive them — hence the exception to "no server logic" above). It d
   `process.env.WEBHOOK_SECRET`, bound via a Secret Manager reference set in the Cloud Run console
   (service → Edit & deploy new revision → Container(s) → Variables & Secrets → Secrets), not
   `defineSecret`. Validates the payload and writes to the Firestore `alerts` collection via the
-  Admin SDK either way.
+  Admin SDK either way. Also fires a best-effort SMS via Twilio's plain REST API (`sendSmsAlert`,
+  called after the Firestore write succeeds, `fetch` + HTTP Basic Auth — no Twilio SDK dependency,
+  Node's runtime has `fetch` built in) once a setup fires. Four env vars gate it, all-or-nothing:
+  `TWILIO_ACCOUNT_SID`, `TWILIO_FROM_NUMBER`, `TWILIO_TO_NUMBER` are plain (non-secret) environment
+  variables — only `TWILIO_AUTH_TOKEN` is an actual credential, so only it goes through the same
+  Secret Manager reference dance as `WEBHOOK_SECRET`. Any of the four missing and it no-ops
+  silently; a failed text is logged but never fails the webhook response — the alert is already
+  safely stored in Firestore by that point.
 - `firestore.rules` — deliberately does **not** allow unauthenticated client writes to `/alerts`,
   even though that was the original ask. The Cloud Function's Admin SDK write bypasses rules
   entirely, so it's already the real security boundary; opening Firestore itself to public writes

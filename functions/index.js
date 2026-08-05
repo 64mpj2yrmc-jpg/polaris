@@ -11,6 +11,10 @@
 // TradingView -- {{close}}, {{time}}, etc. get substituted before sending):
 //   secret, setupType, entryPrice, stopPrice, targetPrice, confidence
 //   required; riskReward, symbol, timeframe, sourceTimestamp optional.
+//
+// Also fires a best-effort SMS via Twilio's REST API once an alert is
+// stored (see sendSmsAlert below) -- no Twilio SDK dependency, just fetch,
+// since Node 22's runtime has it built in.
 
 const functions = require("@google-cloud/functions-framework");
 const admin = require("firebase-admin");
@@ -20,6 +24,18 @@ const db = admin.firestore();
 
 // Bound via Secret Manager reference (see comment above) — never hardcode this.
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+
+// Only TWILIO_AUTH_TOKEN is a real credential, so only it goes through
+// Secret Manager like WEBHOOK_SECRET above. The account SID and phone
+// numbers aren't secrets on their own -- they're plain environment
+// variables (Cloud Run console -> Variables & Secrets -> Environment
+// variables, no Secret Manager entry needed). If any of the four are
+// unset, sendSmsAlert no-ops entirely -- SMS is optional, not required for
+// the webhook to function.
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
+const TWILIO_TO_NUMBER = process.env.TWILIO_TO_NUMBER;
 
 // Keep this list in sync with whatever setup labels your Pine Script emits.
 // Rejecting unknown types catches typos/drift early instead of letting junk
@@ -95,6 +111,33 @@ function validateAlertPayload(body) {
   };
 }
 
+// Best-effort text message -- never throws, never blocks or fails the
+// webhook response. By the time this runs the alert is already safely
+// stored in Firestore, so a failed text just means no phone buzz, not a
+// lost alert.
+async function sendSmsAlert(data) {
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER || !TWILIO_TO_NUMBER) return;
+  try {
+    const body = `Polaris: ${data.setupType} ${data.symbol || ""} ${data.timeframe || ""} — entry ${data.entryPrice}, stop ${data.stopPrice}, target ${data.targetPrice} (${data.confidence}%)`;
+    const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+    const params = new URLSearchParams({ To: TWILIO_TO_NUMBER, From: TWILIO_FROM_NUMBER, Body: body });
+    const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${auth}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: params,
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.error("sendSmsAlert: Twilio request failed", res.status, errText);
+    }
+  } catch (err) {
+    console.error("sendSmsAlert: failed to send", err);
+  }
+}
+
 functions.http("receiveAlert", async (req, res) => {
   if (req.method !== "POST") {
     res.status(405).json({ ok: false, error: "Method not allowed — use POST" });
@@ -133,6 +176,7 @@ functions.http("receiveAlert", async (req, res) => {
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
     });
     console.log("receiveAlert: stored alert", docRef.id, result.data.setupType);
+    await sendSmsAlert(result.data);
     res.status(201).json({ ok: true, id: docRef.id });
   } catch (err) {
     console.error("receiveAlert: Firestore write failed", err);
