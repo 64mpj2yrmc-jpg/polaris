@@ -195,15 +195,17 @@ app can't receive them — hence the exception to "no server logic" above). It d
   even though that was the original ask. The Cloud Function's Admin SDK write bypasses rules
   entirely, so it's already the real security boundary; opening Firestore itself to public writes
   would let anyone with the (necessarily public) client config skip the webhook's secret check.
-  Reads require Firebase Auth. Two separate `allow update` rules (OR'd together, standard
+  Reads require Firebase Auth. Three separate `allow update` rules (OR'd together, standard
   Firestore rules semantics) then narrowly scope what the signed-in dashboard client itself may
   write: one lets it flip `status` between `pending`/`traded`/`missed` and nothing else; a second
   lets Polaris's own AI review (see the ALERTS tab entry below) attach exactly once — it can only
   ever set `aiReviewed`/`aiVerdict`/`aiConfidence`/`aiNote`, gated by `resource.data.aiReviewed !=
-  true` so it's write-once server-side, not just client-side dedupe. Neither rule can touch price/
-  entry/stop/target fields, and neither can create or delete documents. **This file isn't
-  auto-deployed** — same as the rest of this Firebase setup, publishing an edit here means pasting
-  the updated rules into Firebase Console → Firestore Database → Rules → Publish by hand.
+  true` so it's write-once server-side, not just client-side dedupe; a third lets the dashboard's
+  self-calibration (see below) set `outcome` to `"win"`/`"loss"` exactly once, gated the same way
+  via `resource.data.get('outcome', null) == null`. None of the three can touch price/entry/stop/
+  target fields, and none can create or delete documents. **This file isn't auto-deployed** — same
+  as the rest of this Firebase setup, publishing an edit here means pasting the updated rules into
+  Firebase Console → Firestore Database → Rules → Publish by hand.
 - `firebase.json`, `.firebaserc` (placeholder project ID), `firestore.indexes.json` — Firebase CLI
   scaffold, kept for reference/future use, but the actual live deployment was done by hand through
   the Cloud Run console (browser-only, no terminal), not `firebase deploy`. If a `functions/`
@@ -425,6 +427,29 @@ client-side `update()` (the second `firestore.rules` clause above); any failure 
 network, malformed JSON) is swallowed silently and the alert just stays unreviewed rather than
 blocking or erroring the tab. Cards show a "Polaris is reviewing…" line while pending and a
 favorable/caution/avoid badge + confidence + one-line note once reviewed.
+
+**Self-calibration.** A separate `useEffect([candles, tvAlerts])` calls `resolveAlertOutcomes()`,
+which resolves each alert's real `outcome` (`"win"`/`"loss"`) against the live market feed's own
+candles (`candlesRef`), using the identical conservative tie-break the Pine indicator's own
+scorecard uses (both stop and target touched on the same bar counts as a loss, since intrabar
+order isn't knowable) — first candle after the alert's timestamp that touches either level
+resolves it. This only advances while the MARKET tab's feed is running, and only as accurately as
+that feed's instrument/timeframe approximates the alert's own (the same QQQ/NQ-proxy relationship
+the rest of the app already leans on) — an approximation, not a guarantee, deliberately kept
+separate from the trade journal (no `trades[]` tagging involved at all) so it works purely off
+alert data regardless of whether the trader ever took the trade. Written back via a third
+client-side `update()` clause in `firestore.rules`, write-once the same way the AI-review clause
+is (`resource.data.get('outcome', null) == null`). `outcomeAttemptedRef` dedupes in-flight writes
+per alert id the same way `aiReviewAttemptedRef` does for reviews. Once alerts carry both
+`aiVerdict` and `outcome`, `verdictAccuracy` (a `useMemo` over `tvAlerts`) buckets resolved,
+AI-reviewed alerts by verdict and tallies win/loss per bucket, and `calibrationSummary()` renders
+it as a short string (e.g. `"favorable 71% (5/7), avoid 25% (1/4)"`, omitting any bucket with
+`n=0`) — this is genuine self-calibration: does an `avoid` call actually lose more than a
+`favorable` one? It's fed into both `buildAlertReviewPrompt()` (so future reviews are informed by
+Polaris's own track record, not judged in a vacuum) and `buildSystemPrompt()` (so asking "are you
+actually any good at this" in chat gets a real, sample-size-aware answer), shown on the ALERTS tab
+as a "◆ POLARIS CALIBRATION" panel (hidden until at least one bucket has data), and each alert
+card gets a WON/LOST badge next to its status badge once resolved.
 
 **Live indicator status (between full setups).** The Pine scanner also fires a second, much
 lighter webhook payload on every phase advance (sweep detected → CISD confirmed → retracing) —

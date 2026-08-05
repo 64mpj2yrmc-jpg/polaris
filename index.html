@@ -74,7 +74,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.05-5";
+const BUILD = "2026.08.05-6";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -973,9 +973,11 @@ function App() {
 
   // ----- TradingView alerts (Firestore, Phase 2) -----
   const [tvAlerts, setTvAlerts] = useState([]);
+  const tvAlertsRef = useRef([]); tvAlertsRef.current = tvAlerts;
   const [tvAlertsStatus, setTvAlertsStatus] = useState("");
   const firestoreDbRef = useRef(null);
   const aiReviewAttemptedRef = useRef(new Set()); // session-only dedupe so a snapshot re-fire doesn't re-trigger a review already in flight
+  const outcomeAttemptedRef = useRef(new Set()); // per-alert-id dedupe so resolveAlertOutcomes doesn't refire the same write repeatedly
 
   // ----- Live scanner status (single overwritten Firestore doc) -----
   const [scannerStatus, setScannerStatus] = useState(null);
@@ -1146,6 +1148,7 @@ Journal: ${s ? `${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFi
 Market: ${lastCandle ? `last ${lastCandle.c}, day ${dayPct}.` : "no live feed."}
 Scanner: ${scanningRef.current ? "active" : "off"}. Recent events: ${scanEventsRef.current.length ? scanEventsRef.current.slice(0, 4).map((e) => e.msg).join(" | ") : "none"}.
 Indicator status (from the TradingView Pine scanner, live): ${scannerStatusRef.current ? `standing bias ${scannerStatusRef.current.structureBias || "none"}, HTF bias ${scannerStatusRef.current.htfBias || "none"}, regime ${scannerStatusRef.current.regime || "unknown"} (ADX ${scannerStatusRef.current.adx ?? "n/a"}), phase ${scannerStatusRef.current.phase || "idle"}${scannerStatusRef.current.wins != null && scannerStatusRef.current.losses != null && (scannerStatusRef.current.wins + scannerStatusRef.current.losses) > 0 ? `, live scorecard ${Math.round((scannerStatusRef.current.wins / (scannerStatusRef.current.wins + scannerStatusRef.current.losses)) * 100)}% (${scannerStatusRef.current.wins}/${scannerStatusRef.current.wins + scannerStatusRef.current.losses})` : ""}.` : "no status received yet."}
+Your own past calibration (verdict vs. actual outcome, resolved alerts only — small samples, weight accordingly): ${calibrationSummary() || "not enough resolved alerts yet"}.
 Memory: ${memoryRef.current || "none recorded"}.
 
 Judge this ONE setup on its own merits — structure quality, risk/reward, whether it fits the current market read. Respond with ONLY a single JSON object, nothing else, no markdown fences, no prose before or after:
@@ -1185,6 +1188,69 @@ Judge this ONE setup on its own merits — structure quality, risk/reward, wheth
       reviewAlertWithPolaris(a);
     });
   }, [tvAlerts]);
+
+  // Self-calibration: resolves each alert's real outcome (win/loss) against
+  // the live market feed's candles, using the same conservative tie-break
+  // the Pine indicator's own scorecard uses (both stop and target touched
+  // on the same bar counts as a loss, since intrabar order isn't knowable).
+  // This only advances while the MARKET tab's feed is running, and only as
+  // accurately as that feed's instrument/timeframe approximates the
+  // alert's own (the same QQQ/NQ-proxy relationship the rest of the app
+  // already leans on) -- an approximation, not a guarantee, but it's what
+  // lets Polaris eventually see whether its own past verdicts predicted
+  // anything, instead of judging every alert in a vacuum forever.
+  function resolveAlertOutcomes() {
+    if (!firestoreDbRef.current) return;
+    const cs = candlesRef.current;
+    if (!cs || !cs.length) return;
+    tvAlertsRef.current.forEach((a) => {
+      if (a.outcome || outcomeAttemptedRef.current.has(a.id)) return;
+      if (a.entryPrice == null || a.stopPrice == null || a.targetPrice == null) return;
+      const ts = a.timestamp && a.timestamp.toDate ? a.timestamp.toDate().getTime() : null;
+      if (ts == null) return;
+      const isUp = (a.setupType || "").includes("UP") || (a.setupType || "").includes("BUY") || (a.setupType || "").includes("BULL");
+      for (const c of cs) {
+        const ct = new Date(c.t).getTime();
+        if (isNaN(ct) || ct <= ts) continue;
+        const hitStop = isUp ? c.l <= a.stopPrice : c.h >= a.stopPrice;
+        const hitTarget = isUp ? c.h >= a.targetPrice : c.l <= a.targetPrice;
+        if (hitStop || hitTarget) {
+          const outcome = hitTarget && !hitStop ? "win" : "loss";
+          outcomeAttemptedRef.current.add(a.id);
+          firestoreDbRef.current.collection("alerts").doc(a.id).update({ outcome }).catch(() => {});
+          break;
+        }
+      }
+    });
+  }
+
+  useEffect(() => {
+    resolveAlertOutcomes();
+  }, [candles, tvAlerts]);
+
+  // Per-verdict win rate: does an "avoid" call actually lose more than a
+  // "favorable" one? Only counts alerts that are both AI-reviewed and
+  // outcome-resolved, so it's silent (n=0, hidden) until real data exists.
+  const verdictAccuracy = useMemo(() => {
+    const buckets = { favorable: { w: 0, l: 0 }, caution: { w: 0, l: 0 }, avoid: { w: 0, l: 0 } };
+    tvAlerts.forEach((a) => {
+      if (a.aiReviewed && a.aiVerdict && a.outcome && buckets[a.aiVerdict]) {
+        buckets[a.aiVerdict][a.outcome === "win" ? "w" : "l"]++;
+      }
+    });
+    return buckets;
+  }, [tvAlerts]);
+
+  // Short summary string for prompts/UI, e.g. "favorable 71% (5/7), avoid 25% (1/4)" -- omits any bucket with n=0.
+  function calibrationSummary() {
+    const parts = [];
+    ["favorable", "caution", "avoid"].forEach((v) => {
+      const b = verdictAccuracy[v];
+      const n = b.w + b.l;
+      if (n > 0) parts.push(`${v} ${Math.round((b.w / n) * 100)}% (${b.w}/${n})`);
+    });
+    return parts.join(", ");
+  }
 
   useEffect(() => {
     if (syncReadyRef.current) return;
@@ -2430,6 +2496,7 @@ MARKET FEED (${marketFeedLabel()}):
 ${candlesRef.current.length ? `Last ${candlesRef.current[candlesRef.current.length - 1].c}${dayInfoRef.current ? `, day ${(((candlesRef.current[candlesRef.current.length - 1].c - dayInfoRef.current.prevClose) / dayInfoRef.current.prevClose) * 100).toFixed(2)}%, week ${(((candlesRef.current[candlesRef.current.length - 1].c - dayInfoRef.current.weekAgo) / dayInfoRef.current.weekAgo) * 100).toFixed(2)}%` : ""}. Recent candles (${tfRef.current}, oldest→newest): ${JSON.stringify(candlesRef.current.slice(-20).map((c) => ({ t: c.t.slice(11, 16) || c.t, o: c.o, h: c.h, l: c.l, c: c.c })))}` : "Not connected — the feed starts when the scanner runs on the MARKET tab."}
 Scanner (his model: liquidity sweep → change in state of delivery → retrace into imbalance → rejection): ${scanningRef.current ? "ACTIVE" : "off"}. Recent events: ${scanEventsRef.current.length ? scanEventsRef.current.slice(0, 6).map((e) => `[${e.time}] ${e.msg}`).join(" | ") : "none yet"}.
 TRADINGVIEW INDICATOR STATUS (live, from the Pine scanner running on his chart — separate from the scanner above): ${scannerStatusRef.current ? `standing bias ${scannerStatusRef.current.structureBias || "none"}, higher-timeframe bias ${scannerStatusRef.current.htfBias || "none"}, regime ${scannerStatusRef.current.regime || "unknown"} (ADX ${scannerStatusRef.current.adx ?? "n/a"}), current phase ${scannerStatusRef.current.phase || "idle"}${scannerStatusRef.current.dir ? `, watching a ${scannerStatusRef.current.dir === "bull" ? "bullish" : "bearish"} sequence` : ""} on ${scannerStatusRef.current.symbol || "the chart"}${scannerStatusRef.current.wins != null && scannerStatusRef.current.losses != null && (scannerStatusRef.current.wins + scannerStatusRef.current.losses) > 0 ? `. Its live scorecard is running ${Math.round((scannerStatusRef.current.wins / (scannerStatusRef.current.wins + scannerStatusRef.current.losses)) * 100)}% (${scannerStatusRef.current.wins}/${scannerStatusRef.current.wins + scannerStatusRef.current.losses}) since it was pasted in` : ""}.` : "no status received yet — indicator may not be running or webhook not yet fired."}
+YOUR OWN CALIBRATION (how your past alert-review verdicts actually panned out, resolved alerts only): ${calibrationSummary() || "not enough resolved alerts yet to say"}. If he asks whether you're actually any good at this, answer honestly from these numbers — small samples mean small confidence, say so.
 When he asks what the market is doing, describe it from this data plainly — direction, range, notable candles — without predicting what comes next.
 
 VOICE TRADE LOGGING:
@@ -3209,6 +3276,29 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
               </Panel>
             )}
 
+            {(verdictAccuracy.favorable.w + verdictAccuracy.favorable.l + verdictAccuracy.caution.w + verdictAccuracy.caution.l + verdictAccuracy.avoid.w + verdictAccuracy.avoid.l) > 0 && (
+              <Panel>
+                <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold, marginBottom: 8 }}>◆ POLARIS CALIBRATION</div>
+                <div style={{ fontSize: 11, color: C.faint, marginBottom: 8, lineHeight: 1.5 }}>
+                  How its own verdicts have actually panned out, resolved alerts only — small samples, weight accordingly.
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))", gap: 10, fontSize: 12 }}>
+                  {["favorable", "caution", "avoid"].map((v) => {
+                    const b = verdictAccuracy[v];
+                    const n = b.w + b.l;
+                    if (n === 0) return null;
+                    const pct = Math.round((b.w / n) * 100);
+                    return (
+                      <div key={v}>
+                        <Label>{v.charAt(0).toUpperCase() + v.slice(1)}</Label>
+                        <div style={{ color: v === "avoid" ? (pct < 50 ? C.green : C.red) : (pct >= 50 ? C.green : C.red) }}>{pct}% ({b.w}/{n})</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </Panel>
+            )}
+
             {!tvAlertsStatus && tvAlerts.length === 0 && (
               <Panel>
                 <div style={{ textAlign: "center", padding: "30px 10px", color: C.faint, fontSize: 13 }}>
@@ -3229,13 +3319,25 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                       <span style={{ fontSize: 12, color: C.muted }}>{a.symbol || "—"} · {a.timeframe || "—"}</span>
                       {ts && <span style={{ fontSize: 10, color: C.faint }}>{ts.toLocaleString()}</span>}
                     </div>
-                    <div style={{
-                      fontSize: 10, letterSpacing: "0.08em", fontWeight: 700, padding: "4px 10px", borderRadius: 4,
-                      color: a.status === "traded" ? C.green : a.status === "missed" ? C.faint : C.gold,
-                      border: `1px solid ${a.status === "traded" ? C.green : a.status === "missed" ? C.border : "rgba(245,200,107,0.5)"}`,
-                      background: a.status === "traded" ? "rgba(47,224,138,0.08)" : a.status === "missed" ? "transparent" : "rgba(245,200,107,0.08)",
-                    }}>
-                      {(a.status || "pending").toUpperCase()}
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      {a.outcome && (
+                        <div style={{
+                          fontSize: 10, letterSpacing: "0.08em", fontWeight: 700, padding: "4px 10px", borderRadius: 4,
+                          color: a.outcome === "win" ? C.green : C.red,
+                          border: `1px solid ${a.outcome === "win" ? C.green : C.red}`,
+                          background: a.outcome === "win" ? "rgba(47,224,138,0.08)" : "rgba(255,85,102,0.08)",
+                        }}>
+                          {a.outcome === "win" ? "WON" : "LOST"}
+                        </div>
+                      )}
+                      <div style={{
+                        fontSize: 10, letterSpacing: "0.08em", fontWeight: 700, padding: "4px 10px", borderRadius: 4,
+                        color: a.status === "traded" ? C.green : a.status === "missed" ? C.faint : C.gold,
+                        border: `1px solid ${a.status === "traded" ? C.green : a.status === "missed" ? C.border : "rgba(245,200,107,0.5)"}`,
+                        background: a.status === "traded" ? "rgba(47,224,138,0.08)" : a.status === "missed" ? "transparent" : "rgba(245,200,107,0.08)",
+                      }}>
+                        {(a.status || "pending").toUpperCase()}
+                      </div>
                     </div>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 10, fontSize: 12 }}>

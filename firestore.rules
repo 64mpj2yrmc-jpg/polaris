@@ -50,6 +50,18 @@ service cloud.firestore {
         && request.resource.data.aiNote is string
         && request.resource.data.aiNote.size() <= 500;
 
+      // Self-calibration: the dashboard resolves each alert's real outcome
+      // (win/loss) against its own live market feed, comparing entry/stop/
+      // target the same way the Pine indicator's own scorecard does, then
+      // writes it back here exactly once — resource.data.outcome == null
+      // makes this write-once server-side (not just client-side dedupe),
+      // same pattern as the AI-review clause above. Never touches any
+      // other field.
+      allow update: if request.auth != null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["outcome"])
+        && resource.data.get('outcome', null) == null
+        && request.resource.data.outcome in ["win", "loss"];
+
       // No client-side create/delete — the Cloud Function (Admin SDK) is
       // the only writer that creates alert documents.
       allow create, delete: if false;
