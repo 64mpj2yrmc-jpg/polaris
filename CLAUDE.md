@@ -246,19 +246,25 @@ app can't receive them — hence the exception to "no server logic" above). It d
   rule set from the moment the script is pasted in, not something that only accumulates going
   forward. Shown on the HUD as `SCORE: NN% (wins/total)`.
 
-  Four filters gate whether a sweep is even allowed to start a new sequence: a `structureBias`
+  Five filters gate whether a sweep is even allowed to start a new sequence: a `structureBias`
   state var (higher high/low → bullish, lower high/low → bearish, updated independently of the
   scanner every time a new swing forms) blocks counter-bias setups until structure actually
   breaks the other way; an HTF bias check (`request.security` pulling a higher timeframe's close
   vs. its own EMA, `lookahead_off` so it can't repaint) requires the higher timeframe to agree;
   a `ta.dmi()`-based ADX regime filter blocks new setups while the market's chopping below
-  `adxThreshold`; and an optional `useSessionFilter` toggle (off by default) blocks new setups
+  `adxThreshold`; an optional `useSessionFilter` toggle (off by default) blocks new setups
   entirely outside the four killzones (`inAnyKillzone`), independent of whether the killzones are
-  also being shaded visually. Pine's sandbox has no mechanism to call an LLM/API in real time —
-  `alert()` is a one-way webhook fire, nothing reads a response back into the script — so these
-  four (plus the liquidity-pool restriction above) are the extent of how "market-aware" the
-  indicator itself can be. Deeper judgment from Polaris's actual Claude brain happens downstream
-  instead, once an alert reaches the dashboard (see the ALERTS tab entry below).
+  also being shaded visually; and a volume-confirmation check (`useVolumeConfirm`, on by default,
+  `volOk` = bar volume ≥ its `volAvgLen`-bar average × `minVolMult`) requires both the sweep
+  candle and the CISD confirmation candle to individually clear that bar — a technical price flip
+  with light volume behind it just leaves the sequence sitting in "sweep" phase (or expiring via
+  `maxBarsValid`) rather than confirming. Pine has no access to real bid/ask or DOM data, so this
+  is bar volume vs. its own average, not true order flow — the closest proxy available in the
+  sandbox. Pine's sandbox also has no mechanism to call an LLM/API in real time — `alert()` is a
+  one-way webhook fire, nothing reads a response back into the script — so these five (plus the
+  liquidity-pool restriction above) are the extent of how "market-aware" the indicator itself can
+  be. Deeper judgment from Polaris's actual Claude brain happens downstream instead, once an
+  alert reaches the dashboard (see the ALERTS tab entry below).
 
   Separately from the session *filter*, a per-session volatility readout (`showSessionVolatility`,
   on by default) tracks a running average realized range (session high − low) for each of the
