@@ -414,6 +414,19 @@ computeTarget(string dir, float entryP, float stopP) =>
     float fallback = dir == "bull" ? entryP + math.abs(entryP - stopP) * rMultiple : entryP - math.abs(entryP - stopP) * rMultiple
     na(poolTarget) ? fallback : poolTarget
 
+// ---------- killzone sessions ----------
+// Computed here (ahead of the FVG/order-block/premium-discount markup below
+// it in the original layout) because shouldFireSetup() needs inAnyKillzone
+// and Pine doesn't hoist -- an identifier has to be declared above the code
+// that reads it, not just above it in the same logical section.
+inAsia   = not na(time(timeframe.period, asiaSession, "America/New_York"))
+inLondon = not na(time(timeframe.period, londonSession, "America/New_York"))
+inNyAm   = not na(time(timeframe.period, nyAmSession, "America/New_York"))
+inNyPm   = not na(time(timeframe.period, nyPmSession, "America/New_York"))
+bool inAnyKillzone = inAsia or inLondon or inNyAm or inNyPm
+bgcolor(showKillzones and (inAsia or inLondon) ? color.new(#00D4FF, 95) : na, title="Asia/London killzone")
+bgcolor(showKillzones and (inNyAm or inNyPm) ? color.new(#F5C86B, 95) : na, title="NY killzone")
+
 // ---------- V2 Phase 1: setup detectors + master gate ----------
 // Pine functions can only READ outer-scope state, never reassign it
 // (CE10088) -- so every detector below is a pure function: it searches and
@@ -658,15 +671,6 @@ if showPD and barstate.isconfirmed and array.size(swingHighs) > 0 and array.size
         premiumBox := box.new(leftX, top=hiS.price, right=bar_index + 10, bottom=eq, border_color=color.new(#FF5566, 75), bgcolor=color.new(#FF5566, 94), extend=extend.none, text="PREMIUM", text_size=size.tiny, text_color=color.new(#FF5566, 30))
         discountBox := box.new(leftX, top=eq, right=bar_index + 10, bottom=loS.price, border_color=color.new(#2FE08A, 75), bgcolor=color.new(#2FE08A, 94), extend=extend.none, text="DISCOUNT", text_size=size.tiny, text_color=color.new(#2FE08A, 30))
         eqLine := line.new(leftX, eq, bar_index + 10, eq, color=color.new(#F5C86B, 40), style=line.style_dotted, width=1)
-
-// ---------- killzone sessions ----------
-inAsia   = not na(time(timeframe.period, asiaSession, "America/New_York"))
-inLondon = not na(time(timeframe.period, londonSession, "America/New_York"))
-inNyAm   = not na(time(timeframe.period, nyAmSession, "America/New_York"))
-inNyPm   = not na(time(timeframe.period, nyPmSession, "America/New_York"))
-bool inAnyKillzone = inAsia or inLondon or inNyAm or inNyPm
-bgcolor(showKillzones and (inAsia or inLondon) ? color.new(#00D4FF, 95) : na, title="Asia/London killzone")
-bgcolor(showKillzones and (inNyAm or inNyPm) ? color.new(#F5C86B, 95) : na, title="NY killzone")
 
 // ---------- per-session volatility tracking ----------
 // runs every confirmed bar regardless of showKillzones/useSessionFilter --
