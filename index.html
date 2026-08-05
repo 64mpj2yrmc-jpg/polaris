@@ -74,7 +74,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.04-1";
+const BUILD = "2026.08.05-1";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -938,6 +938,7 @@ function App() {
   const [tvAlerts, setTvAlerts] = useState([]);
   const [tvAlertsStatus, setTvAlertsStatus] = useState("");
   const firestoreDbRef = useRef(null);
+  const aiReviewAttemptedRef = useRef(new Set()); // session-only dedupe so a snapshot re-fire doesn't re-trigger a review already in flight
 
   function rankVoices(vs) {
     const score = (v) =>
@@ -1075,6 +1076,57 @@ function App() {
       flash("Couldn't update alert — " + (e.message || "check your connection"));
     }
   }
+
+  // Polaris's own read on a TradingView alert, run silently once per alert
+  // (never spoken, never appended to the chat transcript) using whatever
+  // context is already on hand — journal stats, live market feed, scanner
+  // state, memory. This is the one place real LLM judgment can attach to
+  // the sweep/CISD/FVG pipeline, since the Pine indicator itself has no way
+  // to call an API in real time (see pinescript/polaris-scanner.pine).
+  function buildAlertReviewPrompt(a) {
+    const s = computeStats(tradesRef.current);
+    const lastCandle = candlesRef.current.length ? candlesRef.current[candlesRef.current.length - 1] : null;
+    const dayPct = lastCandle && dayInfoRef.current ? (((lastCandle.c - dayInfoRef.current.prevClose) / dayInfoRef.current.prevClose) * 100).toFixed(2) + "%" : "n/a";
+    return `You are POLARIS, an AI trading copilot, silently reviewing a setup a TradingView indicator just fired — before Landen sees it. You are not talking to him; you are annotating the alert with your own read. This is analysis, not a signal or advice — never phrase the note as an instruction to act.
+
+ALERT:
+${JSON.stringify({ setupType: a.setupType, symbol: a.symbol, timeframe: a.timeframe, entryPrice: a.entryPrice, stopPrice: a.stopPrice, targetPrice: a.targetPrice, riskReward: a.riskReward, confidence: a.confidence })}
+
+CONTEXT:
+Journal: ${s ? `${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, current streak ${s.streak}.` : "No trades logged yet."}
+Market: ${lastCandle ? `last ${lastCandle.c}, day ${dayPct}.` : "no live feed."}
+Scanner: ${scanningRef.current ? "active" : "off"}. Recent events: ${scanEventsRef.current.length ? scanEventsRef.current.slice(0, 4).map((e) => e.msg).join(" | ") : "none"}.
+Memory: ${memoryRef.current || "none recorded"}.
+
+Judge this ONE setup on its own merits — structure quality, risk/reward, whether it fits the current market read. Respond with ONLY a single JSON object, nothing else, no markdown fences, no prose before or after:
+{"verdict":"favorable"|"caution"|"avoid","confidence":0-100,"note":"one short sentence, under 25 words, plain text"}`;
+  }
+
+  async function reviewAlertWithPolaris(a) {
+    const key = anthropicKeyRef.current.trim();
+    if (!key || !firestoreDbRef.current) return;
+    try {
+      const raw = await callAnthropic(key, buildAlertReviewPrompt(a), [{ role: "user", content: "Review this alert now." }], 200);
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (!m) return;
+      const parsed = JSON.parse(m[0]);
+      const verdict = ["favorable", "caution", "avoid"].includes(parsed.verdict) ? parsed.verdict : null;
+      const confidence = Number(parsed.confidence);
+      const note = typeof parsed.note === "string" ? parsed.note.slice(0, 300) : "";
+      if (!verdict || !Number.isFinite(confidence) || confidence < 0 || confidence > 100 || !note) return;
+      await firestoreDbRef.current.collection("alerts").doc(a.id).update({
+        aiReviewed: true, aiVerdict: verdict, aiConfidence: Math.round(confidence), aiNote: note,
+      });
+    } catch (e) { /* silent — a failed review just leaves the alert unreviewed; the trader still sees the raw setup */ }
+  }
+
+  useEffect(() => {
+    tvAlerts.forEach((a) => {
+      if (a.status !== "pending" || a.aiReviewed || aiReviewAttemptedRef.current.has(a.id)) return;
+      aiReviewAttemptedRef.current.add(a.id);
+      reviewAlertWithPolaris(a);
+    });
+  }, [tvAlerts]);
 
   useEffect(() => {
     if (syncReadyRef.current) return;
@@ -3068,6 +3120,23 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                     <div><Label>R:R</Label><div style={{ color: C.text }}>{a.riskReward != null ? a.riskReward.toFixed(2) : "—"}</div></div>
                     <div><Label>Confidence</Label><div style={{ color: C.text }}>{a.confidence != null ? a.confidence + "%" : "—"}</div></div>
                   </div>
+                  {a.aiReviewed ? (
+                    <div style={{
+                      display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12, padding: "8px 10px", borderRadius: 4,
+                      background: "rgba(0,212,255,0.06)", border: `1px solid ${C.border}`,
+                    }}>
+                      <span style={{
+                        flexShrink: 0, fontFamily: disp, fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", padding: "3px 7px", borderRadius: 3,
+                        color: a.aiVerdict === "favorable" ? C.green : a.aiVerdict === "avoid" ? C.red : C.gold,
+                        border: `1px solid ${a.aiVerdict === "favorable" ? C.green : a.aiVerdict === "avoid" ? C.red : "rgba(245,200,107,0.5)"}`,
+                      }}>
+                        {(a.aiVerdict || "").toUpperCase()} {a.aiConfidence != null ? a.aiConfidence + "%" : ""}
+                      </span>
+                      <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5 }}>{a.aiNote}</div>
+                    </div>
+                  ) : a.status === "pending" && anthropicKey.trim() && (
+                    <div style={{ fontSize: 11, color: C.faint, marginTop: 12, fontStyle: "italic" }}>Polaris is reviewing this one…</div>
+                  )}
                   {a.status === "pending" && (
                     <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
                       <button onClick={() => setAlertStatus(a.id, "traded")}

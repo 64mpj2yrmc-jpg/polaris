@@ -34,6 +34,22 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status"])
         && request.resource.data.status in ["pending", "traded", "missed"];
 
+      // Polaris (the AI) attaches its own read on a pending alert exactly
+      // once, client-side, using the trader's own Anthropic key. It can only
+      // ever set these four fields, never touch price/entry/stop/target/
+      // confidence/status, and resource.data.aiReviewed != true makes this
+      // write-once server-side (not just client-side dedupe).
+      allow update: if request.auth != null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["aiReviewed", "aiVerdict", "aiConfidence", "aiNote"])
+        && resource.data.aiReviewed != true
+        && request.resource.data.aiReviewed == true
+        && request.resource.data.aiVerdict in ["favorable", "caution", "avoid"]
+        && request.resource.data.aiConfidence is number
+        && request.resource.data.aiConfidence >= 0
+        && request.resource.data.aiConfidence <= 100
+        && request.resource.data.aiNote is string
+        && request.resource.data.aiNote.size() <= 500;
+
       // No client-side create/delete — the Cloud Function (Admin SDK) is
       // the only writer that creates alert documents.
       allow create, delete: if false;

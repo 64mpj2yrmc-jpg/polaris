@@ -188,8 +188,15 @@ app can't receive them — hence the exception to "no server logic" above). It d
   even though that was the original ask. The Cloud Function's Admin SDK write bypasses rules
   entirely, so it's already the real security boundary; opening Firestore itself to public writes
   would let anyone with the (necessarily public) client config skip the webhook's secret check.
-  Reads require Firebase Auth; the dashboard may only ever flip `status` between
-  `pending`/`traded`/`missed`, never touch price/confidence fields, never create or delete.
+  Reads require Firebase Auth. Two separate `allow update` rules (OR'd together, standard
+  Firestore rules semantics) then narrowly scope what the signed-in dashboard client itself may
+  write: one lets it flip `status` between `pending`/`traded`/`missed` and nothing else; a second
+  lets Polaris's own AI review (see the ALERTS tab entry below) attach exactly once — it can only
+  ever set `aiReviewed`/`aiVerdict`/`aiConfidence`/`aiNote`, gated by `resource.data.aiReviewed !=
+  true` so it's write-once server-side, not just client-side dedupe. Neither rule can touch price/
+  entry/stop/target fields, and neither can create or delete documents. **This file isn't
+  auto-deployed** — same as the rest of this Firebase setup, publishing an edit here means pasting
+  the updated rules into Firebase Console → Firestore Database → Rules → Publish by hand.
 - `firebase.json`, `.firebaserc` (placeholder project ID), `firestore.indexes.json` — Firebase CLI
   scaffold, kept for reference/future use, but the actual live deployment was done by hand through
   the Cloud Run console (browser-only, no terminal), not `firebase deploy`. If a `functions/`
@@ -255,6 +262,22 @@ MARK TRADED/MARK MISSED buttons calling `setAlertStatus(id, status)`, which does
 `firebaseConfig.js` (see above) and Anonymous auth enabled in Firebase Console → Build →
 Authentication → Sign-in method — until both are done the tab shows a status message instead of
 erroring.
+
+A `useEffect([tvAlerts])` also watches the live alert list and, for every `pending` alert that
+hasn't been AI-reviewed yet (`!a.aiReviewed`, deduped per-session via `aiReviewAttemptedRef` so a
+snapshot re-fire can't double-trigger it), calls `reviewAlertWithPolaris(a)` — this is the one
+place real Claude judgment attaches to the sweep/CISD/FVG pipeline, since the Pine indicator
+itself has no way to call an LLM in real time (see `pinescript/polaris-scanner.pine`). It builds a
+purpose-built prompt (`buildAlertReviewPrompt`, distinct from the conversational
+`buildSystemPrompt`) from the alert's own fields plus whatever context is already on hand —
+journal stats, live market feed, scanner state, memory — and asks for a strict JSON reply
+(`{"verdict","confidence","note"}`, no markdown fences) via the existing non-streaming
+`callAnthropic`. Never spoken, never appended to the chat transcript. On a parseable, valid
+response it writes `aiReviewed`/`aiVerdict`/`aiConfidence`/`aiNote` back via a client-side
+`update()` (the second `firestore.rules` clause above); any failure (missing key, network,
+malformed JSON) is swallowed silently and the alert just stays unreviewed rather than blocking or
+erroring the tab. Cards show a "Polaris is reviewing…" line while pending and a
+favorable/caution/avoid badge + confidence + one-line note once reviewed.
 
 ## Git
 
