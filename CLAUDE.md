@@ -284,9 +284,13 @@ app can't receive them — hence the exception to "no server logic" above). It d
   the wick may have already run past) ± an optional buffer; target = the nearest untested
   liquidity pool in the trade's direction (`findLiquidityTarget`/`computeTarget` — a real draw of
   liquidity, not an arbitrary ratio), falling back to entry ± risk × an R-multiple only when no
-  pool exists yet; confidence = a simple FVG-size-vs-ATR(14) heuristic. A setup only actually
-  fires its webhook if that projected move is at least `minTargetAtrMult` × ATR(14) — smaller
-  draws still resolve the sequence, they just stay quiet. All adjustable via script inputs. Lives
+  pool exists yet; confidence = a simple FVG-size-vs-ATR(14) heuristic. `computeTarget()` now
+  returns a second value alongside the target price — whether it actually found a pool or fell
+  back to the R-multiple — which `buildAlertMessage()` sends on as a `targetSource` field
+  (`"pool"`/`"fallback"`) so the dashboard can explain the target, not just show it (see
+  `explainTradePlan()` in the Phase 2 section below). A setup only actually fires its webhook if
+  that projected move is at least `minTargetAtrMult` × ATR(14) — smaller draws still resolve the
+  sequence, they just stay quiet. All adjustable via script inputs. Lives
   in TradingView's Pine Editor, not deployed through this repo — pasted in by hand, no compiler
   available to verify it here (a CE10088 "cannot modify global variable in function" error came up
   once already this way — Pine functions may read outer-scope variables but never reassign them;
@@ -321,7 +325,17 @@ signs in anonymously via Firebase Auth on mount and subscribes to the Firestore 
 with `onSnapshot` (`tvAlerts`/`tvAlertsStatus` state, `firestoreDbRef`), rendering each alert as a
 card (setup type, symbol/timeframe/timestamp, entry/stop/target/R:R/confidence, status badge) with
 MARK TRADED/MARK MISSED buttons calling `setAlertStatus(id, status)`, which does a client-side
-`update()` restricted by `firestore.rules` to the `status` field only. MARK TRADED also calls
+`update()` restricted by `firestore.rules` to the `status` field only. Two pure module-scope
+helpers make each card self-explanatory instead of just a row of numbers: `setupTypeLabel(setupType)`
+translates the Pine indicator's alert codes (`CHoCH_UP`/`CHoCH_DOWN` today; `BOS_*`,
+`LIQUIDITY_SWEEP_*`, `FVG_RETEST_*` mapped in ready for when V2's other setup types ship) into a
+plain-English headline, and `explainTradePlan(a)` renders a short deterministic paragraph on why
+entry/stop/target sit where they do — entry on the FVG retrace close, stop beyond the sweep's
+actual wick, and target either "the nearest untested liquidity pool" or "a projected risk multiple"
+depending on the alert's `targetSource` field (`"pool"` vs `"fallback"`, added to the Pine webhook
+payload by `computeTarget()`/`buildAlertMessage()` — see the pinescript section below). This is
+mechanical fact from the indicator's own rule, not an LLM guess, so it's accurate and free even
+before or without an AI review. MARK TRADED also calls
 `applyAlertToJournal(a)`, which pre-fills the LOG tab's order ticket (`form`) from the alert's own
 fields — instrument (inferred from `symbol`), direction (inferred from `setupType`), entry/stop/tp,
 a `notes` line summarizing the alert (setup type, indicator confidence, Polaris's AI verdict if
@@ -340,8 +354,10 @@ snapshot re-fire can't double-trigger it), calls `reviewAlertWithPolaris(a)` —
 place real Claude judgment attaches to the sweep/CISD/FVG pipeline, since the Pine indicator
 itself has no way to call an LLM in real time (see `pinescript/polaris-scanner.pine`). It builds a
 purpose-built prompt (`buildAlertReviewPrompt`, distinct from the conversational
-`buildSystemPrompt`) from the alert's own fields plus whatever context is already on hand —
-journal stats, live market feed, scanner state, memory — and asks for a strict JSON reply
+`buildSystemPrompt`) from the alert's own fields (including `explainTradePlan(a)`'s mechanical
+entry/stop/target explanation and the indicator's live scorecard win rate, both described above)
+plus whatever context is already on hand — journal stats, live market feed, scanner state,
+memory — and asks for a strict JSON reply
 (`{"verdict","confidence","note"}`, no markdown fences) via the existing non-streaming
 `callAnthropic`. Silent and tab-only for `favorable`/`caution` verdicts — never spoken, never
 appended to the chat transcript. An `avoid` verdict is the one exception: right after the Firestore
@@ -362,17 +378,20 @@ full setup sends `"kind":"setup"`; `receiveAlert` branches on this, defaulting t
 field is absent for backward compatibility with alerts fired before this existed). The Cloud
 Function overwrites a single `scannerStatus/current` Firestore doc with it via `.set()` — no
 history, no SMS, just whatever the indicator is currently tracking (standing bias, HTF bias,
-regime/ADX, phase, direction). `firestore.rules` gates it read-only for signed-in clients, same
-shape as `/alerts`.
+regime/ADX, phase, direction, and now `wins`/`losses` — the indicator's own scorecard tally rides
+along on every ping, not just when a setup completes, so the dashboard's win-rate reading stays
+current mid-sequence). `firestore.rules` gates it read-only for signed-in clients, same shape as
+`/alerts`.
 
 `index.html` subscribes to that doc in the same Firebase `useEffect` that subscribes to `/alerts`
 (`scannerStatus` state, `scannerStatusRef`), and it feeds into three places: a compact "LIVE
-INDICATOR STATUS" strip at the top of the ALERTS tab (bias/HTF/regime/phase, mirroring the
-indicator's own on-chart HUD); `buildSystemPrompt()`, so asking Polaris in chat what it's seeing
-gets a real answer tied to the indicator's actual live state, not just the separate market-feed
-candles; and a dedicated `useEffect([scannerStatus])` that calls `speakProactive()` with a
-phase-specific line ("sweep just printed," "that sweep just confirmed," "retracing into the gap
-now") the first time each phase is seen for a given symbol/direction (deduped via
+INDICATOR STATUS" strip at the top of the ALERTS tab (bias/HTF/regime/phase, plus a `Score` cell
+once `wins + losses > 0`, mirroring the indicator's own on-chart HUD); `buildSystemPrompt()`, so
+asking Polaris in chat what it's seeing — including its actual win rate — gets a real answer tied
+to the indicator's live state, not just the separate market-feed candles; and a dedicated
+`useEffect([scannerStatus])` that calls `speakProactive()` with a phase-specific line ("sweep just
+printed," "that sweep just confirmed," "retracing into the gap now") the first time each phase is
+seen for a given symbol/direction (deduped via
 `lastAnnouncedScanPhaseRef`, one key per `symbol:phase:dir` — a snapshot re-fire of the same
 status doesn't re-announce it). This goes through the same shared 10-minute proactive cooldown as
 every other proactive event, not a bypass, since it's informational rather than a rule warning —

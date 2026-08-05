@@ -74,7 +74,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.05-4";
+const BUILD = "2026.08.05-5";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -269,6 +269,43 @@ function computeStats(trades) {
   const avgR = rValues.length ? rValues.reduce((a, b) => a + b, 0) / rValues.length : null;
   return { net, winRate, avgWin, avgLoss, pf, expectancy, streak, count: trades.length, avgR };
 }
+
+// Plain-English label for a TradingView alert's setupType. The Pine scanner
+// currently only ever fires CHoCH_UP/CHoCH_DOWN (every completed sequence is
+// a liquidity-sweep reversal, whatever future setup types V2 adds); this
+// maps forward to those too so the ALERTS tab doesn't need updating when
+// they ship.
+function setupTypeLabel(setupType) {
+  const labels = {
+    CHoCH_UP: "Bullish liquidity sweep reversal",
+    CHoCH_DOWN: "Bearish liquidity sweep reversal",
+    BOS_UP: "Bullish break of structure (continuation)",
+    BOS_DOWN: "Bearish break of structure (continuation)",
+    LIQUIDITY_SWEEP_BUY: "Bullish liquidity sweep",
+    LIQUIDITY_SWEEP_SELL: "Bearish liquidity sweep",
+    FVG_RETEST_BULL: "Bullish fair value gap retest",
+    FVG_RETEST_BEAR: "Bearish fair value gap retest",
+  };
+  return labels[setupType] || setupType || "Setup";
+}
+
+// Deterministic explanation of why an alert's entry/stop/target sit where
+// they do — this is the indicator's actual mechanical rule (see
+// pinescript/polaris-scanner.pine), not an LLM guess, so it's always
+// accurate even when Polaris's own AI review is unavailable or still
+// pending.
+function explainTradePlan(a) {
+  const dir = (a.setupType || "").includes("DOWN") || (a.setupType || "").includes("SELL") || (a.setupType || "").includes("BEAR") ? "down" : "up";
+  const entryLine = "Entry confirmed once price closed back through the fair value gap left by the reversal.";
+  const stopLine = `Stop sits just beyond the sweep's actual wick${dir === "down" ? " (above it)" : " (below it)"} — the level that has to hold for this read to stay valid, not just the older level it swept.`;
+  const targetLine = a.targetSource === "pool"
+    ? "Target is the nearest untested liquidity pool in this direction — a real draw of liquidity, not an arbitrary distance."
+    : a.targetSource === "fallback"
+    ? "Target is a projected multiple of the risk, used because no liquidity pool sat beyond entry yet at fire time."
+    : "";
+  return [entryLine, stopLine, targetLine].filter(Boolean).join(" ");
+}
+
 function computeBadges(trades, stats) {
   const weekDays = new Set(
     trades.filter((t) => Date.now() - new Date(t.date + "T00:00:00").getTime() < 7 * 86400000).map((t) => t.date)
@@ -1101,13 +1138,14 @@ function App() {
     return `You are POLARIS, an AI trading copilot, silently reviewing a setup a TradingView indicator just fired — before Landen sees it. You are not talking to him; you are annotating the alert with your own read. This is analysis, not a signal or advice — never phrase the note as an instruction to act.
 
 ALERT:
-${JSON.stringify({ setupType: a.setupType, symbol: a.symbol, timeframe: a.timeframe, entryPrice: a.entryPrice, stopPrice: a.stopPrice, targetPrice: a.targetPrice, riskReward: a.riskReward, confidence: a.confidence })}
+${JSON.stringify({ setupType: a.setupType, setupLabel: setupTypeLabel(a.setupType), symbol: a.symbol, timeframe: a.timeframe, entryPrice: a.entryPrice, stopPrice: a.stopPrice, targetPrice: a.targetPrice, targetSource: a.targetSource, riskReward: a.riskReward, confidence: a.confidence })}
+Why the levels sit where they do (mechanical, not a judgment call): ${explainTradePlan(a)}
 
 CONTEXT:
 Journal: ${s ? `${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, current streak ${s.streak}.` : "No trades logged yet."}
 Market: ${lastCandle ? `last ${lastCandle.c}, day ${dayPct}.` : "no live feed."}
 Scanner: ${scanningRef.current ? "active" : "off"}. Recent events: ${scanEventsRef.current.length ? scanEventsRef.current.slice(0, 4).map((e) => e.msg).join(" | ") : "none"}.
-Indicator status (from the TradingView Pine scanner, live): ${scannerStatusRef.current ? `standing bias ${scannerStatusRef.current.structureBias || "none"}, HTF bias ${scannerStatusRef.current.htfBias || "none"}, regime ${scannerStatusRef.current.regime || "unknown"} (ADX ${scannerStatusRef.current.adx ?? "n/a"}), phase ${scannerStatusRef.current.phase || "idle"}.` : "no status received yet."}
+Indicator status (from the TradingView Pine scanner, live): ${scannerStatusRef.current ? `standing bias ${scannerStatusRef.current.structureBias || "none"}, HTF bias ${scannerStatusRef.current.htfBias || "none"}, regime ${scannerStatusRef.current.regime || "unknown"} (ADX ${scannerStatusRef.current.adx ?? "n/a"}), phase ${scannerStatusRef.current.phase || "idle"}${scannerStatusRef.current.wins != null && scannerStatusRef.current.losses != null && (scannerStatusRef.current.wins + scannerStatusRef.current.losses) > 0 ? `, live scorecard ${Math.round((scannerStatusRef.current.wins / (scannerStatusRef.current.wins + scannerStatusRef.current.losses)) * 100)}% (${scannerStatusRef.current.wins}/${scannerStatusRef.current.wins + scannerStatusRef.current.losses})` : ""}.` : "no status received yet."}
 Memory: ${memoryRef.current || "none recorded"}.
 
 Judge this ONE setup on its own merits — structure quality, risk/reward, whether it fits the current market read. Respond with ONLY a single JSON object, nothing else, no markdown fences, no prose before or after:
@@ -1458,7 +1496,7 @@ Judge this ONE setup on its own merits — structure quality, risk/reward, wheth
   function applyAlertToJournal(a) {
     const isUp = (a.setupType || "").includes("UP") || (a.setupType || "").includes("BUY") || (a.setupType || "").includes("BULL");
     const instrument = (a.symbol || "").toUpperCase().includes("MNQ") ? "MNQ" : "NQ";
-    const noteParts = [`Live alert: ${a.setupType || "setup"} · ${a.symbol || "—"} ${a.timeframe || ""}`.trim()];
+    const noteParts = [`Live alert: ${setupTypeLabel(a.setupType)} · ${a.symbol || "—"} ${a.timeframe || ""}`.trim()];
     if (a.confidence != null) noteParts.push(`indicator ${a.confidence}%`);
     if (a.aiReviewed) noteParts.push(`Polaris ${a.aiVerdict || ""}${a.aiConfidence != null ? " " + a.aiConfidence + "%" : ""}${a.aiNote ? " — " + a.aiNote : ""}`);
     setForm({
@@ -2391,7 +2429,7 @@ Contract reference: NQ = $20/point, MNQ = $2/point, tick 0.25.
 MARKET FEED (${marketFeedLabel()}):
 ${candlesRef.current.length ? `Last ${candlesRef.current[candlesRef.current.length - 1].c}${dayInfoRef.current ? `, day ${(((candlesRef.current[candlesRef.current.length - 1].c - dayInfoRef.current.prevClose) / dayInfoRef.current.prevClose) * 100).toFixed(2)}%, week ${(((candlesRef.current[candlesRef.current.length - 1].c - dayInfoRef.current.weekAgo) / dayInfoRef.current.weekAgo) * 100).toFixed(2)}%` : ""}. Recent candles (${tfRef.current}, oldest→newest): ${JSON.stringify(candlesRef.current.slice(-20).map((c) => ({ t: c.t.slice(11, 16) || c.t, o: c.o, h: c.h, l: c.l, c: c.c })))}` : "Not connected — the feed starts when the scanner runs on the MARKET tab."}
 Scanner (his model: liquidity sweep → change in state of delivery → retrace into imbalance → rejection): ${scanningRef.current ? "ACTIVE" : "off"}. Recent events: ${scanEventsRef.current.length ? scanEventsRef.current.slice(0, 6).map((e) => `[${e.time}] ${e.msg}`).join(" | ") : "none yet"}.
-TRADINGVIEW INDICATOR STATUS (live, from the Pine scanner running on his chart — separate from the scanner above): ${scannerStatusRef.current ? `standing bias ${scannerStatusRef.current.structureBias || "none"}, higher-timeframe bias ${scannerStatusRef.current.htfBias || "none"}, regime ${scannerStatusRef.current.regime || "unknown"} (ADX ${scannerStatusRef.current.adx ?? "n/a"}), current phase ${scannerStatusRef.current.phase || "idle"}${scannerStatusRef.current.dir ? `, watching a ${scannerStatusRef.current.dir === "bull" ? "bullish" : "bearish"} sequence` : ""} on ${scannerStatusRef.current.symbol || "the chart"}.` : "no status received yet — indicator may not be running or webhook not yet fired."}
+TRADINGVIEW INDICATOR STATUS (live, from the Pine scanner running on his chart — separate from the scanner above): ${scannerStatusRef.current ? `standing bias ${scannerStatusRef.current.structureBias || "none"}, higher-timeframe bias ${scannerStatusRef.current.htfBias || "none"}, regime ${scannerStatusRef.current.regime || "unknown"} (ADX ${scannerStatusRef.current.adx ?? "n/a"}), current phase ${scannerStatusRef.current.phase || "idle"}${scannerStatusRef.current.dir ? `, watching a ${scannerStatusRef.current.dir === "bull" ? "bullish" : "bearish"} sequence` : ""} on ${scannerStatusRef.current.symbol || "the chart"}${scannerStatusRef.current.wins != null && scannerStatusRef.current.losses != null && (scannerStatusRef.current.wins + scannerStatusRef.current.losses) > 0 ? `. Its live scorecard is running ${Math.round((scannerStatusRef.current.wins / (scannerStatusRef.current.wins + scannerStatusRef.current.losses)) * 100)}% (${scannerStatusRef.current.wins}/${scannerStatusRef.current.wins + scannerStatusRef.current.losses}) since it was pasted in` : ""}.` : "no status received yet — indicator may not be running or webhook not yet fired."}
 When he asks what the market is doing, describe it from this data plainly — direction, range, notable candles — without predicting what comes next.
 
 VOICE TRADE LOGGING:
@@ -3164,6 +3202,9 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                   <div><Label>HTF</Label><div style={{ color: scannerStatus.htfBias === "bull" ? C.green : scannerStatus.htfBias === "bear" ? C.red : C.faint }}>{scannerStatus.htfBias ? scannerStatus.htfBias.toUpperCase() : "—"}</div></div>
                   <div><Label>Regime</Label><div style={{ color: scannerStatus.regime === "trend" ? C.text : C.faint }}>{scannerStatus.regime ? scannerStatus.regime.toUpperCase() : "—"}{scannerStatus.adx != null ? ` (${scannerStatus.adx.toFixed(1)})` : ""}</div></div>
                   <div><Label>Phase</Label><div style={{ color: scannerStatus.phase && scannerStatus.phase !== "idle" ? C.gold : C.faint }}>{scannerStatus.phase ? scannerStatus.phase.toUpperCase() : "IDLE"}</div></div>
+                  {scannerStatus.wins != null && scannerStatus.losses != null && (scannerStatus.wins + scannerStatus.losses) > 0 && (
+                    <div><Label>Score</Label><div style={{ color: (scannerStatus.wins / (scannerStatus.wins + scannerStatus.losses)) >= 0.5 ? C.green : C.text }}>{Math.round((scannerStatus.wins / (scannerStatus.wins + scannerStatus.losses)) * 100)}% ({scannerStatus.wins}/{scannerStatus.wins + scannerStatus.losses})</div></div>
+                  )}
                 </div>
               </Panel>
             )}
@@ -3184,7 +3225,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                 <Panel key={a.id} style={{ padding: "14px 16px" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                      <span style={{ fontFamily: disp, fontSize: 14, fontWeight: 700, letterSpacing: "0.06em", color: dirColor }}>{a.setupType || "UNKNOWN"}</span>
+                      <span style={{ fontFamily: disp, fontSize: 14, fontWeight: 700, letterSpacing: "0.06em", color: dirColor }}>{setupTypeLabel(a.setupType)}</span>
                       <span style={{ fontSize: 12, color: C.muted }}>{a.symbol || "—"} · {a.timeframe || "—"}</span>
                       {ts && <span style={{ fontSize: 10, color: C.faint }}>{ts.toLocaleString()}</span>}
                     </div>
@@ -3204,6 +3245,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                     <div><Label>R:R</Label><div style={{ color: C.text }}>{a.riskReward != null ? a.riskReward.toFixed(2) : "—"}</div></div>
                     <div><Label>Confidence</Label><div style={{ color: C.text }}>{a.confidence != null ? a.confidence + "%" : "—"}</div></div>
                   </div>
+                  <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.6, marginTop: 10 }}>{explainTradePlan(a)}</div>
                   {a.aiReviewed ? (
                     <div style={{
                       display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12, padding: "8px 10px", borderRadius: 4,

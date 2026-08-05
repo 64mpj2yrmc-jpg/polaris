@@ -12,14 +12,17 @@
 // existed):
 //   kind:"setup"  (default) -- a fully completed setup. Expected body:
 //     secret, setupType, entryPrice, stopPrice, targetPrice, confidence
-//     required; riskReward, symbol, timeframe, sourceTimestamp optional.
-//     Appended to the "alerts" collection, one doc per setup, AI-reviewed
-//     on the dashboard, triggers sendSmsAlert.
+//     required; riskReward, targetSource ("pool"|"fallback" -- lets the
+//     dashboard explain, not just display, why the target sits where it
+//     does), symbol, timeframe, sourceTimestamp optional. Appended to the
+//     "alerts" collection, one doc per setup, AI-reviewed on the dashboard,
+//     triggers sendSmsAlert.
 //   kind:"status" -- a lightweight phase-transition ping. Expected body:
-//     secret, structureBias, htfBias, regime, adx, phase, dir, symbol,
-//     timeframe. Overwrites the single "scannerStatus/current" doc -- no
-//     history kept, no SMS -- so the dashboard/Polaris always knows what
-//     the indicator is currently tracking between full setups.
+//     secret, structureBias, htfBias, regime, adx, phase, dir, wins,
+//     losses, symbol, timeframe. Overwrites the single "scannerStatus/
+//     current" doc -- no history kept, no SMS -- so the dashboard/Polaris
+//     always knows what the indicator is currently tracking (including its
+//     live scorecard) between full setups.
 //
 // Also fires a best-effort SMS via Twilio's REST API once a "setup" alert
 // is stored (see sendSmsAlert below) -- no Twilio SDK dependency, just
@@ -104,6 +107,11 @@ function validateAlertPayload(body) {
     riskReward = risk > 0 ? Number((reward / risk).toFixed(2)) : null;
   }
 
+  // targetSource: "pool" (a real untested liquidity pool) or "fallback" (the
+  // R-multiple projection, used only when no pool exists yet) -- optional so
+  // older alerts fired before this field existed still validate fine.
+  const targetSource = body.targetSource === "pool" || body.targetSource === "fallback" ? body.targetSource : null;
+
   return {
     ok: true,
     data: {
@@ -113,6 +121,7 @@ function validateAlertPayload(body) {
       targetPrice: nums.targetPrice,
       confidence,
       riskReward,
+      targetSource,
       symbol: typeof body.symbol === "string" ? body.symbol.slice(0, 32) : null,
       timeframe: typeof body.timeframe === "string" ? body.timeframe.slice(0, 16) : null,
       sourceTimestamp: typeof body.sourceTimestamp === "string" ? body.sourceTimestamp.slice(0, 64) : null,
@@ -130,6 +139,8 @@ function validateStatusPayload(body) {
   }
   const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : null);
   const adx = Number(body.adx);
+  const wins = Number(body.wins);
+  const losses = Number(body.losses);
   return {
     ok: true,
     data: {
@@ -139,6 +150,8 @@ function validateStatusPayload(body) {
       adx: Number.isFinite(adx) ? adx : null,
       phase: str(body.phase, 16),
       dir: str(body.dir, 16),
+      wins: Number.isFinite(wins) ? wins : null,
+      losses: Number.isFinite(losses) ? losses : null,
       symbol: str(body.symbol, 32),
       timeframe: str(body.timeframe, 16),
     },
