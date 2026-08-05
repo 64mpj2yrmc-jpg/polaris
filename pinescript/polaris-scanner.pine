@@ -86,6 +86,14 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // checked by shouldFireSetup(). grpVisualsV2 adds a line-length input and a
 // confidence-label toggle to the existing trade-plan markup now; a real
 // TP-ladder (showTpLadder) and wick-tolerant stops are later-phase work.
+//
+// Dashboard integration additions: buildAlertMessage() now also reports
+// "targetSource" ("pool" if computeTarget() found a real untested liquidity
+// pool, "fallback" if it fell back to the R-multiple projection instead) --
+// this is what lets Polaris explain, not just display, why a given target
+// sits where it does. buildStatusMessage() now also carries the live
+// scoreWins/scoreLosses tally on every ping, so the dashboard's win-rate
+// reading stays current without waiting for the next full setup to fire.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -408,11 +416,14 @@ findLiquidityTarget(string dir, float entryP) =>
 
 // the actual target used for the webhook payload: nearest liquidity pool
 // in the trade's direction, or the R-multiple projection if no pool exists
-// yet (early session, thin swing history).
+// yet (early session, thin swing history). Also returns which one it used
+// so the payload can say so -- Polaris explains this back to Landen on the
+// dashboard instead of just showing a bare number.
 computeTarget(string dir, float entryP, float stopP) =>
     float poolTarget = findLiquidityTarget(dir, entryP)
     float fallback = dir == "bull" ? entryP + math.abs(entryP - stopP) * rMultiple : entryP - math.abs(entryP - stopP) * rMultiple
-    na(poolTarget) ? fallback : poolTarget
+    bool usedPool = not na(poolTarget)
+    [usedPool ? poolTarget : fallback, usedPool]
 
 // ---------- killzone sessions ----------
 // Computed here (ahead of the FVG/order-block/premium-discount markup below
@@ -503,15 +514,19 @@ shouldFireSetup(string setupType, string dir) =>
 // a lightweight phase-transition ping (-> a single overwritten Firestore
 // doc, no history, purely so the dashboard/Polaris knows what the indicator
 // is currently tracking between full setups).
-buildAlertMessage(string setupType, float entryPrice, float stopPrice, float targetPrice, int confidence) =>
+buildAlertMessage(string setupType, float entryPrice, float stopPrice, float targetPrice, int confidence, bool targetIsPool) =>
     float risk = math.abs(entryPrice - stopPrice)
     float reward = math.abs(targetPrice - entryPrice)
     float rr = risk > 0 ? math.round((reward / risk) * 100) / 100 : na
     '{"secret":"' + webhookSecret + '","kind":"setup","setupType":"' + setupType + '","entryPrice":' + str.tostring(entryPrice) +
      ',"stopPrice":' + str.tostring(stopPrice) + ',"targetPrice":' + str.tostring(targetPrice) +
      ',"confidence":' + str.tostring(confidence) + ',"riskReward":' + str.tostring(rr) +
+     ',"targetSource":"' + (targetIsPool ? "pool" : "fallback") + '"' +
      ',"symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
 
+// wins/losses ride along on every status ping (not just alert completion) so
+// the dashboard's win-rate readout stays current even mid-sequence, not just
+// the instant a setup fires -- cheap to include, they're already tracked.
 buildStatusMessage() =>
     string regimeTxt = regimeOk ? "trend" : "chop"
     string biasTxt = na(structureBias) ? "none" : structureBias
@@ -520,7 +535,8 @@ buildStatusMessage() =>
     string dirTxt = na(seqDir) ? "none" : seqDir
     '{"secret":"' + webhookSecret + '","kind":"status","structureBias":"' + biasTxt + '","htfBias":"' + htfTxt +
      '","regime":"' + regimeTxt + '","adx":' + str.tostring(adxVal, "#.##") + ',"phase":"' + phaseTxt +
-     '","dir":"' + dirTxt + '","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
+     '","dir":"' + dirTxt + '","wins":' + str.tostring(scoreWins) + ',"losses":' + str.tostring(scoreLosses) +
+     ',"symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
 
 // Pine functions cannot reassign a global-scope variable (CE10088) -- only
 // top-level script code can. So these two helpers only ever READ the tp*
@@ -816,9 +832,9 @@ if barstate.isconfirmed
                             int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
                             float entryP = close
                             float stopP = seqSweepExtreme + stopBufferPts
-                            float targetP = computeTarget("bear", entryP, stopP)
+                            [targetP, targetIsPool] = computeTarget("bear", entryP, stopP)
                             if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
-                                alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
+                                alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
                                 if showScorecard
                                     array.unshift(pendingDir, "bear")
                                     array.unshift(pendingEntry, entryP)
@@ -855,9 +871,9 @@ if barstate.isconfirmed
                     int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
                     float entryP = close
                     float stopP = seqSweepExtreme + stopBufferPts
-                    float targetP = computeTarget("bear", entryP, stopP)
+                    [targetP, targetIsPool] = computeTarget("bear", entryP, stopP)
                     if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
-                        alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
+                        alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
                         if showScorecard
                             array.unshift(pendingDir, "bear")
                             array.unshift(pendingEntry, entryP)
@@ -924,9 +940,9 @@ if barstate.isconfirmed
                             int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
                             float entryP = close
                             float stopP = seqSweepExtreme - stopBufferPts
-                            float targetP = computeTarget("bull", entryP, stopP)
+                            [targetP, targetIsPool] = computeTarget("bull", entryP, stopP)
                             if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
-                                alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
+                                alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
                                 if showScorecard
                                     array.unshift(pendingDir, "bull")
                                     array.unshift(pendingEntry, entryP)
@@ -963,9 +979,9 @@ if barstate.isconfirmed
                     int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
                     float entryP = close
                     float stopP = seqSweepExtreme - stopBufferPts
-                    float targetP = computeTarget("bull", entryP, stopP)
+                    [targetP, targetIsPool] = computeTarget("bull", entryP, stopP)
                     if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
-                        alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
+                        alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
                         if showScorecard
                             array.unshift(pendingDir, "bull")
                             array.unshift(pendingEntry, entryP)
