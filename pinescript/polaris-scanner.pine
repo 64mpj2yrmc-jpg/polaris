@@ -73,6 +73,19 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // every load, this isn't just forward-tracking -- it's a real backtest of
 // the current rule set the moment you paste this in, not something you
 // have to wait days to accumulate.
+//
+// V2 Phase 1 (groundwork, in progress): the sweep-only entry trigger is now
+// behind detectSweep()/shouldFireSetup() instead of inline bearAllowed/
+// bullAllowed booleans -- same alerts, cleaner seams for what's next.
+// detectReversal()/detectContinuation()/detectBreakout() are stubs (always
+// report nothing found) waiting on Phase 2 to give the indicator entry
+// triggers beyond a liquidity sweep. grpGates/grpMemory hold Phase 2's
+// contradiction filter (blocking an opposite-direction setup within N bars
+// of the last one -- the "buy signal, then sell signal 5 minutes later"
+// problem) and a few extra signal-quality floors, all declared but not yet
+// checked by shouldFireSetup(). grpVisualsV2 adds a line-length input and a
+// confidence-label toggle to the existing trade-plan markup now; a real
+// TP-ladder (showTpLadder) and wick-tolerant stops are later-phase work.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -137,6 +150,39 @@ maxPending    = input.int(50, "Max pending signals tracked at once", minval=5, m
 grpVolume = "Volume"
 useVolumeConfirm = input.bool(true, "Factor volume strength into confidence score (never blocks a signal)", group=grpVolume)
 volAvgLen = input.int(20, "Volume average length", minval=5, group=grpVolume)
+
+// ---------- V2 Phase 1: modularization groundwork ----------
+// These groups exist so Phase 2+ has somewhere to land without another
+// round of input-panel surgery. Sweep is the only setup type actually
+// implemented right now -- reversal/continuation/breakout are stubbed (see
+// the detect*() functions below) and default OFF since firing on them
+// would do nothing anyway. Everything under grpGates/grpMemory is
+// deliberately UNWIRED this phase -- declared and visible in the inputs
+// panel, but not yet checked by shouldFireSetup() -- so this refactor
+// changes zero alert behavior at default settings. Search "Phase 2" in this
+// file for every place a later phase will wire one of these in.
+grpSetups = "Setup Types"
+allowSweep        = input.bool(true, "Allow sweep-based setups (implemented)", group=grpSetups)
+allowReversal     = input.bool(false, "Allow reversal-based setups (not yet implemented)", group=grpSetups)
+allowContinuation = input.bool(false, "Allow continuation-based setups (not yet implemented)", group=grpSetups)
+allowBreakout     = input.bool(false, "Allow breakout-based setups (not yet implemented)", group=grpSetups)
+
+grpGates = "Signal Quality Gates (Phase 2+ -- not yet enforced)"
+useVolFloor       = input.bool(false, "Require a minimum volume ratio to fire", group=grpGates)
+volFloorMult      = input.float(0.8, "Min volume ratio if the floor above is enabled", minval=0, step=0.1, group=grpGates)
+raiseAdxThreshold = input.bool(false, "Require a stricter ADX minimum than the Market Regime setting", group=grpGates)
+minBarRangeAtr    = input.float(0.15, "Min bar range to trust as signal context, x ATR", minval=0, step=0.05, group=grpGates)
+minSeqFvgSizeAtr  = input.float(0.0, "Min size of a sequence's own confirming FVG, x ATR", minval=0, step=0.05, group=grpGates)
+
+grpMemory = "Contradiction Memory (Phase 2+ -- not yet enforced)"
+useContradictionFilter = input.bool(true, "Block a new setup that directly contradicts one just fired", group=grpMemory)
+minBarsAfterSetup      = input.int(10, "Min bars after a completed setup before the opposite direction can fire", minval=0, group=grpMemory)
+
+grpVisualsV2 = "Trade Plan Visuals (Phase 2+ additions)"
+showTradePlan  = input.bool(true, "Show entry/stop/target trade-plan markup (currently mirrors 'Show sweep/CISD/trade-plan markup' above; will become independent once TP-ladder support lands)", group=grpVisualsV2)
+lineExtension  = input.int(15, "Trade-plan line length (bars)", minval=1, maxval=60, group=grpVisualsV2)
+showTpLadder   = input.bool(false, "Show a multi-target TP ladder instead of a single target (not yet implemented)", group=grpVisualsV2)
+showConfidence = input.bool(true, "Show the confidence % on the setup label", group=grpVisualsV2)
 
 // ---------- types ----------
 type Swing
@@ -368,6 +414,75 @@ computeTarget(string dir, float entryP, float stopP) =>
     float fallback = dir == "bull" ? entryP + math.abs(entryP - stopP) * rMultiple : entryP - math.abs(entryP - stopP) * rMultiple
     na(poolTarget) ? fallback : poolTarget
 
+// ---------- V2 Phase 1: setup detectors + master gate ----------
+// Pine functions can only READ outer-scope state, never reassign it
+// (CE10088) -- so every detector below is a pure function: it searches and
+// returns what it found, but never touches seq*. The call site (top-level
+// code in the main scan block) is what actually assigns seq* on a hit --
+// same split already used for buildTradePlanDrawings above. Each returns
+// [found, level, extreme, cisdTarget] so the scan loop can treat every
+// setup type the same way once more than one is real.
+
+// detectSweep(dir) -- the existing (and currently only) entry trigger: best
+// pool-eligible swing that got wicked through and closed back on the other
+// side. Identical search to what used to be inline in the main scan block.
+detectSweep(string dir) =>
+    bool found = false
+    float level = na
+    float extreme = na
+    float cisdTarget = na
+    if dir == "bear" and array.size(swingHighs) > 0
+        float bestHigh = na
+        for i = 0 to array.size(swingHighs) - 1
+            Swing s = array.get(swingHighs, i)
+            if s.isPool and high > s.price and close < s.price
+                if na(bestHigh) or s.price > bestHigh
+                    bestHigh := s.price
+        if not na(bestHigh)
+            found := true
+            level := bestHigh
+            extreme := high
+            cisdTarget := cisdTargetBear()
+    else if dir == "bull" and array.size(swingLows) > 0
+        float bestLow = na
+        for i = 0 to array.size(swingLows) - 1
+            Swing s = array.get(swingLows, i)
+            if s.isPool and low < s.price and close > s.price
+                if na(bestLow) or s.price < bestLow
+                    bestLow := s.price
+        if not na(bestLow)
+            found := true
+            level := bestLow
+            extreme := low
+            cisdTarget := cisdTargetBull()
+    [found, level, extreme, cisdTarget]
+
+// Stubs for Phase 2+ -- always report "nothing found" so wiring a real one
+// in later is a one-function swap, not a scan-loop rewrite. Same return
+// shape as detectSweep() on purpose.
+detectReversal(string dir) =>
+    [false, float(na), float(na), float(na)]
+
+detectContinuation(string dir) =>
+    [false, float(na), float(na), float(na)]
+
+detectBreakout(string dir) =>
+    [false, float(na), float(na), float(na)]
+
+// shouldFireSetup(setupType, dir) -- the master gate every candidate signal
+// passes through before a detector even runs. Phase 1: per-type on/off
+// toggle + the bias/HTF/regime/session checks that already existed inline
+// as bearAllowed/bullAllowed (moved here verbatim, not changed). Phase 2
+// adds: useContradictionFilter/minBarsAfterSetup, useVolFloor/volFloorMult,
+// minSeqFvgSizeAtr, minBarRangeAtr, raiseAdxThreshold -- all declared above
+// already, just not checked yet.
+shouldFireSetup(string setupType, string dir) =>
+    bool typeAllowed = setupType == "sweep" ? allowSweep : setupType == "reversal" ? allowReversal : setupType == "continuation" ? allowContinuation : setupType == "breakout" ? allowBreakout : false
+    bool biasOk = dir == "bear" ? structureBias != "bull" : structureBias != "bear"
+    bool htfOk = not useHtfBias or (dir == "bear" ? htfBias != "bull" : htfBias != "bear")
+    bool sessionOk = not useSessionFilter or inAnyKillzone
+    typeAllowed and biasOk and htfOk and regimeOk and sessionOk
+
 // ---------- webhook payload builders ----------
 // "kind" discriminates the two payload shapes this script ever sends -- the
 // Cloud Function branches on it (see functions/index.js): "setup" is a full
@@ -424,15 +539,17 @@ clearTradePlanDrawings() =>
 // clearing the previously-tracked plan first and assigning these into the
 // tp* globals (a plain function can't do either of those itself).
 buildTradePlanDrawings(string dir, float entryP, float stopP, float targetP, int conf) =>
-    string setupText = dir == "bull" ? "▲ LONG SETUP\n" + str.tostring(conf) + "%" : "▼ SHORT SETUP\n" + str.tostring(conf) + "%"
+    string confText = showConfidence ? "\n" + str.tostring(conf) + "%" : ""
+    string setupText = dir == "bull" ? "▲ LONG SETUP" + confText : "▼ SHORT SETUP" + confText
     color setupColor = dir == "bull" ? #2FE08A : #FF5566
+    int lineEnd = bar_index + lineExtension
     label setupLbl = label.new(bar_index, dir == "bull" ? high : low, setupText, style=dir == "bull" ? label.style_label_down : label.style_label_up, color=setupColor, textcolor=#030710, size=size.normal)
-    line entryLine = line.new(bar_index, entryP, bar_index + 15, entryP, color=#00D4FF, style=line.style_solid, width=2)
-    line stopLine = line.new(bar_index, stopP, bar_index + 15, stopP, color=#FF5566, style=line.style_dashed, width=1)
-    line targetLine = line.new(bar_index, targetP, bar_index + 15, targetP, color=#2FE08A, style=line.style_dashed, width=1)
-    label entryLbl = label.new(bar_index + 15, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
-    label stopLbl = label.new(bar_index + 15, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
-    label targetLbl = label.new(bar_index + 15, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
+    line entryLine = line.new(bar_index, entryP, lineEnd, entryP, color=#00D4FF, style=line.style_solid, width=2)
+    line stopLine = line.new(bar_index, stopP, lineEnd, stopP, color=#FF5566, style=line.style_dashed, width=1)
+    line targetLine = line.new(bar_index, targetP, lineEnd, targetP, color=#2FE08A, style=line.style_dashed, width=1)
+    label entryLbl = label.new(lineEnd, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
+    label stopLbl = label.new(lineEnd, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
+    label targetLbl = label.new(lineEnd, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
     [setupLbl, entryLine, stopLine, targetLine, entryLbl, stopLbl, targetLbl]
 
 // ---------- order blocks (last opposing candle before a displacement move) ----------
@@ -619,47 +736,33 @@ if showScorecard and barstate.isconfirmed and array.size(pendingDir) > 0
 if barstate.isconfirmed
     string prevPhase = seqPhase  // snapshot before this bar's transitions, for the status ping below
     if na(seqDir)
-        // look for a swept high (bearish setup) -- best (highest) prior swing that got wicked through and closed back under.
-        // Skipped while structureBias or HTF bias is bullish, the market isn't trending, or
-        // (if useSessionFilter) price is outside every killzone -- no short setups until
-        // structure actually breaks bearish. Volume is never a gate here, only a confidence input.
-        bool bearAllowed = structureBias != "bull" and (not useHtfBias or htfBias != "bull") and regimeOk and (not useSessionFilter or inAnyKillzone)
-        float bestHigh = na
-        if bearAllowed and array.size(swingHighs) > 0
-            for i = 0 to array.size(swingHighs) - 1
-                Swing s = array.get(swingHighs, i)
-                if s.isPool and high > s.price and close < s.price
-                    if na(bestHigh) or s.price > bestHigh
-                        bestHigh := s.price
+        // Entry triggers, checked in order -- first one to actually find
+        // something starts the sequence. Phase 1: sweep is the only real
+        // detector, so this reduces to the exact same search as before,
+        // just behind shouldFireSetup() instead of an inline bearAllowed
+        // check. Phase 2+ adds reversal/continuation/breakout to this same
+        // list once their detect*() functions are real.
+        if shouldFireSetup("sweep", "bear")
+            [found, level, extreme, cisdTarget] = detectSweep("bear")
+            if found
+                seqDir := "bear"
+                seqPhase := "sweep"
+                seqLevel := level
+                seqSweepExtreme := extreme
+                seqCisdTarget := cisdTarget
+                seqSweepBar := bar_index
+                seqHasFvg := false
+                if showVisuals
+                    label.new(bar_index, high, "⚡ SWEEP", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
 
-        if not na(bestHigh)
-            seqDir := "bear"
-            seqPhase := "sweep"
-            seqLevel := bestHigh
-            seqSweepExtreme := high
-            seqCisdTarget := cisdTargetBear()
-            seqSweepBar := bar_index
-            seqHasFvg := false
-            if showVisuals
-                label.new(bar_index, high, "⚡ SWEEP", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
-
-        // Skipped while structureBias or HTF bias is bearish, the market isn't trending, or
-        // (if useSessionFilter) price is outside every killzone -- no long setups until
-        // structure actually breaks bullish. Volume is never a gate here, only a confidence input.
-        bool bullAllowed = structureBias != "bear" and (not useHtfBias or htfBias != "bear") and regimeOk and (not useSessionFilter or inAnyKillzone)
-        if na(seqDir) and bullAllowed and array.size(swingLows) > 0
-            float bestLow = na
-            for i = 0 to array.size(swingLows) - 1
-                Swing s = array.get(swingLows, i)
-                if s.isPool and low < s.price and close > s.price
-                    if na(bestLow) or s.price < bestLow
-                        bestLow := s.price
-            if not na(bestLow)
+        if na(seqDir) and shouldFireSetup("sweep", "bull")
+            [found, level, extreme, cisdTarget] = detectSweep("bull")
+            if found
                 seqDir := "bull"
                 seqPhase := "sweep"
-                seqLevel := bestLow
-                seqSweepExtreme := low
-                seqCisdTarget := cisdTargetBull()
+                seqLevel := level
+                seqSweepExtreme := extreme
+                seqCisdTarget := cisdTarget
                 seqSweepBar := bar_index
                 seqHasFvg := false
                 if showVisuals

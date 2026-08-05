@@ -292,6 +292,30 @@ app can't receive them — hence the exception to "no server logic" above). It d
   once already this way — Pine functions may read outer-scope variables but never reassign them;
   every `:=` to a `tp*`/`seq*` global has to live in top-level script code, not inside a `=>` def).
 
+  **V2 groundwork (Phase 1 of a planned multi-phase rework, in progress).** The user is chasing
+  five known problems with the indicator: signal contradiction (opposite-direction alerts minutes
+  apart), coverage gaps (sweep is the only entry trigger), a stop that a single wick can take out
+  with no recovery buffer, a generic R-multiple target as the fallback, and (already partly
+  addressed — see above) a lack of on-chart trade-plan markup. Phase 1 is pure refactor, not new
+  behavior: the inline `bearAllowed`/`bullAllowed` sweep search became `detectSweep(dir)`, a pure
+  function returning `[found, level, extreme, cisdTarget]` (same read-only-function-plus-
+  top-level-assignment split as `buildTradePlanDrawings`), gated by a new `shouldFireSetup(setupType,
+  dir)` master function that currently reproduces the old bias/HTF/regime/session checks verbatim
+  plus a per-type `allowSweep`/`allowReversal`/`allowContinuation`/`allowBreakout` toggle.
+  `detectReversal`/`detectContinuation`/`detectBreakout` are stubs (`[false, float(na), float(na),
+  float(na)]`) waiting on later phases to give the indicator entry triggers beyond a liquidity
+  sweep. Two new input groups, `grpGates` (`useVolFloor`/`volFloorMult`, `raiseAdxThreshold`,
+  `minBarRangeAtr`, `minSeqFvgSizeAtr`) and `grpMemory` (`useContradictionFilter`,
+  `minBarsAfterSetup` — the eventual fix for the contradiction problem), are declared and visible
+  in the settings panel but deliberately **not yet checked** by `shouldFireSetup()` — Phase 1's
+  deliverable is identical alert behavior at default settings, just with seams ready for Phase 2 to
+  wire into. `grpVisualsV2` did wire two things live already since they're pure, safe
+  generalizations of existing hardcoded values: `lineExtension` (replaces the trade-plan lines'
+  hardcoded 15-bar length) and `showConfidence` (toggles the `%` in the setup label's text) —
+  both default to the prior hardcoded behavior. `showTradePlan` and `showTpLadder` are declared for
+  a later phase that splits trade-plan visibility from `showVisuals` and adds multiple TP levels;
+  neither does anything yet. Wick-tolerant stops (the fragile-SL problem) are not yet started.
+
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
 with `onSnapshot` (`tvAlerts`/`tvAlertsStatus` state, `firestoreDbRef`), rendering each alert as a
