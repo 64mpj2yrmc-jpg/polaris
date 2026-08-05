@@ -296,29 +296,41 @@ app can't receive them — hence the exception to "no server logic" above). It d
   once already this way — Pine functions may read outer-scope variables but never reassign them;
   every `:=` to a `tp*`/`seq*` global has to live in top-level script code, not inside a `=>` def).
 
-  **V2 groundwork (Phase 1 of a planned multi-phase rework, in progress).** The user is chasing
-  five known problems with the indicator: signal contradiction (opposite-direction alerts minutes
-  apart), coverage gaps (sweep is the only entry trigger), a stop that a single wick can take out
-  with no recovery buffer, a generic R-multiple target as the fallback, and (already partly
-  addressed — see above) a lack of on-chart trade-plan markup. Phase 1 is pure refactor, not new
-  behavior: the inline `bearAllowed`/`bullAllowed` sweep search became `detectSweep(dir)`, a pure
-  function returning `[found, level, extreme, cisdTarget]` (same read-only-function-plus-
-  top-level-assignment split as `buildTradePlanDrawings`), gated by a new `shouldFireSetup(setupType,
-  dir)` master function that currently reproduces the old bias/HTF/regime/session checks verbatim
-  plus a per-type `allowSweep`/`allowReversal`/`allowContinuation`/`allowBreakout` toggle.
-  `detectReversal`/`detectContinuation`/`detectBreakout` are stubs (`[false, float(na), float(na),
-  float(na)]`) waiting on later phases to give the indicator entry triggers beyond a liquidity
-  sweep. Two new input groups, `grpGates` (`useVolFloor`/`volFloorMult`, `raiseAdxThreshold`,
-  `minBarRangeAtr`, `minSeqFvgSizeAtr`) and `grpMemory` (`useContradictionFilter`,
-  `minBarsAfterSetup` — the eventual fix for the contradiction problem), are declared and visible
-  in the settings panel but deliberately **not yet checked** by `shouldFireSetup()` — Phase 1's
-  deliverable is identical alert behavior at default settings, just with seams ready for Phase 2 to
-  wire into. `grpVisualsV2` did wire two things live already since they're pure, safe
-  generalizations of existing hardcoded values: `lineExtension` (replaces the trade-plan lines'
-  hardcoded 15-bar length) and `showConfidence` (toggles the `%` in the setup label's text) —
-  both default to the prior hardcoded behavior. `showTradePlan` and `showTpLadder` are declared for
-  a later phase that splits trade-plan visibility from `showVisuals` and adds multiple TP levels;
-  neither does anything yet. Wick-tolerant stops (the fragile-SL problem) are not yet started.
+  **V2 rework (multi-phase, in progress).** The user is chasing five known problems with the
+  indicator: signal contradiction (opposite-direction alerts minutes apart), coverage gaps (sweep
+  is the only entry trigger), a stop that a single wick can take out with no recovery buffer, a
+  generic R-multiple target as the fallback, and (already addressed — see above) a lack of
+  on-chart trade-plan markup. V2 Phase 1 was pure refactor, no new behavior: the inline
+  `bearAllowed`/`bullAllowed` sweep search became `detectSweep(dir)`, a pure function returning
+  `[found, level, extreme, cisdTarget]` (same read-only-function-plus-top-level-assignment split as
+  `buildTradePlanDrawings`), gated by a new `shouldFireSetup(setupType, dir)` master function.
+  `detectReversal`/`detectContinuation`/`detectBreakout` are still stubs (`[false, float(na),
+  float(na), float(na)]`) — coverage gaps are the one problem not yet started; new entry triggers
+  beyond a liquidity sweep are later-phase work. `grpVisualsV2`'s `lineExtension` (replaces the
+  trade-plan lines' hardcoded 15-bar length) and `showConfidence` (toggles the `%` in the setup
+  label's text) have been live since Phase 1, since they're pure, safe generalizations of existing
+  hardcoded values; `showTradePlan` and `showTpLadder` are still declared-but-inert, waiting on a
+  later phase that splits trade-plan visibility from `showVisuals` and adds multiple TP levels.
+
+  **V2 Phase 2** (not to be confused with the unrelated "Phase 2 (dashboard integration)" below —
+  that one shipped earlier and is a separate track in `index.html`) wired the rest of the gates
+  Phase 1 only declared, plus added wick-tolerant stops: `shouldFireSetup()` now also checks
+  `raiseAdxThreshold`/`raisedAdxThreshold` (a stricter optional ADX floor), `useVolFloor`/
+  `volFloorMult` (minimum volume ratio), `minBarRangeAtr` (rejects a dead/illiquid confirmation
+  bar), and — this is the actual fix for the contradiction problem — `useContradictionFilter`/
+  `minBarsAfterSetup` against two new persisted globals, `lastSetupDir`/`lastSetupBar`, updated
+  only when a setup actually fires a webhook (a quiet sequence completion below
+  `minTargetAtrMult`/`minSeqFvgSizeAtr` never counts, so it can't block a later opposite signal).
+  `minSeqFvgSizeAtr` (rejects a too-small confirming FVG) is checked separately at the 4 completion
+  sites instead of in `shouldFireSetup()`, since it depends on that specific sequence's own FVG,
+  not something visible at the sweep-detection stage. New `grpSL` group (`useWickTolerance`/
+  `wickToleranceAtr`) widens the stop beyond the sweep's actual wick by an ATR-scaled buffer at all
+  4 completion sites — deliberately just a wider stop distance, not a "grace period before counting
+  a touched stop as hit," since real broker stop orders fill on touch regardless of what the chart
+  does next; pretending otherwise would misrepresent real risk. Every new gate defaults to a value
+  that roughly reproduces prior behavior (`raiseAdxThreshold`/`useVolFloor` off, `minBarRangeAtr`/
+  `minSeqFvgSizeAtr` low/zero) so this phase doesn't quietly starve signal flow — they have to be
+  turned up deliberately to actually tighten things.
 
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection

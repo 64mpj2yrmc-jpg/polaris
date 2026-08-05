@@ -74,24 +74,47 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // the current rule set the moment you paste this in, not something you
 // have to wait days to accumulate.
 //
-// V2 Phase 1 (groundwork, in progress): the sweep-only entry trigger is now
-// behind detectSweep()/shouldFireSetup() instead of inline bearAllowed/
-// bullAllowed booleans -- same alerts, cleaner seams for what's next.
-// detectReversal()/detectContinuation()/detectBreakout() are stubs (always
-// report nothing found) waiting on Phase 2 to give the indicator entry
-// triggers beyond a liquidity sweep. grpGates/grpMemory hold Phase 2's
-// contradiction filter (blocking an opposite-direction setup within N bars
-// of the last one -- the "buy signal, then sell signal 5 minutes later"
-// problem) and a few extra signal-quality floors, all declared but not yet
-// checked by shouldFireSetup(). grpVisualsV2 adds a line-length input and a
-// confidence-label toggle to the existing trade-plan markup now; a real
-// TP-ladder (showTpLadder) and wick-tolerant stops are later-phase work.
+// V2 rework so far: the sweep-only entry trigger sits behind
+// detectSweep()/shouldFireSetup() instead of inline bearAllowed/
+// bullAllowed booleans. detectReversal()/detectContinuation()/
+// detectBreakout() are still stubs (always report nothing found) -- new
+// entry triggers beyond a liquidity sweep are the one piece of the
+// original 5-problem list not yet started.
 //
-// Dashboard integration additions: buildAlertMessage() now also reports
+// The other four problems are now live, not just declared:
+//   1. Signal contradiction -- useContradictionFilter/minBarsAfterSetup
+//      block a new setup within minBarsAfterSetup of the last one that
+//      actually fired in the opposite direction (lastSetupDir/
+//      lastSetupBar), checked in shouldFireSetup(). Off is impossible;
+//      only useContradictionFilter=false disables it.
+//   2. Coverage gaps -- unchanged this pass (see detect* stubs above);
+//      allowSweep/allowReversal/allowContinuation/allowBreakout already
+//      gate per-type in shouldFireSetup() for whenever they're real.
+//   3. Fragile stop -- useWickTolerance/wickToleranceAtr widen the stop
+//      beyond the sweep's actual wick by an ATR-scaled buffer, at all 4
+//      completion sites. This widens where the stop SITS; it does not
+//      pretend a real touched stop wouldn't fill -- that would misrepresent
+//      real broker/order-fill behavior, so there's no "grace period" logic.
+//   4. Generic TP fallback -- unchanged from the earlier liquidity-pool
+//      targeting pass (computeTarget()/findLiquidityTarget()); still
+//      reports targetSource so the dashboard can explain which it used.
+//   5. No visual guidance -- solved in an earlier pass (buildTradePlanDrawings).
+// Plus two general signal-quality floors, also now live: raiseAdxThreshold/
+// raisedAdxThreshold (stricter ADX minimum), useVolFloor/volFloorMult (min
+// volume ratio), minBarRangeAtr (reject a dead/illiquid confirmation bar),
+// and minSeqFvgSizeAtr (reject a too-small confirming FVG) -- all checked
+// in shouldFireSetup() except minSeqFvgSizeAtr, which depends on that
+// specific sequence's FVG and is checked at the 4 completion sites instead.
+// Every new gate defaults to a value that roughly reproduces prior
+// behavior (raiseAdxThreshold/useVolFloor off, minBarRangeAtr/
+// minSeqFvgSizeAtr low/zero) so this pass doesn't quietly starve you of
+// signals -- turn them up deliberately to actually tighten things.
+//
+// Dashboard integration additions: buildAlertMessage() also reports
 // "targetSource" ("pool" if computeTarget() found a real untested liquidity
 // pool, "fallback" if it fell back to the R-multiple projection instead) --
 // this is what lets Polaris explain, not just display, why a given target
-// sits where it does. buildStatusMessage() now also carries the live
+// sits where it does. buildStatusMessage() also carries the live
 // scoreWins/scoreLosses tally on every ping, so the dashboard's win-rate
 // reading stays current without waiting for the next full setup to fire.
 // ============================================================================
@@ -159,32 +182,37 @@ grpVolume = "Volume"
 useVolumeConfirm = input.bool(true, "Factor volume strength into confidence score (never blocks a signal)", group=grpVolume)
 volAvgLen = input.int(20, "Volume average length", minval=5, group=grpVolume)
 
-// ---------- V2 Phase 1: modularization groundwork ----------
-// These groups exist so Phase 2+ has somewhere to land without another
-// round of input-panel surgery. Sweep is the only setup type actually
-// implemented right now -- reversal/continuation/breakout are stubbed (see
-// the detect*() functions below) and default OFF since firing on them
-// would do nothing anyway. Everything under grpGates/grpMemory is
-// deliberately UNWIRED this phase -- declared and visible in the inputs
-// panel, but not yet checked by shouldFireSetup() -- so this refactor
-// changes zero alert behavior at default settings. Search "Phase 2" in this
-// file for every place a later phase will wire one of these in.
+// ---------- V2 groundwork + Phase 2 gates ----------
+// Sweep is the only setup type actually implemented -- reversal/
+// continuation/breakout are stubbed (see the detect*() functions below)
+// and default OFF since firing on them would do nothing anyway. Everything
+// under grpGates/grpMemory/grpSL is now live, checked by shouldFireSetup()
+// (and, for minSeqFvgSizeAtr and the wick-tolerant stop buffer, at the 4
+// completion sites directly) -- all default to values that roughly
+// reproduce Phase 1's behavior (raiseAdxThreshold/useVolFloor default off,
+// minBarRangeAtr/minSeqFvgSizeAtr default low/zero), so this pass doesn't
+// suddenly starve you of signals, but every gate is now real, not cosmetic.
 grpSetups = "Setup Types"
 allowSweep        = input.bool(true, "Allow sweep-based setups (implemented)", group=grpSetups)
 allowReversal     = input.bool(false, "Allow reversal-based setups (not yet implemented)", group=grpSetups)
 allowContinuation = input.bool(false, "Allow continuation-based setups (not yet implemented)", group=grpSetups)
 allowBreakout     = input.bool(false, "Allow breakout-based setups (not yet implemented)", group=grpSetups)
 
-grpGates = "Signal Quality Gates (Phase 2+ -- not yet enforced)"
+grpGates = "Signal Quality Gates"
 useVolFloor       = input.bool(false, "Require a minimum volume ratio to fire", group=grpGates)
 volFloorMult      = input.float(0.8, "Min volume ratio if the floor above is enabled", minval=0, step=0.1, group=grpGates)
 raiseAdxThreshold = input.bool(false, "Require a stricter ADX minimum than the Market Regime setting", group=grpGates)
-minBarRangeAtr    = input.float(0.15, "Min bar range to trust as signal context, x ATR", minval=0, step=0.05, group=grpGates)
-minSeqFvgSizeAtr  = input.float(0.0, "Min size of a sequence's own confirming FVG, x ATR", minval=0, step=0.05, group=grpGates)
+raisedAdxThreshold = input.float(30, "Stricter ADX minimum, used only if the toggle above is on", minval=5, maxval=60, group=grpGates)
+minBarRangeAtr    = input.float(0.15, "Min bar range to trust as signal context, x ATR (0 disables)", minval=0, step=0.05, group=grpGates)
+minSeqFvgSizeAtr  = input.float(0.0, "Min size of a sequence's own confirming FVG, x ATR (0 disables)", minval=0, step=0.05, group=grpGates)
 
-grpMemory = "Contradiction Memory (Phase 2+ -- not yet enforced)"
+grpMemory = "Contradiction Memory"
 useContradictionFilter = input.bool(true, "Block a new setup that directly contradicts one just fired", group=grpMemory)
 minBarsAfterSetup      = input.int(10, "Min bars after a completed setup before the opposite direction can fire", minval=0, group=grpMemory)
+
+grpSL = "Wick-Tolerant Stops"
+useWickTolerance  = input.bool(true, "Widen the stop beyond the sweep wick so a single spike can't take it out", group=grpSL)
+wickToleranceAtr  = input.float(0.25, "Extra stop buffer beyond the sweep's wick, x ATR", minval=0, step=0.05, group=grpSL)
 
 grpVisualsV2 = "Trade Plan Visuals (Phase 2+ additions)"
 showTradePlan  = input.bool(true, "Show entry/stop/target trade-plan markup (currently mirrors 'Show sweep/CISD/trade-plan markup' above; will become independent once TP-ladder support lands)", group=grpVisualsV2)
@@ -217,6 +245,13 @@ var bool   seqHasFvg     = false
 var float  seqFvgLo      = na
 var float  seqFvgHi      = na
 var float  seqSweepExtreme = na  // actual high/low the sweep candle reached -- the real "protected" level, stop lives beyond this, not just beyond the old swing price
+
+// last setup that actually fired a webhook (not just completed the
+// sequence) -- what useContradictionFilter checks against, so a quiet
+// completion (below minTargetAtrMult/minSeqFvgSizeAtr) never blocks a
+// future opposite-direction signal.
+var string lastSetupDir = na   // "bull" | "bear"
+var int    lastSetupBar = na
 
 // ---------- persistent state: trade-plan markup (single most recent completed setup) ----------
 var line  tpEntryLine = na
@@ -494,18 +529,25 @@ detectBreakout(string dir) =>
     [false, float(na), float(na), float(na)]
 
 // shouldFireSetup(setupType, dir) -- the master gate every candidate signal
-// passes through before a detector even runs. Phase 1: per-type on/off
-// toggle + the bias/HTF/regime/session checks that already existed inline
-// as bearAllowed/bullAllowed (moved here verbatim, not changed). Phase 2
-// adds: useContradictionFilter/minBarsAfterSetup, useVolFloor/volFloorMult,
-// minSeqFvgSizeAtr, minBarRangeAtr, raiseAdxThreshold -- all declared above
-// already, just not checked yet.
+// passes through before a detector even runs. Per-type on/off toggle, the
+// bias/HTF/regime/session checks that started as inline bearAllowed/
+// bullAllowed, plus Phase 2's gates: a stricter optional ADX floor, a
+// volume floor, a minimum bar-range sanity check, and the contradiction
+// filter (blocks a setup within minBarsAfterSetup of the last one that
+// actually fired in the opposite direction -- the "buy signal, then sell
+// signal 5 minutes later" problem). minSeqFvgSizeAtr is checked separately,
+// at the 4 completion sites, since it depends on that specific sequence's
+// FVG, not something shouldFireSetup has visibility into at the sweep stage.
 shouldFireSetup(string setupType, string dir) =>
     bool typeAllowed = setupType == "sweep" ? allowSweep : setupType == "reversal" ? allowReversal : setupType == "continuation" ? allowContinuation : setupType == "breakout" ? allowBreakout : false
     bool biasOk = dir == "bear" ? structureBias != "bull" : structureBias != "bear"
     bool htfOk = not useHtfBias or (dir == "bear" ? htfBias != "bull" : htfBias != "bear")
     bool sessionOk = not useSessionFilter or inAnyKillzone
-    typeAllowed and biasOk and htfOk and regimeOk and sessionOk
+    bool adxOk = not raiseAdxThreshold or adxVal >= raisedAdxThreshold
+    bool volFloorOk = not useVolFloor or na(volRatio) or volRatio >= volFloorMult
+    bool rangeOk = minBarRangeAtr <= 0 or (high - low) >= minBarRangeAtr * atrVal
+    bool contradictionOk = not useContradictionFilter or na(lastSetupDir) or lastSetupDir == dir or (bar_index - lastSetupBar) >= minBarsAfterSetup
+    typeAllowed and biasOk and htfOk and regimeOk and sessionOk and adxOk and volFloorOk and rangeOk and contradictionOk
 
 // ---------- webhook payload builders ----------
 // "kind" discriminates the two payload shapes this script ever sends -- the
@@ -831,10 +873,12 @@ if barstate.isconfirmed
                         if close < seqFvgLo
                             int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
                             float entryP = close
-                            float stopP = seqSweepExtreme + stopBufferPts
+                            float stopP = seqSweepExtreme + stopBufferPts + (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                             [targetP, targetIsPool] = computeTarget("bear", entryP, stopP)
-                            if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
+                            if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
                                 alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
+                                lastSetupDir := "bear"
+                                lastSetupBar := bar_index
                                 if showScorecard
                                     array.unshift(pendingDir, "bear")
                                     array.unshift(pendingEntry, entryP)
@@ -870,10 +914,12 @@ if barstate.isconfirmed
                 else if close < seqFvgLo
                     int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
                     float entryP = close
-                    float stopP = seqSweepExtreme + stopBufferPts
+                    float stopP = seqSweepExtreme + stopBufferPts + (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                     [targetP, targetIsPool] = computeTarget("bear", entryP, stopP)
-                    if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
+                    if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
                         alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
+                        lastSetupDir := "bear"
+                        lastSetupBar := bar_index
                         if showScorecard
                             array.unshift(pendingDir, "bear")
                             array.unshift(pendingEntry, entryP)
@@ -939,10 +985,12 @@ if barstate.isconfirmed
                         if close > seqFvgHi
                             int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
                             float entryP = close
-                            float stopP = seqSweepExtreme - stopBufferPts
+                            float stopP = seqSweepExtreme - stopBufferPts - (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                             [targetP, targetIsPool] = computeTarget("bull", entryP, stopP)
-                            if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
+                            if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
                                 alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
+                                lastSetupDir := "bull"
+                                lastSetupBar := bar_index
                                 if showScorecard
                                     array.unshift(pendingDir, "bull")
                                     array.unshift(pendingEntry, entryP)
@@ -978,10 +1026,12 @@ if barstate.isconfirmed
                 else if close > seqFvgHi
                     int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
                     float entryP = close
-                    float stopP = seqSweepExtreme - stopBufferPts
+                    float stopP = seqSweepExtreme - stopBufferPts - (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                     [targetP, targetIsPool] = computeTarget("bull", entryP, stopP)
-                    if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
+                    if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
                         alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
+                        lastSetupDir := "bull"
+                        lastSetupBar := bar_index
                         if showScorecard
                             array.unshift(pendingDir, "bull")
                             array.unshift(pendingEntry, entryP)
