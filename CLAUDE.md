@@ -232,9 +232,17 @@ app can't receive them — hence the exception to "no server logic" above). It d
   premium/discount zone shaded around the most recent swing high/low with a 50% equilibrium line
   (off by default), and London/NY killzone session shading via
   `time(timeframe.period, session, "America/New_York")` (off by default). A `table.new` top-right
-  HUD shows live standing bias / HTF bias / ADX regime / phase / setup direction. Colors match
-  Polaris's own palette (cyan `#00D4FF` structure, gold `#F5C86B` attention/sweeps/iFVG, green
-  `#2FE08A`/red `#FF5566` bull/bear) instead of Pine's stock colors.
+  HUD shows live standing bias / HTF bias / ADX regime / phase / setup direction / scorecard.
+  Colors match Polaris's own palette (cyan `#00D4FF` structure, gold `#F5C86B` attention/sweeps/
+  iFVG, green `#2FE08A`/red `#FF5566` bull/bear) instead of Pine's stock colors.
+
+  A built-in scorecard (`pendingDir`/`pendingEntry`/`pendingStop`/`pendingTarget` parallel arrays,
+  `scoreWins`/`scoreLosses` tallies) records every setup that actually fires and resolves it the
+  moment price trades through its stop or target — a wide bar that could have touched both in one
+  candle counts as a loss, since intrabar order can't be known. Because Pine replays the whole
+  script over all available chart history on every load, this is a genuine backtest of the current
+  rule set from the moment the script is pasted in, not something that only accumulates going
+  forward. Shown on the HUD as `SCORE: NN% (wins/total)`.
 
   Three filters gate whether a sweep is even allowed to start a new sequence: a `structureBias`
   state var (higher high/low → bullish, lower high/low → bearish, updated independently of the

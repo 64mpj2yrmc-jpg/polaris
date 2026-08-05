@@ -58,6 +58,13 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // -- a lightweight, constantly-overwritten "what am I watching right now"
 // ping, not stored history, so Polaris can speak up mid-sequence instead of
 // only ever hearing about a setup once it's already done.
+//
+// A built-in scorecard tracks every fired setup until price actually trades
+// through its stop or target, tallying wins/losses on the HUD ("SCORE").
+// Since Pine replays the whole script over all available chart history on
+// every load, this isn't just forward-tracking -- it's a real backtest of
+// the current rule set the moment you paste this in, not something you
+// have to wait days to accumulate.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -112,6 +119,10 @@ useRegimeFilter = input.bool(true, "Only scan when the market is trending (ADX f
 adxLen          = input.int(14, "ADX length", minval=2, group=grpRegime)
 adxThreshold    = input.float(20, "Min ADX to allow new setups", minval=5, maxval=50, group=grpRegime)
 
+grpScore = "Scorecard"
+showScorecard = input.bool(true, "Track win rate on the HUD", group=grpScore)
+maxPending    = input.int(50, "Max pending signals tracked at once", minval=5, maxval=200, group=grpScore)
+
 // ---------- types ----------
 type Swing
     int   idx
@@ -161,6 +172,19 @@ var array<box> obBoxes      = array.new<box>()
 var box premiumBox = na
 var box discountBox = na
 var line eqLine = na
+
+// ---------- persistent state: scorecard ----------
+// every fired setup gets recorded here until price actually trades through
+// its stop or target; tallied into scoreWins/scoreLosses once resolved.
+// Pine replays this over the whole visible chart history on every reload,
+// so this reflects a real backtest under the current rules, not just
+// signals fired since you last opened the chart.
+var array<string> pendingDir    = array.new<string>()
+var array<float> pendingEntry   = array.new<float>()
+var array<float> pendingStop    = array.new<float>()
+var array<float> pendingTarget  = array.new<float>()
+var int scoreWins   = 0
+var int scoreLosses = 0
 
 // ---------- swing detection (mirrors findSwings) + equal highs/lows ----------
 ph = ta.pivothigh(swingStrength, swingStrength)
@@ -493,6 +517,30 @@ if barstate.isconfirmed and tpActive
         clearTradePlanDrawings()
         tpActive := false
 
+// ---------- scorecard: resolve pending signals against price ----------
+// runs before the main scan so a signal recorded THIS bar (entry = this
+// bar's close) never gets checked against this same bar's high/low --
+// resolution only starts from the next bar onward.
+if showScorecard and barstate.isconfirmed and array.size(pendingDir) > 0
+    for i = array.size(pendingDir) - 1 to 0
+        string pDir = array.get(pendingDir, i)
+        float pStop = array.get(pendingStop, i)
+        float pTarget = array.get(pendingTarget, i)
+        bool hitStop = pDir == "bull" ? low <= pStop : high >= pStop
+        bool hitTarget = pDir == "bull" ? high >= pTarget : low <= pTarget
+        if hitStop or hitTarget
+            // conservative tie-break: if a single wide bar could have
+            // touched both, we can't know which came first intrabar, so
+            // it counts as a loss rather than assuming the favorable order
+            if hitTarget and not hitStop
+                scoreWins := scoreWins + 1
+            else
+                scoreLosses := scoreLosses + 1
+            array.remove(pendingDir, i)
+            array.remove(pendingEntry, i)
+            array.remove(pendingStop, i)
+            array.remove(pendingTarget, i)
+
 // ---------- main scan (mirrors advanceScan), only on confirmed/closed bars ----------
 if barstate.isconfirmed
     string prevPhase = seqPhase  // snapshot before this bar's transitions, for the status ping below
@@ -588,6 +636,16 @@ if barstate.isconfirmed
                             float targetP = computeTarget("bear", entryP, stopP)
                             if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
                                 alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
+                                if showScorecard
+                                    array.unshift(pendingDir, "bear")
+                                    array.unshift(pendingEntry, entryP)
+                                    array.unshift(pendingStop, stopP)
+                                    array.unshift(pendingTarget, targetP)
+                                    if array.size(pendingDir) > maxPending
+                                        array.pop(pendingDir)
+                                        array.pop(pendingEntry)
+                                        array.pop(pendingStop)
+                                        array.pop(pendingTarget)
                                 if showVisuals
                                     clearTradePlanDrawings()
                                     [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
@@ -617,6 +675,16 @@ if barstate.isconfirmed
                     float targetP = computeTarget("bear", entryP, stopP)
                     if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
                         alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
+                        if showScorecard
+                            array.unshift(pendingDir, "bear")
+                            array.unshift(pendingEntry, entryP)
+                            array.unshift(pendingStop, stopP)
+                            array.unshift(pendingTarget, targetP)
+                            if array.size(pendingDir) > maxPending
+                                array.pop(pendingDir)
+                                array.pop(pendingEntry)
+                                array.pop(pendingStop)
+                                array.pop(pendingTarget)
                         if showVisuals
                             clearTradePlanDrawings()
                             [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
@@ -676,6 +744,16 @@ if barstate.isconfirmed
                             float targetP = computeTarget("bull", entryP, stopP)
                             if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
                                 alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
+                                if showScorecard
+                                    array.unshift(pendingDir, "bull")
+                                    array.unshift(pendingEntry, entryP)
+                                    array.unshift(pendingStop, stopP)
+                                    array.unshift(pendingTarget, targetP)
+                                    if array.size(pendingDir) > maxPending
+                                        array.pop(pendingDir)
+                                        array.pop(pendingEntry)
+                                        array.pop(pendingStop)
+                                        array.pop(pendingTarget)
                                 if showVisuals
                                     clearTradePlanDrawings()
                                     [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
@@ -705,6 +783,16 @@ if barstate.isconfirmed
                     float targetP = computeTarget("bull", entryP, stopP)
                     if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
                         alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
+                        if showScorecard
+                            array.unshift(pendingDir, "bull")
+                            array.unshift(pendingEntry, entryP)
+                            array.unshift(pendingStop, stopP)
+                            array.unshift(pendingTarget, targetP)
+                            if array.size(pendingDir) > maxPending
+                                array.pop(pendingDir)
+                                array.pop(pendingEntry)
+                                array.pop(pendingStop)
+                                array.pop(pendingTarget)
                         if showVisuals
                             clearTradePlanDrawings()
                             [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
@@ -734,7 +822,7 @@ if showVisuals and not na(seqPhase)
     line.new(seqSweepBar, seqLevel, bar_index, seqLevel, color=color.new(#F5C86B, 55), style=line.style_dashed, width=1)
 
 // ---------- status HUD (top-right) ----------
-var table hud = table.new(position=position.top_right, columns=2, rows=6, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
+var table hud = table.new(position=position.top_right, columns=2, rows=7, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
 
 if showHud and barstate.islast
     table.cell(hud, 0, 0, "◆ POLARIS", text_color=#F5C86B, text_size=size.small, text_halign=text.align_left)
@@ -749,3 +837,8 @@ if showHud and barstate.islast
     table.cell(hud, 1, 4, na(seqPhase) ? "IDLE" : str.upper(seqPhase), text_color=na(seqPhase) ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
     table.cell(hud, 0, 5, "SETUP", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
     table.cell(hud, 1, 5, na(seqDir) ? "--" : (seqDir == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(seqDir) ? #6E93AD : (seqDir == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
+    if showScorecard
+        int totalResolved = scoreWins + scoreLosses
+        string scoreTxt = totalResolved > 0 ? str.tostring(math.round(scoreWins / totalResolved * 100)) + "% (" + str.tostring(scoreWins) + "/" + str.tostring(totalResolved) + ")" : "-- (0/0)"
+        table.cell(hud, 0, 6, "SCORE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 6, scoreTxt, text_color=totalResolved > 0 and scoreWins / totalResolved >= 0.5 ? #2FE08A : #DDF3FF, text_size=size.small, text_halign=text.align_right)
