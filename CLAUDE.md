@@ -230,11 +230,13 @@ app can't receive them — hence the exception to "no server logic" above). It d
   clusters with a prior one within `eqTolPct`%, is also what makes a swing sweep-eligible in the
   first place, so the scanner only reacts to genuine liquidity pools, not every minor pivot), a
   premium/discount zone shaded around the most recent swing high/low with a 50% equilibrium line
-  (off by default), and London/NY killzone session shading via
-  `time(timeframe.period, session, "America/New_York")` (off by default). A `table.new` top-right
-  HUD shows live standing bias / HTF bias / ADX regime / phase / setup direction / scorecard.
-  Colors match Polaris's own palette (cyan `#00D4FF` structure, gold `#F5C86B` attention/sweeps/
-  iFVG, green `#2FE08A`/red `#FF5566` bull/bear) instead of Pine's stock colors.
+  (off by default), and Asia/London/NY AM/NY PM killzone session shading via
+  `time(timeframe.period, session, "America/New_York")` (off by default; Asia's session string
+  `"2000-0000"` wraps past midnight, which Pine's session matching supports natively). A
+  `table.new` top-right HUD shows live standing bias / HTF bias / ADX regime / phase / setup
+  direction / current session / scorecard. Colors match Polaris's own palette (cyan `#00D4FF`
+  structure, gold `#F5C86B` attention/sweeps/iFVG, green `#2FE08A`/red `#FF5566` bull/bear)
+  instead of Pine's stock colors.
 
   A built-in scorecard (`pendingDir`/`pendingEntry`/`pendingStop`/`pendingTarget` parallel arrays,
   `scoreWins`/`scoreLosses` tallies) records every setup that actually fires and resolves it the
@@ -244,16 +246,19 @@ app can't receive them — hence the exception to "no server logic" above). It d
   rule set from the moment the script is pasted in, not something that only accumulates going
   forward. Shown on the HUD as `SCORE: NN% (wins/total)`.
 
-  Three filters gate whether a sweep is even allowed to start a new sequence: a `structureBias`
+  Four filters gate whether a sweep is even allowed to start a new sequence: a `structureBias`
   state var (higher high/low → bullish, lower high/low → bearish, updated independently of the
   scanner every time a new swing forms) blocks counter-bias setups until structure actually
   breaks the other way; an HTF bias check (`request.security` pulling a higher timeframe's close
   vs. its own EMA, `lookahead_off` so it can't repaint) requires the higher timeframe to agree;
-  and a `ta.dmi()`-based ADX regime filter blocks new setups while the market's chopping below
-  `adxThreshold`. Pine's sandbox has no mechanism to call an LLM/API in real time — `alert()` is a
-  one-way webhook fire, nothing reads a response back into the script — so these three (plus the
-  liquidity-pool restriction above) are the extent of how "market-aware" the indicator itself can
-  be. Deeper judgment from Polaris's actual Claude brain happens downstream instead, once an
+  a `ta.dmi()`-based ADX regime filter blocks new setups while the market's chopping below
+  `adxThreshold`; and an optional `useSessionFilter` toggle (off by default) blocks new setups
+  entirely outside the four killzones (`inAnyKillzone`), independent of whether the killzones are
+  also being shaded visually. Pine's sandbox has no mechanism to call an LLM/API in real time —
+  `alert()` is a one-way webhook fire, nothing reads a response back into the script — so these
+  four (plus the liquidity-pool restriction above) are the extent of how "market-aware" the
+  indicator itself can be. Deeper judgment from Polaris's actual Claude brain happens downstream
+  instead, once an
   alert reaches the dashboard (see the ALERTS tab entry below).
 
   The single most recently completed setup's entry/stop/target plan (`drawTradePlan()`) is

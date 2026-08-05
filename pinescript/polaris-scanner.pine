@@ -38,17 +38,18 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // Adjust the inputs below, or the fvgConfidence()/findLiquidityTarget()
 // formulas, to taste.
 //
-// Two more filters gate whether a sweep is even allowed to start a sequence:
-// a higher-timeframe bias check (HTF close vs its own EMA, via
+// Three more filters gate whether a sweep is even allowed to start a
+// sequence: a higher-timeframe bias check (HTF close vs its own EMA, via
 // request.security -- no short setups while the HTF is bullish and vice
-// versa) and a market-regime check (ta.dmi's ADX -- no new setups while the
-// market is chopping, below the ADX threshold). Pine indicators cannot call
-// an LLM/API in real time (no such capability exists in the Pine sandbox --
-// alert() is a one-way webhook fire, nothing reads a response back into the
-// script), so these are the two ways this indicator can be genuinely
-// "market aware" on its own. Deeper judgment from Polaris's actual Claude
-// brain happens downstream instead, in index.html, once an alert reaches
-// the dashboard.
+// versa), a market-regime check (ta.dmi's ADX -- no new setups while the
+// market is chopping, below the ADX threshold), and an optional session
+// filter (useSessionFilter -- no new setups outside the Asia/London/NY AM/
+// NY PM killzones once enabled). Pine indicators cannot call an LLM/API in
+// real time (no such capability exists in the Pine sandbox -- alert() is a
+// one-way webhook fire, nothing reads a response back into the script), so
+// these are the ways this indicator can be genuinely "market aware" on its
+// own. Deeper judgment from Polaris's actual Claude brain happens
+// downstream instead, in index.html, once an alert reaches the dashboard.
 //
 // Two kinds of webhook payloads go out, discriminated by a "kind" field the
 // Cloud Function branches on: "setup" (buildAlertMessage) fires once, on a
@@ -104,7 +105,9 @@ grpPD = "Premium / Discount"
 showPD = input.bool(false, "Shade premium/discount zone", group=grpPD)
 
 grpKZ = "Killzones (New York time)"
-showKillzones = input.bool(false, "Shade killzone sessions", group=grpKZ)
+showKillzones    = input.bool(false, "Shade killzone sessions", group=grpKZ)
+useSessionFilter = input.bool(false, "Only allow new setups during a killzone session", group=grpKZ)
+asiaSession   = input.session("2000-0000", "Asia killzone", group=grpKZ)
 londonSession = input.session("0200-0500", "London killzone", group=grpKZ)
 nyAmSession   = input.session("0930-1100", "NY AM killzone", group=grpKZ)
 nyPmSession   = input.session("1330-1600", "NY PM killzone", group=grpKZ)
@@ -500,10 +503,12 @@ if showPD and barstate.isconfirmed and array.size(swingHighs) > 0 and array.size
         eqLine := line.new(leftX, eq, bar_index + 10, eq, color=color.new(#F5C86B, 40), style=line.style_dotted, width=1)
 
 // ---------- killzone sessions ----------
+inAsia   = not na(time(timeframe.period, asiaSession, "America/New_York"))
 inLondon = not na(time(timeframe.period, londonSession, "America/New_York"))
 inNyAm   = not na(time(timeframe.period, nyAmSession, "America/New_York"))
 inNyPm   = not na(time(timeframe.period, nyPmSession, "America/New_York"))
-bgcolor(showKillzones and inLondon ? color.new(#00D4FF, 95) : na, title="London killzone")
+bool inAnyKillzone = inAsia or inLondon or inNyAm or inNyPm
+bgcolor(showKillzones and (inAsia or inLondon) ? color.new(#00D4FF, 95) : na, title="Asia/London killzone")
 bgcolor(showKillzones and (inNyAm or inNyPm) ? color.new(#F5C86B, 95) : na, title="NY killzone")
 
 // ---------- clear the tracked trade plan once it's played out ----------
@@ -546,9 +551,10 @@ if barstate.isconfirmed
     string prevPhase = seqPhase  // snapshot before this bar's transitions, for the status ping below
     if na(seqDir)
         // look for a swept high (bearish setup) -- best (highest) prior swing that got wicked through and closed back under.
-        // Skipped while structureBias or HTF bias is bullish, or the market isn't trending --
-        // no short setups until structure actually breaks bearish.
-        bool bearAllowed = structureBias != "bull" and (not useHtfBias or htfBias != "bull") and regimeOk
+        // Skipped while structureBias or HTF bias is bullish, the market isn't trending, or
+        // (if useSessionFilter) price is outside every killzone -- no short setups until
+        // structure actually breaks bearish.
+        bool bearAllowed = structureBias != "bull" and (not useHtfBias or htfBias != "bull") and regimeOk and (not useSessionFilter or inAnyKillzone)
         float bestHigh = na
         if bearAllowed and array.size(swingHighs) > 0
             for i = 0 to array.size(swingHighs) - 1
@@ -568,9 +574,10 @@ if barstate.isconfirmed
             if showVisuals
                 label.new(bar_index, high, "⚡ SWEEP", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
 
-        // Skipped while structureBias or HTF bias is bearish, or the market isn't trending --
-        // no long setups until structure actually breaks bullish.
-        bool bullAllowed = structureBias != "bear" and (not useHtfBias or htfBias != "bear") and regimeOk
+        // Skipped while structureBias or HTF bias is bearish, the market isn't trending, or
+        // (if useSessionFilter) price is outside every killzone -- no long setups until
+        // structure actually breaks bullish.
+        bool bullAllowed = structureBias != "bear" and (not useHtfBias or htfBias != "bear") and regimeOk and (not useSessionFilter or inAnyKillzone)
         if na(seqDir) and bullAllowed and array.size(swingLows) > 0
             float bestLow = na
             for i = 0 to array.size(swingLows) - 1
@@ -822,7 +829,7 @@ if showVisuals and not na(seqPhase)
     line.new(seqSweepBar, seqLevel, bar_index, seqLevel, color=color.new(#F5C86B, 55), style=line.style_dashed, width=1)
 
 // ---------- status HUD (top-right) ----------
-var table hud = table.new(position=position.top_right, columns=2, rows=7, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
+var table hud = table.new(position=position.top_right, columns=2, rows=8, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
 
 if showHud and barstate.islast
     table.cell(hud, 0, 0, "◆ POLARIS", text_color=#F5C86B, text_size=size.small, text_halign=text.align_left)
@@ -837,8 +844,11 @@ if showHud and barstate.islast
     table.cell(hud, 1, 4, na(seqPhase) ? "IDLE" : str.upper(seqPhase), text_color=na(seqPhase) ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
     table.cell(hud, 0, 5, "SETUP", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
     table.cell(hud, 1, 5, na(seqDir) ? "--" : (seqDir == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(seqDir) ? #6E93AD : (seqDir == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
+    string sessionTxt = inAsia ? "ASIA" : inLondon ? "LONDON" : inNyAm ? "NY AM" : inNyPm ? "NY PM" : "--"
+    table.cell(hud, 0, 6, "SESSION", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 6, sessionTxt, text_color=sessionTxt == "--" ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
     if showScorecard
         int totalResolved = scoreWins + scoreLosses
         string scoreTxt = totalResolved > 0 ? str.tostring(math.round(scoreWins / totalResolved * 100)) + "% (" + str.tostring(scoreWins) + "/" + str.tostring(totalResolved) + ")" : "-- (0/0)"
-        table.cell(hud, 0, 6, "SCORE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(hud, 1, 6, scoreTxt, text_color=totalResolved > 0 and scoreWins / totalResolved >= 0.5 ? #2FE08A : #DDF3FF, text_size=size.small, text_halign=text.align_right)
+        table.cell(hud, 0, 7, "SCORE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 7, scoreTxt, text_color=totalResolved > 0 and scoreWins / totalResolved >= 0.5 ? #2FE08A : #DDF3FF, text_size=size.small, text_halign=text.align_right)
