@@ -74,7 +74,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.05-3";
+const BUILD = "2026.08.05-4";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -1129,6 +1129,14 @@ Judge this ONE setup on its own merits — structure quality, risk/reward, wheth
       await firestoreDbRef.current.collection("alerts").doc(a.id).update({
         aiReviewed: true, aiVerdict: verdict, aiConfidence: Math.round(confidence), aiNote: note,
       });
+      // The review itself stays silent/tab-only except for this one case: an
+      // "avoid" verdict is worth a proactive heads-up even if he's not on the
+      // ALERTS tab. Bypasses the shared cooldown like rule pre-warnings do —
+      // aiReviewAttemptedRef already caps this to once per alert, so there's
+      // no separate dedupe needed here.
+      if (verdict === "avoid") {
+        speakProactive(`Sir, I'd pass on this one — ${a.symbol || "the model"} ${a.setupType || "setup"}. ${note}`, { bypassCap: true });
+      }
     } catch (e) { /* silent — a failed review just leaves the alert unreviewed; the trader still sees the raw setup */ }
   }
 

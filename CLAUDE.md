@@ -319,11 +319,16 @@ purpose-built prompt (`buildAlertReviewPrompt`, distinct from the conversational
 `buildSystemPrompt`) from the alert's own fields plus whatever context is already on hand —
 journal stats, live market feed, scanner state, memory — and asks for a strict JSON reply
 (`{"verdict","confidence","note"}`, no markdown fences) via the existing non-streaming
-`callAnthropic`. Never spoken, never appended to the chat transcript. On a parseable, valid
-response it writes `aiReviewed`/`aiVerdict`/`aiConfidence`/`aiNote` back via a client-side
-`update()` (the second `firestore.rules` clause above); any failure (missing key, network,
-malformed JSON) is swallowed silently and the alert just stays unreviewed rather than blocking or
-erroring the tab. Cards show a "Polaris is reviewing…" line while pending and a
+`callAnthropic`. Silent and tab-only for `favorable`/`caution` verdicts — never spoken, never
+appended to the chat transcript. An `avoid` verdict is the one exception: right after the Firestore
+write succeeds, it also calls `speakProactive()` with the setup and the AI's own note, bypassing
+the shared 10-minute proactive cooldown (same bypass rule pre-warnings use) so a heads-up on a
+setup Polaris would skip doesn't get silently eaten by the cap — `aiReviewAttemptedRef` already
+caps the whole review to once per alert, so no separate dedupe is needed for the speech itself. On
+a parseable, valid response it writes `aiReviewed`/`aiVerdict`/`aiConfidence`/`aiNote` back via a
+client-side `update()` (the second `firestore.rules` clause above); any failure (missing key,
+network, malformed JSON) is swallowed silently and the alert just stays unreviewed rather than
+blocking or erroring the tab. Cards show a "Polaris is reviewing…" line while pending and a
 favorable/caution/avoid badge + confidence + one-line note once reviewed.
 
 **Live indicator status (between full setups).** The Pine scanner also fires a second, much
