@@ -473,7 +473,7 @@ bool inAnyKillzone = inAsia or inLondon or inNyAm or inNyPm
 bgcolor(showKillzones and (inAsia or inLondon) ? color.new(#00D4FF, 95) : na, title="Asia/London killzone")
 bgcolor(showKillzones and (inNyAm or inNyPm) ? color.new(#F5C86B, 95) : na, title="NY killzone")
 
-// ---------- V2 Phase 1: setup detectors + master gate ----------
+// ---------- V2: setup detectors + master gate ----------
 // Pine functions can only READ outer-scope state, never reassign it
 // (CE10088) -- so every detector below is a pure function: it searches and
 // returns what it found, but never touches seq*. The call site (top-level
