@@ -297,7 +297,15 @@ signs in anonymously via Firebase Auth on mount and subscribes to the Firestore 
 with `onSnapshot` (`tvAlerts`/`tvAlertsStatus` state, `firestoreDbRef`), rendering each alert as a
 card (setup type, symbol/timeframe/timestamp, entry/stop/target/R:R/confidence, status badge) with
 MARK TRADED/MARK MISSED buttons calling `setAlertStatus(id, status)`, which does a client-side
-`update()` restricted by `firestore.rules` to the `status` field only. Requires a real
+`update()` restricted by `firestore.rules` to the `status` field only. MARK TRADED also calls
+`applyAlertToJournal(a)`, which pre-fills the LOG tab's order ticket (`form`) from the alert's own
+fields — instrument (inferred from `symbol`), direction (inferred from `setupType`), entry/stop/tp,
+a `notes` line summarizing the alert (setup type, indicator confidence, Polaris's AI verdict if
+reviewed) — and switches to the LOG tab, reusing the same `scanMissingFields`/`scanMessage`
+review-banner mechanism the screenshot-scan flow uses (`applyScanCandidate`) to gold-highlight the
+one field it can't know yet: `exit`, since the trade hasn't closed when the alert fires. The trader
+fills that in and hits Log Trade themselves — `addTrade` already refuses to save without it, so
+there was never a path to fully auto-logging a still-open trade. Requires a real
 `firebaseConfig.js` (see above) and Anonymous auth enabled in Firebase Console → Build →
 Authentication → Sign-in method — until both are done the tab shows a status message instead of
 erroring.

@@ -74,7 +74,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.05-2";
+const BUILD = "2026.08.05-3";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -1441,6 +1441,33 @@ Judge this ONE setup on its own merits — structure quality, risk/reward, wheth
     });
     setScanMissingFields(missing);
     setScanMessage(`Scanned — review before logging · ${c.confidence.toUpperCase()} CONFIDENCE${c.notes ? " · " + c.notes : ""}`);
+  }
+
+  // Pre-fills the order ticket from a live TradingView alert and jumps to
+  // LOG so "MARK TRADED" gets the trade most of the way into the journal —
+  // everything except exit, which isn't known until the trade actually
+  // closes (addTrade already refuses to save without one).
+  function applyAlertToJournal(a) {
+    const isUp = (a.setupType || "").includes("UP") || (a.setupType || "").includes("BUY") || (a.setupType || "").includes("BULL");
+    const instrument = (a.symbol || "").toUpperCase().includes("MNQ") ? "MNQ" : "NQ";
+    const noteParts = [`Live alert: ${a.setupType || "setup"} · ${a.symbol || "—"} ${a.timeframe || ""}`.trim()];
+    if (a.confidence != null) noteParts.push(`indicator ${a.confidence}%`);
+    if (a.aiReviewed) noteParts.push(`Polaris ${a.aiVerdict || ""}${a.aiConfidence != null ? " " + a.aiConfidence + "%" : ""}${a.aiNote ? " — " + a.aiNote : ""}`);
+    setForm({
+      date: new Date().toISOString().slice(0, 10),
+      instrument,
+      direction: isUp ? "LONG" : "SHORT",
+      contracts: 1,
+      entry: a.entryPrice != null ? a.entryPrice : "",
+      exit: "",
+      stop: a.stopPrice != null ? a.stopPrice : "",
+      tp: a.targetPrice != null ? a.targetPrice : "",
+      setup: "Reversal",
+      notes: noteParts.join(" · "),
+    });
+    setScanMissingFields(new Set(["exit"]));
+    setScanMessage("Alert applied to the order ticket — add your exit once the trade closes, then Log Trade.");
+    setTab("LOG");
   }
 
   function dismissScan() {
@@ -3188,7 +3215,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                   )}
                   {a.status === "pending" && (
                     <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                      <button onClick={() => setAlertStatus(a.id, "traded")}
+                      <button onClick={() => { applyAlertToJournal(a); setAlertStatus(a.id, "traded"); }}
                         style={{ background: "rgba(47,224,138,0.14)", color: C.green, border: `1px solid rgba(47,224,138,0.4)`, borderRadius: 4, padding: "8px 14px", fontFamily: mono, fontWeight: 600, fontSize: 11, letterSpacing: "0.06em", cursor: "pointer" }}>
                         MARK TRADED
                       </button>
