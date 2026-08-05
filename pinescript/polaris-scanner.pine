@@ -34,28 +34,29 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 //                projected move is at least minTargetAtrMult x ATR(14);
 //                smaller draws still resolve the sequence, they just don't
 //                fire a webhook.
-//   confidence = FVG size relative to ATR(14), a rough heuristic only
-// Adjust the inputs below, or the fvgConfidence()/findLiquidityTarget()
+//   confidence = FVG size relative to ATR(14) blended with volume strength
+//                relative to its own recent average, a rough heuristic only
+// Adjust the inputs below, or the setupConfidence()/findLiquidityTarget()
 // formulas, to taste.
 //
-// Four more filters gate whether a sweep is even allowed to start a
+// Three more filters gate whether a sweep is even allowed to start a
 // sequence: a higher-timeframe bias check (HTF close vs its own EMA, via
 // request.security -- no short setups while the HTF is bullish and vice
 // versa), a market-regime check (ta.dmi's ADX -- no new setups while the
-// market is chopping, below the ADX threshold), an optional session filter
-// (useSessionFilter -- no new setups outside the Asia/London/NY AM/NY PM
-// killzones once enabled), and a volume-confirmation check (useVolumeConfirm
-// -- the sweep candle and the CISD confirmation candle must each clear
-// volume above their recent average, requiring real participation behind
-// the move rather than just a technical price flip). Pine has no access to
-// real bid/ask or DOM data -- this volume check is bar volume vs its own
-// average, not true order flow, but it's the closest proxy available.
-// Pine indicators also cannot call an LLM/API in real time (no such
-// capability exists in the sandbox -- alert() is a one-way webhook fire,
-// nothing reads a response back into the script), so these are the ways
-// this indicator can be genuinely "market aware" on its own. Deeper
-// judgment from Polaris's actual Claude brain happens downstream instead,
-// in index.html, once an alert reaches the dashboard.
+// market is chopping, below the ADX threshold), and an optional session
+// filter (useSessionFilter -- no new setups outside the Asia/London/NY AM/
+// NY PM killzones once enabled). Volume is deliberately NOT a gate -- it
+// only ever informs the confidence score (see setupConfidence below), so
+// every setup still fires and you can judge its volume strength yourself.
+// Pine has no access to real bid/ask or DOM data -- the volume figure used
+// there is bar volume vs its own recent average, not true order flow, but
+// it's the closest proxy available. Pine indicators also cannot call an
+// LLM/API in real time (no such capability exists in the sandbox --
+// alert() is a one-way webhook fire, nothing reads a response back into
+// the script), so these are the ways this indicator can be genuinely
+// "market aware" on its own. Deeper judgment from Polaris's actual Claude
+// brain happens downstream instead, in index.html, once an alert reaches
+// the dashboard.
 //
 // Two kinds of webhook payloads go out, discriminated by a "kind" field the
 // Cloud Function branches on: "setup" (buildAlertMessage) fires once, on a
@@ -133,10 +134,9 @@ grpScore = "Scorecard"
 showScorecard = input.bool(true, "Track win rate on the HUD", group=grpScore)
 maxPending    = input.int(50, "Max pending signals tracked at once", minval=5, maxval=200, group=grpScore)
 
-grpVolume = "Volume Confirmation"
-useVolumeConfirm = input.bool(true, "Require above-average volume on sweeps + CISD", group=grpVolume)
-volAvgLen  = input.int(20, "Volume average length", minval=5, group=grpVolume)
-minVolMult = input.float(1.2, "Min volume required (x average)", minval=1.0, step=0.1, group=grpVolume)
+grpVolume = "Volume"
+useVolumeConfirm = input.bool(true, "Factor volume strength into confidence score (never blocks a signal)", group=grpVolume)
+volAvgLen = input.int(20, "Volume average length", minval=5, group=grpVolume)
 
 // ---------- types ----------
 type Swing
@@ -319,19 +319,24 @@ string htfBias = htfClose > htfEma ? "bull" : htfClose < htfEma ? "bear" : na
 bool regimeOk = not useRegimeFilter or adxVal >= adxThreshold
 
 // order flow proxy -- Pine has no access to real bid/ask or DOM data, so
-// this is bar volume vs its own recent average, not true order flow. Used
-// to require the sweep candle and the CISD confirmation candle to each
-// show real participation, not just a technical price flip on light volume.
+// this is bar volume vs its own recent average, not true order flow.
+// Informational only: folded into the confidence score below and shown on
+// the HUD, but never blocks a sweep or CISD from firing.
 avgVolume = ta.sma(volume, volAvgLen)
-bool volOk = not useVolumeConfirm or volume >= avgVolume * minVolMult
+float volRatio = avgVolume > 0 ? volume / avgVolume : na
 
-// heuristic only, not predictive -- bigger FVG relative to recent volatility
-// scores higher, clamped to [30, 95]
-fvgConfidence(float fvgLo, float fvgHi, float atr) =>
+// heuristic only, not predictive -- blends two 30-95 sub-scores: bigger FVG
+// relative to recent volatility, and (if useVolumeConfirm) stronger volume
+// relative to its own recent average. Volume never blocks a signal from
+// firing -- this is the only place it factors in, as one ingredient in the
+// confidence number, not a gate.
+setupConfidence(float fvgLo, float fvgHi, float atr, float volRatioNow) =>
     float size = fvgHi - fvgLo
-    float ratio = atr > 0 ? size / atr : 0
-    int conf = math.round(math.min(95, 40 + ratio * 40))
-    math.max(conf, 30)
+    float sizeRatio = atr > 0 ? size / atr : 0
+    int sizeScore = math.round(math.max(30, math.min(95, 40 + sizeRatio * 40)))
+    float vr = na(volRatioNow) ? 1.0 : volRatioNow
+    int volScore = math.round(math.max(30, math.min(95, 40 + vr * 30)))
+    useVolumeConfirm and not na(volRatioNow) ? math.round((sizeScore + volScore) / 2) : sizeScore
 
 // finds the nearest untested liquidity pool beyond entryP in the trade's
 // direction -- the actual "draw of liquidity" price is likely reaching for,
@@ -615,11 +620,10 @@ if barstate.isconfirmed
     string prevPhase = seqPhase  // snapshot before this bar's transitions, for the status ping below
     if na(seqDir)
         // look for a swept high (bearish setup) -- best (highest) prior swing that got wicked through and closed back under.
-        // Skipped while structureBias or HTF bias is bullish, the market isn't trending,
-        // (if useSessionFilter) price is outside every killzone, or (if useVolumeConfirm)
-        // the sweep candle's volume doesn't back it -- no short setups until structure
-        // actually breaks bearish.
-        bool bearAllowed = structureBias != "bull" and (not useHtfBias or htfBias != "bull") and regimeOk and (not useSessionFilter or inAnyKillzone) and volOk
+        // Skipped while structureBias or HTF bias is bullish, the market isn't trending, or
+        // (if useSessionFilter) price is outside every killzone -- no short setups until
+        // structure actually breaks bearish. Volume is never a gate here, only a confidence input.
+        bool bearAllowed = structureBias != "bull" and (not useHtfBias or htfBias != "bull") and regimeOk and (not useSessionFilter or inAnyKillzone)
         float bestHigh = na
         if bearAllowed and array.size(swingHighs) > 0
             for i = 0 to array.size(swingHighs) - 1
@@ -639,11 +643,10 @@ if barstate.isconfirmed
             if showVisuals
                 label.new(bar_index, high, "⚡ SWEEP", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
 
-        // Skipped while structureBias or HTF bias is bearish, the market isn't trending,
-        // (if useSessionFilter) price is outside every killzone, or (if useVolumeConfirm)
-        // the sweep candle's volume doesn't back it -- no long setups until structure
-        // actually breaks bullish.
-        bool bullAllowed = structureBias != "bear" and (not useHtfBias or htfBias != "bear") and regimeOk and (not useSessionFilter or inAnyKillzone) and volOk
+        // Skipped while structureBias or HTF bias is bearish, the market isn't trending, or
+        // (if useSessionFilter) price is outside every killzone -- no long setups until
+        // structure actually breaks bullish. Volume is never a gate here, only a confidence input.
+        bool bullAllowed = structureBias != "bear" and (not useHtfBias or htfBias != "bear") and regimeOk and (not useSessionFilter or inAnyKillzone)
         if na(seqDir) and bullAllowed and array.size(swingLows) > 0
             float bestLow = na
             for i = 0 to array.size(swingLows) - 1
@@ -671,7 +674,7 @@ if barstate.isconfirmed
                 if close > seqLevel
                     seqDir := na
                     seqPhase := na
-                else if close < seqCisdTarget and volOk
+                else if close < seqCisdTarget
                     int barsSince = bar_index - seqSweepBar
                     bool found = false
                     float fLo = na
@@ -703,7 +706,7 @@ if barstate.isconfirmed
                         seqPhase := na
                     else if high >= seqFvgLo
                         if close < seqFvgLo
-                            int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
+                            int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
                             float entryP = close
                             float stopP = seqSweepExtreme + stopBufferPts
                             float targetP = computeTarget("bear", entryP, stopP)
@@ -742,7 +745,7 @@ if barstate.isconfirmed
                     seqDir := na
                     seqPhase := na
                 else if close < seqFvgLo
-                    int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
+                    int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
                     float entryP = close
                     float stopP = seqSweepExtreme + stopBufferPts
                     float targetP = computeTarget("bear", entryP, stopP)
@@ -779,7 +782,7 @@ if barstate.isconfirmed
                 if close < seqLevel
                     seqDir := na
                     seqPhase := na
-                else if close > seqCisdTarget and volOk
+                else if close > seqCisdTarget
                     int barsSince = bar_index - seqSweepBar
                     bool found = false
                     float fLo = na
@@ -811,7 +814,7 @@ if barstate.isconfirmed
                         seqPhase := na
                     else if low <= seqFvgHi
                         if close > seqFvgHi
-                            int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
+                            int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
                             float entryP = close
                             float stopP = seqSweepExtreme - stopBufferPts
                             float targetP = computeTarget("bull", entryP, stopP)
@@ -850,7 +853,7 @@ if barstate.isconfirmed
                     seqDir := na
                     seqPhase := na
                 else if close > seqFvgHi
-                    int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
+                    int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
                     float entryP = close
                     float stopP = seqSweepExtreme - stopBufferPts
                     float targetP = computeTarget("bull", entryP, stopP)
@@ -916,9 +919,8 @@ if showHud and barstate.islast
     table.cell(hud, 0, 6, "SESSION", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
     table.cell(hud, 1, 6, sessionTxt, text_color=sessionName == "--" ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
     if useVolumeConfirm
-        float volRatio = avgVolume > 0 ? volume / avgVolume : na
         table.cell(hud, 0, 7, "VOL", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(hud, 1, 7, na(volRatio) ? "--" : str.tostring(volRatio, "#.##") + "x avg", text_color=volOk ? #2FE08A : #6E93AD, text_size=size.small, text_halign=text.align_right)
+        table.cell(hud, 1, 7, na(volRatio) ? "--" : str.tostring(volRatio, "#.##") + "x avg", text_color=na(volRatio) ? #6E93AD : (volRatio >= 1.2 ? #2FE08A : #DDF3FF), text_size=size.small, text_halign=text.align_right)
     if showScorecard
         int totalResolved = scoreWins + scoreLosses
         string scoreTxt = totalResolved > 0 ? str.tostring(math.round(scoreWins / totalResolved * 100)) + "% (" + str.tostring(scoreWins) + "/" + str.tostring(totalResolved) + ")" : "-- (0/0)"
