@@ -332,6 +332,49 @@ app can't receive them — hence the exception to "no server logic" above). It d
   `minSeqFvgSizeAtr` low/zero) so this phase doesn't quietly starve signal flow — they have to be
   turned up deliberately to actually tighten things.
 
+  **V2 Phase 3** filled in the last declared-but-inert pieces from Phase 1. `detectReversal(dir)`
+  now fires on the single most recent swing (index 0), wicked through and closed back on the other
+  side, WITHOUT requiring it to be pool-eligible the way `detectSweep()` does — this is the actual
+  coverage-gap fix, since sweep only ever fires on liquidity pools. `detectContinuation(dir)` fires
+  on a fresh displacement candle (reusing the existing `isDisplacement` check, moved earlier in the
+  file so these functions can see it) in the direction `structureBias` already agrees with — a
+  with-trend pullback trigger, unlike sweep/reversal which require structure to actually break.
+  `detectBreakout(dir)` fires on a displacement candle closing decisively beyond the widest tracked
+  swing on that side. All three reuse `cisdTargetBear()`/`cisdTargetBull()` as-is (generic
+  "find where the last opposite-colored run started" helpers, never sweep-specific) and return the
+  same `[found, level, extreme, cisdTarget]` shape `detectSweep()` always did — the main scan block
+  now tries all four triggers in order (sweep → reversal → continuation → breakout) per direction,
+  each independently gated by its `allowX` toggle, so with only `allowSweep` on by default nothing
+  changes until the others are opted in. Whichever detector actually fires is tracked in a new
+  `seqTriggerType` global and mapped to a real webhook `setupType` by `setupTypeForTrigger()` —
+  sweep → `LIQUIDITY_SWEEP_*`, reversal → `CHoCH_*`, continuation/breakout → `BOS_*` (no separate
+  breakout slot in `functions/index.js`'s `VALID_SETUP_TYPES`, so it shares BOS with continuation) —
+  finally giving those setup-type codes real meaning instead of every alert always reporting
+  `CHoCH_*` regardless of what triggered it. These three are the author's own reasonable-but-
+  invented interpretation of the ICT concepts, not something ported from the original JS model the
+  way sweep is — worth treating with more scrutiny via the scorecard before trusting.
+
+  New `grpSMT` group adds SMT (Smart Money Technique) divergence: `smtPh`/`smtPl` pull pivot
+  highs/lows from a correlated symbol (`smtSymbol`, default the E-mini S&P) via `request.security`
+  at the identical pivot cadence as the indicator's own `ph`/`pl`, so a confirmed pivot on one lines
+  up bar-for-bar with a confirmed pivot on the other — no separate swing-tracking state needed for
+  the second symbol. Bearish divergence (`smtBearDiv`) is set the moment our own price makes a
+  higher high that the correlated symbol fails to confirm; bullish (`smtBullDiv`) mirrors it at
+  lows. Captured once, at whichever trigger starts a sequence (`seqSmtAligned`), not re-read later,
+  so a fast-moving correlated symbol can't retroactively change a reading mid-sequence.
+  `setupConfidence()` now averages whichever sub-scores are active — FVG size (always), volume (if
+  `useVolumeConfirm`), SMT alignment (if `useSmtConfluence`, both default on) — instead of the old
+  fixed two-score blend; informational only, exactly like volume, never a gate.
+
+  `showTradePlan` is now actually independent of `showVisuals` (previously declared but wired to
+  just mirror it) — `showVisuals` still controls the sweep/CISD-in-progress markup (the "⚡ SWEEP"
+  label family and the tracked level line), `showTradePlan` now separately controls the completed
+  entry/stop/target trade-plan markup. `showTpLadder` draws two extra dotted lines, TP1/TP2, at
+  50%/75% of the distance from entry to the final target — purely visual, computed inside
+  `buildTradePlanDrawings()` and cleaned up by the same `clearTradePlanDrawings()` as everything
+  else; the webhook payload, scorecard, and `targetP` itself are untouched and still resolve
+  against the one real target regardless of whether the ladder is shown.
+
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
 with `onSnapshot` (`tvAlerts`/`tvAlertsStatus` state, `firestoreDbRef`), rendering each alert as a

@@ -74,22 +74,25 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // the current rule set the moment you paste this in, not something you
 // have to wait days to accumulate.
 //
-// V2 rework so far: the sweep-only entry trigger sits behind
-// detectSweep()/shouldFireSetup() instead of inline bearAllowed/
-// bullAllowed booleans. detectReversal()/detectContinuation()/
-// detectBreakout() are still stubs (always report nothing found) -- new
-// entry triggers beyond a liquidity sweep are the one piece of the
-// original 5-problem list not yet started.
-//
-// The other four problems are now live, not just declared:
+// V2 rework: all five original problems are now addressed, though not all
+// equally battle-tested -- see the note at the very end of this block.
 //   1. Signal contradiction -- useContradictionFilter/minBarsAfterSetup
 //      block a new setup within minBarsAfterSetup of the last one that
 //      actually fired in the opposite direction (lastSetupDir/
-//      lastSetupBar), checked in shouldFireSetup(). Off is impossible;
-//      only useContradictionFilter=false disables it.
-//   2. Coverage gaps -- unchanged this pass (see detect* stubs above);
-//      allowSweep/allowReversal/allowContinuation/allowBreakout already
-//      gate per-type in shouldFireSetup() for whenever they're real.
+//      lastSetupBar), checked in shouldFireSetup(). Only
+//      useContradictionFilter=false disables it.
+//   2. Coverage gaps -- detectReversal() (any swing break, not just a
+//      pool-eligible one), detectContinuation() (a with-trend pullback on
+//      a fresh displacement candle while structureBias already agrees),
+//      and detectBreakout() (a displacement close beyond the widest
+//      tracked swing on that side) are real now, tried in that order after
+//      detectSweep() on every bar with no active sequence. Each is
+//      independently gated by allowSweep/allowReversal/allowContinuation/
+//      allowBreakout -- only allowSweep defaults on, so nothing changes
+//      until you opt the others in. Whichever detector actually triggers
+//      is reported as the webhook's setupType via setupTypeForTrigger()
+//      (sweep -> LIQUIDITY_SWEEP_*, reversal -> CHoCH_*, continuation and
+//      breakout -> BOS_*, reusing functions/index.js's existing allow-list).
 //   3. Fragile stop -- useWickTolerance/wickToleranceAtr widen the stop
 //      beyond the sweep's actual wick by an ATR-scaled buffer, at all 4
 //      completion sites. This widens where the stop SITS; it does not
@@ -98,8 +101,14 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 //   4. Generic TP fallback -- unchanged from the earlier liquidity-pool
 //      targeting pass (computeTarget()/findLiquidityTarget()); still
 //      reports targetSource so the dashboard can explain which it used.
-//   5. No visual guidance -- solved in an earlier pass (buildTradePlanDrawings).
-// Plus two general signal-quality floors, also now live: raiseAdxThreshold/
+//   5. No visual guidance -- solved in an earlier pass (buildTradePlanDrawings);
+//      showTradePlan now independently controls it (used to just mirror
+//      showVisuals, which still separately controls the sweep/CISD-in-
+//      progress markup), and showTpLadder optionally adds TP1/TP2 lines at
+//      50%/75% of the distance to the final target -- purely visual, the
+//      webhook payload/scorecard/target still resolve against the one real
+//      target regardless.
+// Plus two general signal-quality floors, also live: raiseAdxThreshold/
 // raisedAdxThreshold (stricter ADX minimum), useVolFloor/volFloorMult (min
 // volume ratio), minBarRangeAtr (reject a dead/illiquid confirmation bar),
 // and minSeqFvgSizeAtr (reject a too-small confirming FVG) -- all checked
@@ -110,6 +119,16 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // minSeqFvgSizeAtr low/zero) so this pass doesn't quietly starve you of
 // signals -- turn them up deliberately to actually tighten things.
 //
+// SMT divergence (grpSMT): pulls pivot highs/lows from a correlated symbol
+// (smtSymbol, default the E-mini S&P) at the identical pivot cadence, so a
+// confirmed pivot here lines up bar-for-bar with one there -- no separate
+// swing-tracking state needed for the other symbol. Bearish divergence =
+// we make a higher high the correlated symbol doesn't confirm; bullish is
+// the mirror at lows. Captured once, at sweep/reversal/continuation/
+// breakout trigger time (seqSmtAligned), and blended into setupConfidence()
+// alongside FVG size and volume -- informational only, like volume, never a
+// gate.
+//
 // Dashboard integration additions: buildAlertMessage() also reports
 // "targetSource" ("pool" if computeTarget() found a real untested liquidity
 // pool, "fallback" if it fell back to the R-multiple projection instead) --
@@ -117,6 +136,15 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // sits where it does. buildStatusMessage() also carries the live
 // scoreWins/scoreLosses tally on every ping, so the dashboard's win-rate
 // reading stays current without waiting for the next full setup to fire.
+//
+// A note on the new entry triggers: reversal/continuation/breakout are
+// real, working implementations, but -- unlike detectSweep(), which mirrors
+// the original JS model this whole indicator was ported from -- they're
+// this author's own reasonable-but-invented interpretation of those ICT
+// concepts, not something battle-tested against the original model. They
+// default OFF (allowReversal/allowContinuation/allowBreakout) specifically
+// so turning each on is a deliberate choice, and the scorecard will tell
+// you fairly quickly whether a given one is actually pulling its weight.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -214,11 +242,15 @@ grpSL = "Wick-Tolerant Stops"
 useWickTolerance  = input.bool(true, "Widen the stop beyond the sweep wick so a single spike can't take it out", group=grpSL)
 wickToleranceAtr  = input.float(0.25, "Extra stop buffer beyond the sweep's wick, x ATR", minval=0, step=0.05, group=grpSL)
 
-grpVisualsV2 = "Trade Plan Visuals (Phase 2+ additions)"
-showTradePlan  = input.bool(true, "Show entry/stop/target trade-plan markup (currently mirrors 'Show sweep/CISD/trade-plan markup' above; will become independent once TP-ladder support lands)", group=grpVisualsV2)
+grpVisualsV2 = "Trade Plan Visuals"
+showTradePlan  = input.bool(true, "Show entry/stop/target trade-plan markup (independent of the sweep/CISD markup toggle above)", group=grpVisualsV2)
 lineExtension  = input.int(15, "Trade-plan line length (bars)", minval=1, maxval=60, group=grpVisualsV2)
-showTpLadder   = input.bool(false, "Show a multi-target TP ladder instead of a single target (not yet implemented)", group=grpVisualsV2)
+showTpLadder   = input.bool(false, "Also draw TP1/TP2 lines at 50%/75% of the distance to the final target", group=grpVisualsV2)
 showConfidence = input.bool(true, "Show the confidence % on the setup label", group=grpVisualsV2)
+
+grpSMT = "SMT Divergence"
+useSmtConfluence = input.bool(true, "Factor SMT divergence into confidence score (never blocks a signal)", group=grpSMT)
+smtSymbol        = input.symbol("CME_MINI:ES1!", "Correlated symbol to compare swing points against", group=grpSMT)
 
 // ---------- types ----------
 type Swing
@@ -245,6 +277,8 @@ var bool   seqHasFvg     = false
 var float  seqFvgLo      = na
 var float  seqFvgHi      = na
 var float  seqSweepExtreme = na  // actual high/low the sweep candle reached -- the real "protected" level, stop lives beyond this, not just beyond the old swing price
+var bool   seqSmtAligned = false  // SMT reading captured at sweep time, not re-read later -- see setupConfidence()
+var string seqTriggerType = na    // "sweep" | "reversal" | "continuation" | "breakout" -- which detector actually started this sequence, mapped to a webhook setupType at completion
 
 // last setup that actually fired a webhook (not just completed the
 // sequence) -- what useContradictionFilter checks against, so a quiet
@@ -253,13 +287,27 @@ var float  seqSweepExtreme = na  // actual high/low the sweep candle reached -- 
 var string lastSetupDir = na   // "bull" | "bear"
 var int    lastSetupBar = na
 
+// SMT divergence tracking -- smtPrevHigh/smtPrevLow remember the correlated
+// symbol's own last confirmed pivot so the next one can be compared against
+// it; smtBearDiv/smtBullDiv are set the moment our own swing confirms (see
+// the swing-detection block below) and read once, at whichever completion
+// site fires next, by setupConfidence().
+var float smtPrevHigh = na
+var float smtPrevLow  = na
+var bool  smtBearDiv  = false
+var bool  smtBullDiv  = false
+
 // ---------- persistent state: trade-plan markup (single most recent completed setup) ----------
 var line  tpEntryLine = na
 var line  tpStopLine  = na
 var line  tpTargetLine = na
+var line  tp1Line     = na  // TP-ladder lines (showTpLadder) -- na/unused unless the toggle is on
+var line  tp2Line     = na
 var label tpEntryLbl  = na
 var label tpStopLbl   = na
 var label tpTargetLbl = na
+var label tp1Lbl      = na
+var label tp2Lbl      = na
 var label tpSetupLbl  = na
 var string tpDir      = na   // "bull" | "bear" -- direction of the tracked plan
 var float  tpStop     = na
@@ -310,6 +358,13 @@ var int    countNyPm      = 0
 ph = ta.pivothigh(swingStrength, swingStrength)
 pl = ta.pivotlow(swingStrength, swingStrength)
 
+// SMT divergence source: pulled from a correlated symbol at the identical
+// pivot cadence (same swingStrength, same timeframe), so a confirmed pivot
+// here lines up bar-for-bar with a confirmed pivot there -- no separate
+// swing-tracking state needed for the other symbol.
+smtPh = request.security(smtSymbol, timeframe.period, ta.pivothigh(swingStrength, swingStrength))
+smtPl = request.security(smtSymbol, timeframe.period, ta.pivotlow(swingStrength, swingStrength))
+
 if not na(ph)
     int newHighIdx = bar_index - swingStrength
     // pool-matching runs unconditionally (it decides which swings are sweep-eligible
@@ -330,8 +385,12 @@ if not na(ph)
         Swing prevHigh = array.get(swingHighs, 0)
         if ph > prevHigh.price
             structureBias := "bull"
+            // bearish SMT: we made a higher high, the correlated symbol didn't
+            smtBearDiv := not na(smtPh) and not na(smtPrevHigh) and smtPh <= smtPrevHigh
         else if ph < prevHigh.price
             structureBias := "bear"
+    if not na(smtPh)
+        smtPrevHigh := smtPh
     array.unshift(swingHighs, Swing.new(newHighIdx, ph, poolMatch))
     if array.size(swingHighs) > maxSwings
         array.pop(swingHighs)
@@ -354,8 +413,12 @@ if not na(pl)
         Swing prevLow = array.get(swingLows, 0)
         if pl < prevLow.price
             structureBias := "bear"
+            // bullish SMT: we made a lower low, the correlated symbol didn't
+            smtBullDiv := not na(smtPl) and not na(smtPrevLow) and smtPl >= smtPrevLow
         else if pl > prevLow.price
             structureBias := "bull"
+    if not na(smtPl)
+        smtPrevLow := smtPl
     array.unshift(swingLows, Swing.new(newLowIdx, pl, poolMatchLow))
     if array.size(swingLows) > maxSwings
         array.pop(swingLows)
@@ -407,6 +470,12 @@ string htfBias = htfClose > htfEma ? "bull" : htfClose < htfEma ? "bear" : na
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
 bool regimeOk = not useRegimeFilter or adxVal >= adxThreshold
 
+// declared here (not down by the order-block section it was originally
+// written for) because detectContinuation()/detectBreakout() below also
+// need it, and Pine requires an identifier declared above the code that
+// reads it -- same lesson as the killzone-block move earlier in this file.
+bool isDisplacement = math.abs(close - open) > atrVal * dispMult
+
 // order flow proxy -- Pine has no access to real bid/ask or DOM data, so
 // this is bar volume vs its own recent average, not true order flow.
 // Informational only: folded into the confidence score below and shown on
@@ -414,18 +483,29 @@ bool regimeOk = not useRegimeFilter or adxVal >= adxThreshold
 avgVolume = ta.sma(volume, volAvgLen)
 float volRatio = avgVolume > 0 ? volume / avgVolume : na
 
-// heuristic only, not predictive -- blends two 30-95 sub-scores: bigger FVG
-// relative to recent volatility, and (if useVolumeConfirm) stronger volume
-// relative to its own recent average. Volume never blocks a signal from
-// firing -- this is the only place it factors in, as one ingredient in the
-// confidence number, not a gate.
-setupConfidence(float fvgLo, float fvgHi, float atr, float volRatioNow) =>
+// heuristic only, not predictive -- averages whichever 30-95 sub-scores are
+// currently enabled: FVG size relative to recent volatility (always in),
+// volume strength relative to its own recent average (if useVolumeConfirm),
+// and SMT divergence agreement (if useSmtConfluence, using the reading
+// captured at sweep time -- see seqSmtAligned). None of these ever block a
+// signal from firing; they're only ever ingredients in the confidence
+// number, not gates.
+setupConfidence(float fvgLo, float fvgHi, float atr, float volRatioNow, bool smtAligned) =>
     float size = fvgHi - fvgLo
     float sizeRatio = atr > 0 ? size / atr : 0
     int sizeScore = math.round(math.max(30, math.min(95, 40 + sizeRatio * 40)))
     float vr = na(volRatioNow) ? 1.0 : volRatioNow
     int volScore = math.round(math.max(30, math.min(95, 40 + vr * 30)))
-    useVolumeConfirm and not na(volRatioNow) ? math.round((sizeScore + volScore) / 2) : sizeScore
+    int smtScore = smtAligned ? 90 : 60
+    float sum = sizeScore
+    float cnt = 1.0
+    if useVolumeConfirm and not na(volRatioNow)
+        sum := sum + volScore
+        cnt := cnt + 1
+    if useSmtConfluence
+        sum := sum + smtScore
+        cnt := cnt + 1
+    math.round(sum / cnt)
 
 // finds the nearest untested liquidity pool beyond entryP in the trade's
 // direction -- the actual "draw of liquidity" price is likely reaching for,
@@ -516,17 +596,94 @@ detectSweep(string dir) =>
             cisdTarget := cisdTargetBull()
     [found, level, extreme, cisdTarget]
 
-// Stubs for Phase 2+ -- always report "nothing found" so wiring a real one
-// in later is a one-function swap, not a scan-loop rewrite. Same return
-// shape as detectSweep() on purpose.
+// detectReversal(dir) -- a broader change-of-character trigger than
+// detectSweep(): the single most recent swing (index 0), wicked through and
+// closed back on the other side, WITHOUT requiring it to be a pool-eligible
+// (equal-high/low) swing the way a sweep does. This is the actual coverage-
+// gap fix -- sweep only fires on liquidity pools; reversal fires on any
+// significant swing break. allowReversal defaults off, so this changes
+// nothing until you opt in.
 detectReversal(string dir) =>
-    [false, float(na), float(na), float(na)]
+    bool found = false
+    float level = na
+    float extreme = na
+    float cisdTarget = na
+    if dir == "bear" and array.size(swingHighs) > 0
+        Swing s = array.get(swingHighs, 0)
+        if high > s.price and close < s.price
+            found := true
+            level := s.price
+            extreme := high
+            cisdTarget := cisdTargetBear()
+    else if dir == "bull" and array.size(swingLows) > 0
+        Swing s = array.get(swingLows, 0)
+        if low < s.price and close > s.price
+            found := true
+            level := s.price
+            extreme := low
+            cisdTarget := cisdTargetBull()
+    [found, level, extreme, cisdTarget]
 
+// detectContinuation(dir) -- a with-the-trend pullback trigger: fires when
+// structureBias already agrees with dir (the trend is established, unlike
+// sweep/reversal which require structure to actually break) and this bar is
+// a fresh displacement candle in that same direction. level = this bar's
+// own open (the near edge that must hold, mirroring how an order block's
+// base is defined elsewhere in this script); extreme = this bar's opposite
+// wick (the stop basis). Reuses cisdTargetBear/Bull() as-is -- it's a
+// generic "find where the last opposite-colored run started" helper, not
+// intrinsically tied to sweeps.
 detectContinuation(string dir) =>
-    [false, float(na), float(na), float(na)]
+    bool found = false
+    float level = na
+    float extreme = na
+    float cisdTarget = na
+    if dir == "bear" and structureBias == "bear" and isDisplacement and close < open
+        found := true
+        level := open
+        extreme := high
+        cisdTarget := cisdTargetBear()
+    else if dir == "bull" and structureBias == "bull" and isDisplacement and close > open
+        found := true
+        level := open
+        extreme := low
+        cisdTarget := cisdTargetBull()
+    [found, level, extreme, cisdTarget]
 
+// detectBreakout(dir) -- fires when a displacement candle closes decisively
+// beyond the widest tracked swing on that side (the edge of the current
+// range), i.e. genuine continuation through resistance/support rather than
+// a sweep-and-reverse. level = that widest swing (support/resistance once
+// broken -- closing back across it invalidates the sequence, same as every
+// other entry trigger); extreme = this bar's opposite wick.
 detectBreakout(string dir) =>
-    [false, float(na), float(na), float(na)]
+    bool found = false
+    float level = na
+    float extreme = na
+    float cisdTarget = na
+    if dir == "bull" and array.size(swingHighs) > 0 and isDisplacement and close > open
+        float widestHigh = na
+        for i = 0 to array.size(swingHighs) - 1
+            Swing s = array.get(swingHighs, i)
+            if na(widestHigh) or s.price > widestHigh
+                widestHigh := s.price
+        if not na(widestHigh) and close > widestHigh
+            found := true
+            level := widestHigh
+            extreme := low
+            cisdTarget := cisdTargetBull()
+    else if dir == "bear" and array.size(swingLows) > 0 and isDisplacement and close < open
+        float widestLow = na
+        for i = 0 to array.size(swingLows) - 1
+            Swing s = array.get(swingLows, i)
+            if na(widestLow) or s.price < widestLow
+                widestLow := s.price
+        if not na(widestLow) and close < widestLow
+            found := true
+            level := widestLow
+            extreme := high
+            cisdTarget := cisdTargetBear()
+    [found, level, extreme, cisdTarget]
 
 // shouldFireSetup(setupType, dir) -- the master gate every candidate signal
 // passes through before a detector even runs. Per-type on/off toggle, the
@@ -548,6 +705,22 @@ shouldFireSetup(string setupType, string dir) =>
     bool rangeOk = minBarRangeAtr <= 0 or (high - low) >= minBarRangeAtr * atrVal
     bool contradictionOk = not useContradictionFilter or na(lastSetupDir) or lastSetupDir == dir or (bar_index - lastSetupBar) >= minBarsAfterSetup
     typeAllowed and biasOk and htfOk and regimeOk and sessionOk and adxOk and volFloorOk and rangeOk and contradictionOk
+
+// maps seqTriggerType + direction to one of the setupType strings
+// functions/index.js's VALID_SETUP_TYPES already accepts and index.html's
+// setupTypeLabel() already translates to plain English -- both were built
+// ahead of this wiring, back when every completed sequence just reported
+// "CHoCH_DOWN"/"CHoCH_UP" regardless of what actually triggered it. Sweep
+// keeps the literal liquidity-sweep label; reversal keeps CHoCH (a change
+// of character on a non-pool swing is still a change of character);
+// continuation and breakout both map to BOS -- a genuine break of
+// structure either way, and VALID_SETUP_TYPES has no separate "breakout"
+// slot to add without also touching the Cloud Function's allow-list.
+setupTypeForTrigger(string trigger, string dir) =>
+    bool isDown = dir == "bear"
+    trigger == "sweep" ? (isDown ? "LIQUIDITY_SWEEP_SELL" : "LIQUIDITY_SWEEP_BUY") :
+     trigger == "reversal" ? (isDown ? "CHoCH_DOWN" : "CHoCH_UP") :
+     (isDown ? "BOS_DOWN" : "BOS_UP")
 
 // ---------- webhook payload builders ----------
 // "kind" discriminates the two payload shapes this script ever sends -- the
@@ -600,15 +773,23 @@ clearTradePlanDrawings() =>
     deleteLineIfExists(tpEntryLine)
     deleteLineIfExists(tpStopLine)
     deleteLineIfExists(tpTargetLine)
+    deleteLineIfExists(tp1Line)
+    deleteLineIfExists(tp2Line)
     deleteLabelIfExists(tpEntryLbl)
     deleteLabelIfExists(tpStopLbl)
     deleteLabelIfExists(tpTargetLbl)
+    deleteLabelIfExists(tp1Lbl)
+    deleteLabelIfExists(tp2Lbl)
     deleteLabelIfExists(tpSetupLbl)
 
 // builds the entry/stop/target trade-plan drawings for a just-completed
 // setup and returns their handles -- the call site is responsible for
 // clearing the previously-tracked plan first and assigning these into the
-// tp* globals (a plain function can't do either of those itself).
+// tp* globals (a plain function can't do either of those itself). When
+// showTpLadder is on, also draws TP1/TP2 at 50%/75% of the distance from
+// entry to the final target -- visual only, doesn't touch the webhook
+// payload, scorecard, or targetP itself, which all still resolve against
+// the one real target.
 buildTradePlanDrawings(string dir, float entryP, float stopP, float targetP, int conf) =>
     string confText = showConfidence ? "\n" + str.tostring(conf) + "%" : ""
     string setupText = dir == "bull" ? "▲ LONG SETUP" + confText : "▼ SHORT SETUP" + confText
@@ -621,11 +802,15 @@ buildTradePlanDrawings(string dir, float entryP, float stopP, float targetP, int
     label entryLbl = label.new(lineEnd, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
     label stopLbl = label.new(lineEnd, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
     label targetLbl = label.new(lineEnd, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
-    [setupLbl, entryLine, stopLine, targetLine, entryLbl, stopLbl, targetLbl]
+    float tp1Price = entryP + (targetP - entryP) * 0.5
+    float tp2Price = entryP + (targetP - entryP) * 0.75
+    line newTp1Line = showTpLadder ? line.new(bar_index, tp1Price, lineEnd, tp1Price, color=color.new(#2FE08A, 60), style=line.style_dotted, width=1) : line(na)
+    line newTp2Line = showTpLadder ? line.new(bar_index, tp2Price, lineEnd, tp2Price, color=color.new(#2FE08A, 40), style=line.style_dotted, width=1) : line(na)
+    label newTp1Lbl = showTpLadder ? label.new(lineEnd, tp1Price, "TP1 " + str.tostring(tp1Price, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=color.new(#2FE08A, 40), size=size.small) : label(na)
+    label newTp2Lbl = showTpLadder ? label.new(lineEnd, tp2Price, "TP2 " + str.tostring(tp2Price, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=color.new(#2FE08A, 20), size=size.small) : label(na)
+    [setupLbl, entryLine, stopLine, targetLine, entryLbl, stopLbl, targetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl]
 
 // ---------- order blocks (last opposing candle before a displacement move) ----------
-bool isDisplacement = math.abs(close - open) > atrVal * dispMult
-
 if showOB and barstate.isconfirmed and isDisplacement
     if close > open and (not obBiasFilter or structureBias != "bear")
         int k = 1
@@ -799,11 +984,13 @@ if barstate.isconfirmed
     string prevPhase = seqPhase  // snapshot before this bar's transitions, for the status ping below
     if na(seqDir)
         // Entry triggers, checked in order -- first one to actually find
-        // something starts the sequence. Phase 1: sweep is the only real
-        // detector, so this reduces to the exact same search as before,
-        // just behind shouldFireSetup() instead of an inline bearAllowed
-        // check. Phase 2+ adds reversal/continuation/breakout to this same
-        // list once their detect*() functions are real.
+        // something starts the sequence. Each is independently gated by
+        // shouldFireSetup(type, dir) (which includes the per-type
+        // allowSweep/allowReversal/allowContinuation/allowBreakout toggle),
+        // so with only allowSweep on by default this reduces to exactly the
+        // old sweep-only behavior. seqSmtAligned captures this sequence's
+        // SMT reading once, at trigger time, for setupConfidence() to use
+        // later regardless of how many bars pass before it actually fires.
         if shouldFireSetup("sweep", "bear")
             [found, level, extreme, cisdTarget] = detectSweep("bear")
             if found
@@ -814,8 +1001,55 @@ if barstate.isconfirmed
                 seqCisdTarget := cisdTarget
                 seqSweepBar := bar_index
                 seqHasFvg := false
+                seqSmtAligned := smtBearDiv
+                seqTriggerType := "sweep"
                 if showVisuals
                     label.new(bar_index, high, "⚡ SWEEP", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
+
+        if na(seqDir) and shouldFireSetup("reversal", "bear")
+            [found, level, extreme, cisdTarget] = detectReversal("bear")
+            if found
+                seqDir := "bear"
+                seqPhase := "sweep"
+                seqLevel := level
+                seqSweepExtreme := extreme
+                seqCisdTarget := cisdTarget
+                seqSweepBar := bar_index
+                seqHasFvg := false
+                seqSmtAligned := smtBearDiv
+                seqTriggerType := "reversal"
+                if showVisuals
+                    label.new(bar_index, high, "⚡ REVERSAL", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
+
+        if na(seqDir) and shouldFireSetup("continuation", "bear")
+            [found, level, extreme, cisdTarget] = detectContinuation("bear")
+            if found
+                seqDir := "bear"
+                seqPhase := "sweep"
+                seqLevel := level
+                seqSweepExtreme := extreme
+                seqCisdTarget := cisdTarget
+                seqSweepBar := bar_index
+                seqHasFvg := false
+                seqSmtAligned := smtBearDiv
+                seqTriggerType := "continuation"
+                if showVisuals
+                    label.new(bar_index, high, "⚡ CONTINUATION", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
+
+        if na(seqDir) and shouldFireSetup("breakout", "bear")
+            [found, level, extreme, cisdTarget] = detectBreakout("bear")
+            if found
+                seqDir := "bear"
+                seqPhase := "sweep"
+                seqLevel := level
+                seqSweepExtreme := extreme
+                seqCisdTarget := cisdTarget
+                seqSweepBar := bar_index
+                seqHasFvg := false
+                seqSmtAligned := smtBearDiv
+                seqTriggerType := "breakout"
+                if showVisuals
+                    label.new(bar_index, high, "⚡ BREAKOUT", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
 
         if na(seqDir) and shouldFireSetup("sweep", "bull")
             [found, level, extreme, cisdTarget] = detectSweep("bull")
@@ -827,8 +1061,55 @@ if barstate.isconfirmed
                 seqCisdTarget := cisdTarget
                 seqSweepBar := bar_index
                 seqHasFvg := false
+                seqSmtAligned := smtBullDiv
+                seqTriggerType := "sweep"
                 if showVisuals
                     label.new(bar_index, low, "⚡ SWEEP", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
+
+        if na(seqDir) and shouldFireSetup("reversal", "bull")
+            [found, level, extreme, cisdTarget] = detectReversal("bull")
+            if found
+                seqDir := "bull"
+                seqPhase := "sweep"
+                seqLevel := level
+                seqSweepExtreme := extreme
+                seqCisdTarget := cisdTarget
+                seqSweepBar := bar_index
+                seqHasFvg := false
+                seqSmtAligned := smtBullDiv
+                seqTriggerType := "reversal"
+                if showVisuals
+                    label.new(bar_index, low, "⚡ REVERSAL", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
+
+        if na(seqDir) and shouldFireSetup("continuation", "bull")
+            [found, level, extreme, cisdTarget] = detectContinuation("bull")
+            if found
+                seqDir := "bull"
+                seqPhase := "sweep"
+                seqLevel := level
+                seqSweepExtreme := extreme
+                seqCisdTarget := cisdTarget
+                seqSweepBar := bar_index
+                seqHasFvg := false
+                seqSmtAligned := smtBullDiv
+                seqTriggerType := "continuation"
+                if showVisuals
+                    label.new(bar_index, low, "⚡ CONTINUATION", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
+
+        if na(seqDir) and shouldFireSetup("breakout", "bull")
+            [found, level, extreme, cisdTarget] = detectBreakout("bull")
+            if found
+                seqDir := "bull"
+                seqPhase := "sweep"
+                seqLevel := level
+                seqSweepExtreme := extreme
+                seqCisdTarget := cisdTarget
+                seqSweepBar := bar_index
+                seqHasFvg := false
+                seqSmtAligned := smtBullDiv
+                seqTriggerType := "breakout"
+                if showVisuals
+                    label.new(bar_index, low, "⚡ BREAKOUT", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
 
     else
         if bar_index - seqSweepBar > maxBarsValid
@@ -871,12 +1152,12 @@ if barstate.isconfirmed
                         seqPhase := na
                     else if high >= seqFvgLo
                         if close < seqFvgLo
-                            int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
+                            int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned)
                             float entryP = close
                             float stopP = seqSweepExtreme + stopBufferPts + (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                             [targetP, targetIsPool] = computeTarget("bear", entryP, stopP)
                             if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
-                                alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
+                                alert(buildAlertMessage(setupTypeForTrigger(seqTriggerType, "bear"), entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
                                 lastSetupDir := "bear"
                                 lastSetupBar := bar_index
                                 if showScorecard
@@ -889,9 +1170,9 @@ if barstate.isconfirmed
                                         array.pop(pendingEntry)
                                         array.pop(pendingStop)
                                         array.pop(pendingTarget)
-                                if showVisuals
+                                if showTradePlan
                                     clearTradePlanDrawings()
-                                    [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
+                                    [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
                                     tpSetupLbl := newSetupLbl
                                     tpEntryLine := newEntryLine
                                     tpStopLine := newStopLine
@@ -899,6 +1180,10 @@ if barstate.isconfirmed
                                     tpEntryLbl := newEntryLbl
                                     tpStopLbl := newStopLbl
                                     tpTargetLbl := newTargetLbl
+                                    tp1Line := newTp1Line
+                                    tp2Line := newTp2Line
+                                    tp1Lbl := newTp1Lbl
+                                    tp2Lbl := newTp2Lbl
                                     tpDir := "bear"
                                     tpStop := stopP
                                     tpTarget := targetP
@@ -912,12 +1197,12 @@ if barstate.isconfirmed
                     seqDir := na
                     seqPhase := na
                 else if close < seqFvgLo
-                    int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
+                    int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned)
                     float entryP = close
                     float stopP = seqSweepExtreme + stopBufferPts + (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                     [targetP, targetIsPool] = computeTarget("bear", entryP, stopP)
                     if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
-                        alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
+                        alert(buildAlertMessage(setupTypeForTrigger(seqTriggerType, "bear"), entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
                         lastSetupDir := "bear"
                         lastSetupBar := bar_index
                         if showScorecard
@@ -930,9 +1215,9 @@ if barstate.isconfirmed
                                 array.pop(pendingEntry)
                                 array.pop(pendingStop)
                                 array.pop(pendingTarget)
-                        if showVisuals
+                        if showTradePlan
                             clearTradePlanDrawings()
-                            [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
+                            [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
                             tpSetupLbl := newSetupLbl
                             tpEntryLine := newEntryLine
                             tpStopLine := newStopLine
@@ -940,6 +1225,10 @@ if barstate.isconfirmed
                             tpEntryLbl := newEntryLbl
                             tpStopLbl := newStopLbl
                             tpTargetLbl := newTargetLbl
+                            tp1Line := newTp1Line
+                            tp2Line := newTp2Line
+                            tp1Lbl := newTp1Lbl
+                            tp2Lbl := newTp2Lbl
                             tpDir := "bear"
                             tpStop := stopP
                             tpTarget := targetP
@@ -983,12 +1272,12 @@ if barstate.isconfirmed
                         seqPhase := na
                     else if low <= seqFvgHi
                         if close > seqFvgHi
-                            int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
+                            int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned)
                             float entryP = close
                             float stopP = seqSweepExtreme - stopBufferPts - (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                             [targetP, targetIsPool] = computeTarget("bull", entryP, stopP)
                             if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
-                                alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
+                                alert(buildAlertMessage(setupTypeForTrigger(seqTriggerType, "bull"), entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
                                 lastSetupDir := "bull"
                                 lastSetupBar := bar_index
                                 if showScorecard
@@ -1001,9 +1290,9 @@ if barstate.isconfirmed
                                         array.pop(pendingEntry)
                                         array.pop(pendingStop)
                                         array.pop(pendingTarget)
-                                if showVisuals
+                                if showTradePlan
                                     clearTradePlanDrawings()
-                                    [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
+                                    [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
                                     tpSetupLbl := newSetupLbl
                                     tpEntryLine := newEntryLine
                                     tpStopLine := newStopLine
@@ -1011,6 +1300,10 @@ if barstate.isconfirmed
                                     tpEntryLbl := newEntryLbl
                                     tpStopLbl := newStopLbl
                                     tpTargetLbl := newTargetLbl
+                                    tp1Line := newTp1Line
+                                    tp2Line := newTp2Line
+                                    tp1Lbl := newTp1Lbl
+                                    tp2Lbl := newTp2Lbl
                                     tpDir := "bull"
                                     tpStop := stopP
                                     tpTarget := targetP
@@ -1024,12 +1317,12 @@ if barstate.isconfirmed
                     seqDir := na
                     seqPhase := na
                 else if close > seqFvgHi
-                    int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio)
+                    int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned)
                     float entryP = close
                     float stopP = seqSweepExtreme - stopBufferPts - (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                     [targetP, targetIsPool] = computeTarget("bull", entryP, stopP)
                     if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
-                        alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
+                        alert(buildAlertMessage(setupTypeForTrigger(seqTriggerType, "bull"), entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
                         lastSetupDir := "bull"
                         lastSetupBar := bar_index
                         if showScorecard
@@ -1042,9 +1335,9 @@ if barstate.isconfirmed
                                 array.pop(pendingEntry)
                                 array.pop(pendingStop)
                                 array.pop(pendingTarget)
-                        if showVisuals
+                        if showTradePlan
                             clearTradePlanDrawings()
-                            [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
+                            [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
                             tpSetupLbl := newSetupLbl
                             tpEntryLine := newEntryLine
                             tpStopLine := newStopLine
@@ -1052,6 +1345,10 @@ if barstate.isconfirmed
                             tpEntryLbl := newEntryLbl
                             tpStopLbl := newStopLbl
                             tpTargetLbl := newTargetLbl
+                            tp1Line := newTp1Line
+                            tp2Line := newTp2Line
+                            tp1Lbl := newTp1Lbl
+                            tp2Lbl := newTp2Lbl
                             tpDir := "bull"
                             tpStop := stopP
                             tpTarget := targetP
@@ -1071,7 +1368,7 @@ if showVisuals and not na(seqPhase)
     line.new(seqSweepBar, seqLevel, bar_index, seqLevel, color=color.new(#F5C86B, 55), style=line.style_dashed, width=1)
 
 // ---------- status HUD (top-right) ----------
-var table hud = table.new(position=position.top_right, columns=2, rows=9, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
+var table hud = table.new(position=position.top_right, columns=2, rows=10, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
 
 if showHud and barstate.islast
     table.cell(hud, 0, 0, "◆ POLARIS", text_color=#F5C86B, text_size=size.small, text_halign=text.align_left)
@@ -1094,8 +1391,12 @@ if showHud and barstate.islast
     if useVolumeConfirm
         table.cell(hud, 0, 7, "VOL", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
         table.cell(hud, 1, 7, na(volRatio) ? "--" : str.tostring(volRatio, "#.##") + "x avg", text_color=na(volRatio) ? #6E93AD : (volRatio >= 1.2 ? #2FE08A : #DDF3FF), text_size=size.small, text_halign=text.align_right)
+    if useSmtConfluence
+        string smtTxt = smtBearDiv ? "BEAR DIV" : smtBullDiv ? "BULL DIV" : "--"
+        table.cell(hud, 0, 8, "SMT", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 8, smtTxt, text_color=smtTxt == "--" ? #6E93AD : #F5C86B, text_size=size.small, text_halign=text.align_right)
     if showScorecard
         int totalResolved = scoreWins + scoreLosses
         string scoreTxt = totalResolved > 0 ? str.tostring(math.round(scoreWins / totalResolved * 100)) + "% (" + str.tostring(scoreWins) + "/" + str.tostring(totalResolved) + ")" : "-- (0/0)"
-        table.cell(hud, 0, 8, "SCORE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(hud, 1, 8, scoreTxt, text_color=totalResolved > 0 and scoreWins / totalResolved >= 0.5 ? #2FE08A : #DDF3FF, text_size=size.small, text_halign=text.align_right)
+        table.cell(hud, 0, 9, "SCORE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 9, scoreTxt, text_color=totalResolved > 0 and scoreWins / totalResolved >= 0.5 ? #2FE08A : #DDF3FF, text_size=size.small, text_halign=text.align_right)
