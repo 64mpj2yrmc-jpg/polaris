@@ -258,8 +258,13 @@ app can't receive them — hence the exception to "no server logic" above). It d
   `alert()` is a one-way webhook fire, nothing reads a response back into the script — so these
   four (plus the liquidity-pool restriction above) are the extent of how "market-aware" the
   indicator itself can be. Deeper judgment from Polaris's actual Claude brain happens downstream
-  instead, once an
-  alert reaches the dashboard (see the ALERTS tab entry below).
+  instead, once an alert reaches the dashboard (see the ALERTS tab entry below).
+
+  Separately from the session *filter*, a per-session volatility readout (`showSessionVolatility`,
+  on by default) tracks a running average realized range (session high − low) for each of the
+  four killzones — folded into that session's average the moment the session ends, not a signal
+  gate at all, just an "how much does this session actually move" reference shown on the HUD next
+  to whichever session is currently active (e.g. `NY AM · avg 38.25`).
 
   The single most recently completed setup's entry/stop/target plan (`drawTradePlan()`) is
   tracked via `var line`/`var label` refs, built by the pure `buildTradePlanDrawings()` and

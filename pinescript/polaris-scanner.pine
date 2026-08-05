@@ -105,8 +105,9 @@ grpPD = "Premium / Discount"
 showPD = input.bool(false, "Shade premium/discount zone", group=grpPD)
 
 grpKZ = "Killzones (New York time)"
-showKillzones    = input.bool(false, "Shade killzone sessions", group=grpKZ)
-useSessionFilter = input.bool(false, "Only allow new setups during a killzone session", group=grpKZ)
+showKillzones       = input.bool(false, "Shade killzone sessions", group=grpKZ)
+useSessionFilter    = input.bool(false, "Only allow new setups during a killzone session", group=grpKZ)
+showSessionVolatility = input.bool(true, "Track average range per session on the HUD", group=grpKZ)
 asiaSession   = input.session("2000-0000", "Asia killzone", group=grpKZ)
 londonSession = input.session("0200-0500", "London killzone", group=grpKZ)
 nyAmSession   = input.session("0930-1100", "NY AM killzone", group=grpKZ)
@@ -188,6 +189,22 @@ var array<float> pendingStop    = array.new<float>()
 var array<float> pendingTarget  = array.new<float>()
 var int scoreWins   = 0
 var int scoreLosses = 0
+
+// ---------- persistent state: per-session volatility ----------
+// running average of each killzone's realized range (high-low across the
+// whole session), folded in the moment a session ends -- not a signal
+// filter, just an "how much does this session actually move" readout.
+var string curSession     = na
+var float  curSessionHigh = na
+var float  curSessionLow  = na
+var float  sumRangeAsia   = 0.0
+var int    countAsia      = 0
+var float  sumRangeLondon = 0.0
+var int    countLondon    = 0
+var float  sumRangeNyAm   = 0.0
+var int    countNyAm      = 0
+var float  sumRangeNyPm   = 0.0
+var int    countNyPm      = 0
 
 // ---------- swing detection (mirrors findSwings) + equal highs/lows ----------
 ph = ta.pivothigh(swingStrength, swingStrength)
@@ -510,6 +527,35 @@ inNyPm   = not na(time(timeframe.period, nyPmSession, "America/New_York"))
 bool inAnyKillzone = inAsia or inLondon or inNyAm or inNyPm
 bgcolor(showKillzones and (inAsia or inLondon) ? color.new(#00D4FF, 95) : na, title="Asia/London killzone")
 bgcolor(showKillzones and (inNyAm or inNyPm) ? color.new(#F5C86B, 95) : na, title="NY killzone")
+
+// ---------- per-session volatility tracking ----------
+// runs every confirmed bar regardless of showKillzones/useSessionFilter --
+// this is a pure readout, not a gate. On every session change, folds the
+// just-completed session's realized range into that session's running
+// average; while still inside a session, extends the running high/low.
+if showSessionVolatility and barstate.isconfirmed
+    string nowSession = inAsia ? "asia" : inLondon ? "london" : inNyAm ? "nyam" : inNyPm ? "nypm" : na
+    if nowSession != curSession
+        if not na(curSession) and not na(curSessionHigh) and not na(curSessionLow)
+            float completedRange = curSessionHigh - curSessionLow
+            if curSession == "asia"
+                sumRangeAsia := sumRangeAsia + completedRange
+                countAsia := countAsia + 1
+            else if curSession == "london"
+                sumRangeLondon := sumRangeLondon + completedRange
+                countLondon := countLondon + 1
+            else if curSession == "nyam"
+                sumRangeNyAm := sumRangeNyAm + completedRange
+                countNyAm := countNyAm + 1
+            else if curSession == "nypm"
+                sumRangeNyPm := sumRangeNyPm + completedRange
+                countNyPm := countNyPm + 1
+        curSession := nowSession
+        curSessionHigh := na(nowSession) ? na : high
+        curSessionLow := na(nowSession) ? na : low
+    else if not na(nowSession)
+        curSessionHigh := math.max(curSessionHigh, high)
+        curSessionLow := math.min(curSessionLow, low)
 
 // ---------- clear the tracked trade plan once it's played out ----------
 // an entry that already hit its stop or target shouldn't linger on the
@@ -844,9 +890,11 @@ if showHud and barstate.islast
     table.cell(hud, 1, 4, na(seqPhase) ? "IDLE" : str.upper(seqPhase), text_color=na(seqPhase) ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
     table.cell(hud, 0, 5, "SETUP", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
     table.cell(hud, 1, 5, na(seqDir) ? "--" : (seqDir == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(seqDir) ? #6E93AD : (seqDir == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
-    string sessionTxt = inAsia ? "ASIA" : inLondon ? "LONDON" : inNyAm ? "NY AM" : inNyPm ? "NY PM" : "--"
+    string sessionName = inAsia ? "ASIA" : inLondon ? "LONDON" : inNyAm ? "NY AM" : inNyPm ? "NY PM" : "--"
+    float sessionAvg = inAsia ? (countAsia > 0 ? sumRangeAsia / countAsia : na) : inLondon ? (countLondon > 0 ? sumRangeLondon / countLondon : na) : inNyAm ? (countNyAm > 0 ? sumRangeNyAm / countNyAm : na) : inNyPm ? (countNyPm > 0 ? sumRangeNyPm / countNyPm : na) : na
+    string sessionTxt = sessionName == "--" ? "--" : sessionName + (na(sessionAvg) ? "" : " · avg " + str.tostring(sessionAvg, format.mintick))
     table.cell(hud, 0, 6, "SESSION", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(hud, 1, 6, sessionTxt, text_color=sessionTxt == "--" ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
+    table.cell(hud, 1, 6, sessionTxt, text_color=sessionName == "--" ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
     if showScorecard
         int totalResolved = scoreWins + scoreLosses
         string scoreTxt = totalResolved > 0 ? str.tostring(math.round(scoreWins / totalResolved * 100)) + "% (" + str.tostring(scoreWins) + "/" + str.tostring(totalResolved) + ")" : "-- (0/0)"
