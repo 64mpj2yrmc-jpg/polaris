@@ -27,9 +27,16 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // invented here specifically for the webhook payload:
 //   stop       = the sweep's actual extreme (the protected level -- not just
 //                the old swing price it swept) +/- an optional buffer
-//   target     = entry +/- risk * rMultiple
+//   target     = the nearest untested liquidity pool in the trade's
+//                direction (a real draw of liquidity, findLiquidityTarget)
+//                -- falls back to entry +/- risk * rMultiple only when no
+//                pool exists yet. A setup only actually alerts if that
+//                projected move is at least minTargetAtrMult x ATR(14);
+//                smaller draws still resolve the sequence, they just don't
+//                fire a webhook.
 //   confidence = FVG size relative to ATR(14), a rough heuristic only
-// Adjust the inputs below, or the fvgConfidence() formula, to taste.
+// Adjust the inputs below, or the fvgConfidence()/findLiquidityTarget()
+// formulas, to taste.
 //
 // Two more filters gate whether a sweep is even allowed to start a sequence:
 // a higher-timeframe bias check (HTF close vs its own EMA, via
@@ -62,8 +69,9 @@ showVisuals   = input.bool(true, "Show sweep/CISD/trade-plan markup", group=grpS
 showHud       = input.bool(true, "Show status panel (top-right)", group=grpScan)
 
 grpTrade = "Trade parameters (for the webhook payload only)"
-stopBufferPts = input.float(0.0, "Stop buffer beyond the sweep extreme (points)", minval=0, group=grpTrade)
-rMultiple     = input.float(2.0, "Target = entry +/- risk x this", minval=0.1, group=grpTrade)
+stopBufferPts     = input.float(0.0, "Stop buffer beyond the sweep extreme (points)", minval=0, group=grpTrade)
+rMultiple         = input.float(2.0, "Fallback target R-multiple (only used if no liquidity pool sits in the trade's direction)", minval=0.1, group=grpTrade)
+minTargetAtrMult  = input.float(3.0, "Min projected move to actually alert (x ATR) -- smaller draws complete the sequence but don't fire", minval=0, step=0.5, group=grpTrade)
 
 grpHook = "Webhook"
 webhookSecret = input.string("", "Webhook secret (must match WEBHOOK_SECRET)", group=grpHook)
@@ -262,6 +270,36 @@ fvgConfidence(float fvgLo, float fvgHi, float atr) =>
     float ratio = atr > 0 ? size / atr : 0
     int conf = math.round(math.min(95, 40 + ratio * 40))
     math.max(conf, 30)
+
+// finds the nearest untested liquidity pool beyond entryP in the trade's
+// direction -- the actual "draw of liquidity" price is likely reaching for,
+// not an arbitrary R-multiple. Bull looks in swingHighs above entry, bear
+// looks in swingLows below entry; returns na if none exist yet.
+findLiquidityTarget(string dir, float entryP) =>
+    float best = na
+    if dir == "bull"
+        if array.size(swingHighs) > 0
+            for i = 0 to array.size(swingHighs) - 1
+                Swing s = array.get(swingHighs, i)
+                if s.isPool and s.price > entryP
+                    if na(best) or s.price < best
+                        best := s.price
+    else
+        if array.size(swingLows) > 0
+            for i = 0 to array.size(swingLows) - 1
+                Swing s = array.get(swingLows, i)
+                if s.isPool and s.price < entryP
+                    if na(best) or s.price > best
+                        best := s.price
+    best
+
+// the actual target used for the webhook payload: nearest liquidity pool
+// in the trade's direction, or the R-multiple projection if no pool exists
+// yet (early session, thin swing history).
+computeTarget(string dir, float entryP, float stopP) =>
+    float poolTarget = findLiquidityTarget(dir, entryP)
+    float fallback = dir == "bull" ? entryP + math.abs(entryP - stopP) * rMultiple : entryP - math.abs(entryP - stopP) * rMultiple
+    na(poolTarget) ? fallback : poolTarget
 
 // ---------- webhook payload builders ----------
 // "kind" discriminates the two payload shapes this script ever sends -- the
@@ -547,22 +585,23 @@ if barstate.isconfirmed
                             int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
                             float entryP = close
                             float stopP = seqSweepExtreme + stopBufferPts
-                            float targetP = entryP - math.abs(entryP - stopP) * rMultiple
-                            alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
-                            if showVisuals
-                                clearTradePlanDrawings()
-                                [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
-                                tpSetupLbl := newSetupLbl
-                                tpEntryLine := newEntryLine
-                                tpStopLine := newStopLine
-                                tpTargetLine := newTargetLine
-                                tpEntryLbl := newEntryLbl
-                                tpStopLbl := newStopLbl
-                                tpTargetLbl := newTargetLbl
-                                tpDir := "bear"
-                                tpStop := stopP
-                                tpTarget := targetP
-                                tpActive := true
+                            float targetP = computeTarget("bear", entryP, stopP)
+                            if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
+                                alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
+                                if showVisuals
+                                    clearTradePlanDrawings()
+                                    [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
+                                    tpSetupLbl := newSetupLbl
+                                    tpEntryLine := newEntryLine
+                                    tpStopLine := newStopLine
+                                    tpTargetLine := newTargetLine
+                                    tpEntryLbl := newEntryLbl
+                                    tpStopLbl := newStopLbl
+                                    tpTargetLbl := newTargetLbl
+                                    tpDir := "bear"
+                                    tpStop := stopP
+                                    tpTarget := targetP
+                                    tpActive := true
                             seqDir := na
                             seqPhase := na
                         else
@@ -575,22 +614,23 @@ if barstate.isconfirmed
                     int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
                     float entryP = close
                     float stopP = seqSweepExtreme + stopBufferPts
-                    float targetP = entryP - math.abs(entryP - stopP) * rMultiple
-                    alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
-                    if showVisuals
-                        clearTradePlanDrawings()
-                        [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
-                        tpSetupLbl := newSetupLbl
-                        tpEntryLine := newEntryLine
-                        tpStopLine := newStopLine
-                        tpTargetLine := newTargetLine
-                        tpEntryLbl := newEntryLbl
-                        tpStopLbl := newStopLbl
-                        tpTargetLbl := newTargetLbl
-                        tpDir := "bear"
-                        tpStop := stopP
-                        tpTarget := targetP
-                        tpActive := true
+                    float targetP = computeTarget("bear", entryP, stopP)
+                    if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
+                        alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
+                        if showVisuals
+                            clearTradePlanDrawings()
+                            [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
+                            tpSetupLbl := newSetupLbl
+                            tpEntryLine := newEntryLine
+                            tpStopLine := newStopLine
+                            tpTargetLine := newTargetLine
+                            tpEntryLbl := newEntryLbl
+                            tpStopLbl := newStopLbl
+                            tpTargetLbl := newTargetLbl
+                            tpDir := "bear"
+                            tpStop := stopP
+                            tpTarget := targetP
+                            tpActive := true
                     seqDir := na
                     seqPhase := na
         else if seqDir == "bull"
@@ -633,22 +673,23 @@ if barstate.isconfirmed
                             int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
                             float entryP = close
                             float stopP = seqSweepExtreme - stopBufferPts
-                            float targetP = entryP + math.abs(entryP - stopP) * rMultiple
-                            alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
-                            if showVisuals
-                                clearTradePlanDrawings()
-                                [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
-                                tpSetupLbl := newSetupLbl
-                                tpEntryLine := newEntryLine
-                                tpStopLine := newStopLine
-                                tpTargetLine := newTargetLine
-                                tpEntryLbl := newEntryLbl
-                                tpStopLbl := newStopLbl
-                                tpTargetLbl := newTargetLbl
-                                tpDir := "bull"
-                                tpStop := stopP
-                                tpTarget := targetP
-                                tpActive := true
+                            float targetP = computeTarget("bull", entryP, stopP)
+                            if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
+                                alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
+                                if showVisuals
+                                    clearTradePlanDrawings()
+                                    [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
+                                    tpSetupLbl := newSetupLbl
+                                    tpEntryLine := newEntryLine
+                                    tpStopLine := newStopLine
+                                    tpTargetLine := newTargetLine
+                                    tpEntryLbl := newEntryLbl
+                                    tpStopLbl := newStopLbl
+                                    tpTargetLbl := newTargetLbl
+                                    tpDir := "bull"
+                                    tpStop := stopP
+                                    tpTarget := targetP
+                                    tpActive := true
                             seqDir := na
                             seqPhase := na
                         else
@@ -661,22 +702,23 @@ if barstate.isconfirmed
                     int conf = fvgConfidence(seqFvgLo, seqFvgHi, atrVal)
                     float entryP = close
                     float stopP = seqSweepExtreme - stopBufferPts
-                    float targetP = entryP + math.abs(entryP - stopP) * rMultiple
-                    alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
-                    if showVisuals
-                        clearTradePlanDrawings()
-                        [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
-                        tpSetupLbl := newSetupLbl
-                        tpEntryLine := newEntryLine
-                        tpStopLine := newStopLine
-                        tpTargetLine := newTargetLine
-                        tpEntryLbl := newEntryLbl
-                        tpStopLbl := newStopLbl
-                        tpTargetLbl := newTargetLbl
-                        tpDir := "bull"
-                        tpStop := stopP
-                        tpTarget := targetP
-                        tpActive := true
+                    float targetP = computeTarget("bull", entryP, stopP)
+                    if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal
+                        alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
+                        if showVisuals
+                            clearTradePlanDrawings()
+                            [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
+                            tpSetupLbl := newSetupLbl
+                            tpEntryLine := newEntryLine
+                            tpStopLine := newStopLine
+                            tpTargetLine := newTargetLine
+                            tpEntryLbl := newEntryLbl
+                            tpStopLbl := newStopLbl
+                            tpTargetLbl := newTargetLbl
+                            tpDir := "bull"
+                            tpStop := stopP
+                            tpTarget := targetP
+                            tpActive := true
                     seqDir := na
                     seqPhase := na
 

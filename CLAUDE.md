@@ -249,16 +249,23 @@ app can't receive them — hence the exception to "no server logic" above). It d
   alert reaches the dashboard (see the ALERTS tab entry below).
 
   The single most recently completed setup's entry/stop/target plan (`drawTradePlan()`) is
-  tracked via `var line`/`var label` refs and redrawn fresh each time, replacing whatever was
-  there before; `clearTradePlanIfInvalid()` deletes it outright once price actually trades through
-  its stop or target, so a played-out entry doesn't linger looking live. Entry/stop/target/
+  tracked via `var line`/`var label` refs, built by the pure `buildTradePlanDrawings()` and
+  assigned at the call site (Pine functions can't reassign global variables — see the CE10088 note
+  below); a top-level check clears it via `clearTradePlanDrawings()` once price actually trades
+  through its stop or target, so a played-out entry doesn't linger looking live. Entry/stop/
   confidence are **not** part of the original JS model (which only annotates chart structure) —
   they're invented in this file specifically for the webhook payload: stop = the sweep candle's
   actual high/low (the real "protected" level — not just the older swing price it swept, which
-  the wick may have already run past) ± an optional buffer, target = entry ± risk × an R-multiple
-  input, confidence = a simple FVG-size-vs-ATR(14) heuristic. All adjustable via script inputs.
-  Lives in TradingView's Pine Editor, not deployed through this repo — pasted in by hand, no
-  compiler available to verify it here.
+  the wick may have already run past) ± an optional buffer; target = the nearest untested
+  liquidity pool in the trade's direction (`findLiquidityTarget`/`computeTarget` — a real draw of
+  liquidity, not an arbitrary ratio), falling back to entry ± risk × an R-multiple only when no
+  pool exists yet; confidence = a simple FVG-size-vs-ATR(14) heuristic. A setup only actually
+  fires its webhook if that projected move is at least `minTargetAtrMult` × ATR(14) — smaller
+  draws still resolve the sequence, they just stay quiet. All adjustable via script inputs. Lives
+  in TradingView's Pine Editor, not deployed through this repo — pasted in by hand, no compiler
+  available to verify it here (a CE10088 "cannot modify global variable in function" error came up
+  once already this way — Pine functions may read outer-scope variables but never reassign them;
+  every `:=` to a `tp*`/`seq*` global has to live in top-level script code, not inside a `=>` def).
 
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
