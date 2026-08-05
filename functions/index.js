@@ -7,14 +7,23 @@
 // service -> Edit & deploy new revision -> Container(s) -> Variables &
 // Secrets -> Secrets -> Reference a secret -> WEBHOOK_SECRET.
 //
-// Expected Pine Script alert JSON body (set as the alert "Message" in
-// TradingView -- {{close}}, {{time}}, etc. get substituted before sending):
-//   secret, setupType, entryPrice, stopPrice, targetPrice, confidence
-//   required; riskReward, symbol, timeframe, sourceTimestamp optional.
+// Two payload shapes come in, discriminated by "kind" (defaults to "setup"
+// if absent, for backward compatibility with alerts fired before this field
+// existed):
+//   kind:"setup"  (default) -- a fully completed setup. Expected body:
+//     secret, setupType, entryPrice, stopPrice, targetPrice, confidence
+//     required; riskReward, symbol, timeframe, sourceTimestamp optional.
+//     Appended to the "alerts" collection, one doc per setup, AI-reviewed
+//     on the dashboard, triggers sendSmsAlert.
+//   kind:"status" -- a lightweight phase-transition ping. Expected body:
+//     secret, structureBias, htfBias, regime, adx, phase, dir, symbol,
+//     timeframe. Overwrites the single "scannerStatus/current" doc -- no
+//     history kept, no SMS -- so the dashboard/Polaris always knows what
+//     the indicator is currently tracking between full setups.
 //
-// Also fires a best-effort SMS via Twilio's REST API once an alert is
-// stored (see sendSmsAlert below) -- no Twilio SDK dependency, just fetch,
-// since Node 22's runtime has it built in.
+// Also fires a best-effort SMS via Twilio's REST API once a "setup" alert
+// is stored (see sendSmsAlert below) -- no Twilio SDK dependency, just
+// fetch, since Node 22's runtime has it built in.
 
 const functions = require("@google-cloud/functions-framework");
 const admin = require("firebase-admin");
@@ -111,6 +120,31 @@ function validateAlertPayload(body) {
   };
 }
 
+// Validates a "status" ping. Deliberately permissive (this is a live
+// display value, not something a security boundary needs to be strict
+// about beyond basic types) -- every field is optional and just gets
+// coerced to a bounded string/number or dropped.
+function validateStatusPayload(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, errors: ["Request body must be a JSON object"] };
+  }
+  const str = (v, max) => (typeof v === "string" ? v.slice(0, max) : null);
+  const adx = Number(body.adx);
+  return {
+    ok: true,
+    data: {
+      structureBias: str(body.structureBias, 16),
+      htfBias: str(body.htfBias, 16),
+      regime: str(body.regime, 16),
+      adx: Number.isFinite(adx) ? adx : null,
+      phase: str(body.phase, 16),
+      dir: str(body.dir, 16),
+      symbol: str(body.symbol, 32),
+      timeframe: str(body.timeframe, 16),
+    },
+  };
+}
+
 // Best-effort text message -- never throws, never blocks or fails the
 // webhook response. By the time this runs the alert is already safely
 // stored in Firestore, so a failed text just means no phone buzz, not a
@@ -157,6 +191,28 @@ functions.http("receiveAlert", async (req, res) => {
   if (!WEBHOOK_SECRET || !providedSecret || providedSecret !== WEBHOOK_SECRET) {
     console.warn("receiveAlert: rejected — bad or missing secret");
     res.status(401).json({ ok: false, error: "Unauthorized" });
+    return;
+  }
+
+  const kind = req.body && req.body.kind === "status" ? "status" : "setup";
+
+  if (kind === "status") {
+    const result = validateStatusPayload(req.body);
+    if (!result.ok) {
+      console.warn("receiveAlert: status validation failed", result.errors);
+      res.status(400).json({ ok: false, error: "Invalid payload", details: result.errors });
+      return;
+    }
+    try {
+      await db.collection("scannerStatus").doc("current").set({
+        ...result.data,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      res.status(200).json({ ok: true });
+    } catch (err) {
+      console.error("receiveAlert: scannerStatus write failed", err);
+      res.status(500).json({ ok: false, error: "Internal error — could not store status" });
+    }
     return;
   }
 

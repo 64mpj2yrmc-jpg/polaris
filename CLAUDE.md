@@ -286,6 +286,29 @@ malformed JSON) is swallowed silently and the alert just stays unreviewed rather
 erroring the tab. Cards show a "Polaris is reviewing…" line while pending and a
 favorable/caution/avoid badge + confidence + one-line note once reviewed.
 
+**Live indicator status (between full setups).** The Pine scanner also fires a second, much
+lighter webhook payload on every phase advance (sweep detected → CISD confirmed → retracing) —
+`buildStatusMessage()`, discriminated from a full setup by `"kind":"status"` in the JSON body (a
+full setup sends `"kind":"setup"`; `receiveAlert` branches on this, defaulting to `"setup"` if the
+field is absent for backward compatibility with alerts fired before this existed). The Cloud
+Function overwrites a single `scannerStatus/current` Firestore doc with it via `.set()` — no
+history, no SMS, just whatever the indicator is currently tracking (standing bias, HTF bias,
+regime/ADX, phase, direction). `firestore.rules` gates it read-only for signed-in clients, same
+shape as `/alerts`.
+
+`index.html` subscribes to that doc in the same Firebase `useEffect` that subscribes to `/alerts`
+(`scannerStatus` state, `scannerStatusRef`), and it feeds into three places: a compact "LIVE
+INDICATOR STATUS" strip at the top of the ALERTS tab (bias/HTF/regime/phase, mirroring the
+indicator's own on-chart HUD); `buildSystemPrompt()`, so asking Polaris in chat what it's seeing
+gets a real answer tied to the indicator's actual live state, not just the separate market-feed
+candles; and a dedicated `useEffect([scannerStatus])` that calls `speakProactive()` with a
+phase-specific line ("sweep just printed," "that sweep just confirmed," "retracing into the gap
+now") the first time each phase is seen for a given symbol/direction (deduped via
+`lastAnnouncedScanPhaseRef`, one key per `symbol:phase:dir` — a snapshot re-fire of the same
+status doesn't re-announce it). This goes through the same shared 10-minute proactive cooldown as
+every other proactive event, not a bypass, since it's informational rather than a rule warning —
+so it can be genuinely mid-sequence rather than only ever speaking once a setup is already done.
+
 ## Git
 
 Primary branch: `main`. This session's work landed on `claude/polaris-living-system-ahe5fl`

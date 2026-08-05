@@ -55,6 +55,14 @@ service cloud.firestore {
       allow create, delete: if false;
     }
 
+    // Single overwritten doc (Cloud Function writes it via .set()) holding
+    // the indicator's current bias/HTF/regime/phase between full setups —
+    // read-only from the dashboard, same as /alerts.
+    match /scannerStatus/{docId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
     // Deny everything else by default — add new collections' rules
     // explicitly above as Polaris grows rather than opening this up.
     match /{document=**} {

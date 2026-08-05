@@ -74,7 +74,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.05-1";
+const BUILD = "2026.08.05-2";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -940,6 +940,11 @@ function App() {
   const firestoreDbRef = useRef(null);
   const aiReviewAttemptedRef = useRef(new Set()); // session-only dedupe so a snapshot re-fire doesn't re-trigger a review already in flight
 
+  // ----- Live scanner status (single overwritten Firestore doc) -----
+  const [scannerStatus, setScannerStatus] = useState(null);
+  const scannerStatusRef = useRef(null); scannerStatusRef.current = scannerStatus;
+  const lastAnnouncedScanPhaseRef = useRef(null); // dedupes proactive phase announcements
+
   function rankVoices(vs) {
     const score = (v) =>
       (/premium/i.test(v.name) ? 10 : 0) +
@@ -1047,6 +1052,7 @@ function App() {
       return;
     }
     let unsubscribe = () => {};
+    let unsubscribeStatus = () => {};
     try {
       const app = firebase.apps.length ? firebase.apps[0] : firebase.initializeApp(cfg);
       const db = app.firestore();
@@ -1061,11 +1067,16 @@ function App() {
             },
             (err) => setTvAlertsStatus("Live connection error: " + (err.message || "check Firestore rules"))
           );
+        unsubscribeStatus = db.collection("scannerStatus").doc("current")
+          .onSnapshot(
+            (doc) => setScannerStatus(doc.exists ? doc.data() : null),
+            (err) => { /* silent — the live status strip just stays hidden on error, the alerts list is the primary feature */ }
+          );
       }).catch((err) => setTvAlertsStatus("Sign-in failed: " + (err.message || "check Firebase Auth is enabled")));
     } catch (err) {
       setTvAlertsStatus("Firebase init failed: " + (err.message || "check firebaseConfig.js"));
     }
-    return () => unsubscribe();
+    return () => { unsubscribe(); unsubscribeStatus(); };
   }, []);
 
   async function setAlertStatus(id, status) {
@@ -1096,6 +1107,7 @@ CONTEXT:
 Journal: ${s ? `${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, current streak ${s.streak}.` : "No trades logged yet."}
 Market: ${lastCandle ? `last ${lastCandle.c}, day ${dayPct}.` : "no live feed."}
 Scanner: ${scanningRef.current ? "active" : "off"}. Recent events: ${scanEventsRef.current.length ? scanEventsRef.current.slice(0, 4).map((e) => e.msg).join(" | ") : "none"}.
+Indicator status (from the TradingView Pine scanner, live): ${scannerStatusRef.current ? `standing bias ${scannerStatusRef.current.structureBias || "none"}, HTF bias ${scannerStatusRef.current.htfBias || "none"}, regime ${scannerStatusRef.current.regime || "unknown"} (ADX ${scannerStatusRef.current.adx ?? "n/a"}), phase ${scannerStatusRef.current.phase || "idle"}.` : "no status received yet."}
 Memory: ${memoryRef.current || "none recorded"}.
 
 Judge this ONE setup on its own merits — structure quality, risk/reward, whether it fits the current market read. Respond with ONLY a single JSON object, nothing else, no markdown fences, no prose before or after:
@@ -1640,6 +1652,27 @@ Rules:
     const fired = speakProactive("Still watching, sir — nothing's printed on the model yet.");
     if (fired) lastScanEventAtRef.current = Date.now();
   }, [now, scanning]);
+
+  // Live scanner status pings (Pine indicator's phase transitions, see
+  // pinescript/polaris-scanner.pine's buildStatusMessage). Speaks up mid-
+  // sequence instead of only ever hearing about a setup once it's complete
+  // — same shared proactive cooldown as the other events above, not a
+  // bypass, since this is informational rather than a rule warning.
+  useEffect(() => {
+    if (!scannerStatus || !scannerStatus.phase || scannerStatus.phase === "idle") return;
+    const key = `${scannerStatus.symbol || ""}:${scannerStatus.phase}:${scannerStatus.dir || ""}`;
+    if (lastAnnouncedScanPhaseRef.current === key) return;
+    lastAnnouncedScanPhaseRef.current = key;
+    const dirWord = scannerStatus.dir === "bull" ? "bullish" : scannerStatus.dir === "bear" ? "bearish" : "a";
+    const sym = scannerStatus.symbol || "the model";
+    const lines = {
+      sweep: `Sir, ${dirWord} sweep just printed on ${sym}. Watching for confirmation.`,
+      cisd: `Sir, that sweep on ${sym} just confirmed — watching the retrace now.`,
+      retrace: `Sir, ${sym} is retracing into the gap. This one's close.`,
+    };
+    const line = lines[scannerStatus.phase];
+    if (line) speakProactive(line);
+  }, [scannerStatus]);
 
   useEffect(() => {
     const threshold = Math.abs(pnlMilestoneRef.current);
@@ -2323,6 +2356,7 @@ Contract reference: NQ = $20/point, MNQ = $2/point, tick 0.25.
 MARKET FEED (${marketFeedLabel()}):
 ${candlesRef.current.length ? `Last ${candlesRef.current[candlesRef.current.length - 1].c}${dayInfoRef.current ? `, day ${(((candlesRef.current[candlesRef.current.length - 1].c - dayInfoRef.current.prevClose) / dayInfoRef.current.prevClose) * 100).toFixed(2)}%, week ${(((candlesRef.current[candlesRef.current.length - 1].c - dayInfoRef.current.weekAgo) / dayInfoRef.current.weekAgo) * 100).toFixed(2)}%` : ""}. Recent candles (${tfRef.current}, oldest→newest): ${JSON.stringify(candlesRef.current.slice(-20).map((c) => ({ t: c.t.slice(11, 16) || c.t, o: c.o, h: c.h, l: c.l, c: c.c })))}` : "Not connected — the feed starts when the scanner runs on the MARKET tab."}
 Scanner (his model: liquidity sweep → change in state of delivery → retrace into imbalance → rejection): ${scanningRef.current ? "ACTIVE" : "off"}. Recent events: ${scanEventsRef.current.length ? scanEventsRef.current.slice(0, 6).map((e) => `[${e.time}] ${e.msg}`).join(" | ") : "none yet"}.
+TRADINGVIEW INDICATOR STATUS (live, from the Pine scanner running on his chart — separate from the scanner above): ${scannerStatusRef.current ? `standing bias ${scannerStatusRef.current.structureBias || "none"}, higher-timeframe bias ${scannerStatusRef.current.htfBias || "none"}, regime ${scannerStatusRef.current.regime || "unknown"} (ADX ${scannerStatusRef.current.adx ?? "n/a"}), current phase ${scannerStatusRef.current.phase || "idle"}${scannerStatusRef.current.dir ? `, watching a ${scannerStatusRef.current.dir === "bull" ? "bullish" : "bearish"} sequence` : ""} on ${scannerStatusRef.current.symbol || "the chart"}.` : "no status received yet — indicator may not be running or webhook not yet fired."}
 When he asks what the market is doing, describe it from this data plainly — direction, range, notable candles — without predicting what comes next.
 
 VOICE TRADE LOGGING:
@@ -3083,6 +3117,21 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                 </div>
               )}
             </Panel>
+
+            {scannerStatus && (
+              <Panel>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
+                  <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold }}>◆ LIVE INDICATOR STATUS</div>
+                  <div style={{ fontSize: 10, color: C.faint }}>{scannerStatus.symbol || ""} {scannerStatus.timeframe || ""}</div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))", gap: 10, fontSize: 12 }}>
+                  <div><Label>Bias</Label><div style={{ color: scannerStatus.structureBias === "bull" ? C.green : scannerStatus.structureBias === "bear" ? C.red : C.faint }}>{scannerStatus.structureBias ? scannerStatus.structureBias.toUpperCase() : "—"}</div></div>
+                  <div><Label>HTF</Label><div style={{ color: scannerStatus.htfBias === "bull" ? C.green : scannerStatus.htfBias === "bear" ? C.red : C.faint }}>{scannerStatus.htfBias ? scannerStatus.htfBias.toUpperCase() : "—"}</div></div>
+                  <div><Label>Regime</Label><div style={{ color: scannerStatus.regime === "trend" ? C.text : C.faint }}>{scannerStatus.regime ? scannerStatus.regime.toUpperCase() : "—"}{scannerStatus.adx != null ? ` (${scannerStatus.adx.toFixed(1)})` : ""}</div></div>
+                  <div><Label>Phase</Label><div style={{ color: scannerStatus.phase && scannerStatus.phase !== "idle" ? C.gold : C.faint }}>{scannerStatus.phase ? scannerStatus.phase.toUpperCase() : "IDLE"}</div></div>
+                </div>
+              </Panel>
+            )}
 
             {!tvAlertsStatus && tvAlerts.length === 0 && (
               <Panel>

@@ -42,6 +42,15 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // "market aware" on its own. Deeper judgment from Polaris's actual Claude
 // brain happens downstream instead, in index.html, once an alert reaches
 // the dashboard.
+//
+// Two kinds of webhook payloads go out, discriminated by a "kind" field the
+// Cloud Function branches on: "setup" (buildAlertMessage) fires once, on a
+// fully completed setup, and gets AI-reviewed on the dashboard. "status"
+// (buildStatusMessage) fires on every phase advance (sweep detected -> CISD
+// confirmed -> retracing) with the indicator's current bias/HTF/regime/phase
+// -- a lightweight, constantly-overwritten "what am I watching right now"
+// ping, not stored history, so Polaris can speak up mid-sequence instead of
+// only ever hearing about a setup once it's already done.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -254,15 +263,31 @@ fvgConfidence(float fvgLo, float fvgHi, float atr) =>
     int conf = math.round(math.min(95, 40 + ratio * 40))
     math.max(conf, 30)
 
-// ---------- webhook payload builder ----------
+// ---------- webhook payload builders ----------
+// "kind" discriminates the two payload shapes this script ever sends -- the
+// Cloud Function branches on it (see functions/index.js): "setup" is a full
+// completed setup (-> alerts collection, AI-reviewed, can SMS); "status" is
+// a lightweight phase-transition ping (-> a single overwritten Firestore
+// doc, no history, purely so the dashboard/Polaris knows what the indicator
+// is currently tracking between full setups).
 buildAlertMessage(string setupType, float entryPrice, float stopPrice, float targetPrice, int confidence) =>
     float risk = math.abs(entryPrice - stopPrice)
     float reward = math.abs(targetPrice - entryPrice)
     float rr = risk > 0 ? math.round((reward / risk) * 100) / 100 : na
-    '{"secret":"' + webhookSecret + '","setupType":"' + setupType + '","entryPrice":' + str.tostring(entryPrice) +
+    '{"secret":"' + webhookSecret + '","kind":"setup","setupType":"' + setupType + '","entryPrice":' + str.tostring(entryPrice) +
      ',"stopPrice":' + str.tostring(stopPrice) + ',"targetPrice":' + str.tostring(targetPrice) +
      ',"confidence":' + str.tostring(confidence) + ',"riskReward":' + str.tostring(rr) +
      ',"symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
+
+buildStatusMessage() =>
+    string regimeTxt = regimeOk ? "trend" : "chop"
+    string biasTxt = na(structureBias) ? "none" : structureBias
+    string htfTxt = na(htfBias) ? "none" : htfBias
+    string phaseTxt = na(seqPhase) ? "idle" : seqPhase
+    string dirTxt = na(seqDir) ? "none" : seqDir
+    '{"secret":"' + webhookSecret + '","kind":"status","structureBias":"' + biasTxt + '","htfBias":"' + htfTxt +
+     '","regime":"' + regimeTxt + '","adx":' + str.tostring(adxVal, "#.##") + ',"phase":"' + phaseTxt +
+     '","dir":"' + dirTxt + '","symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
 
 // Pine functions cannot reassign a global-scope variable (CE10088) -- only
 // top-level script code can. So these two helpers only ever READ the tp*
@@ -432,6 +457,7 @@ if barstate.isconfirmed and tpActive
 
 // ---------- main scan (mirrors advanceScan), only on confirmed/closed bars ----------
 if barstate.isconfirmed
+    string prevPhase = seqPhase  // snapshot before this bar's transitions, for the status ping below
     if na(seqDir)
         // look for a swept high (bearish setup) -- best (highest) prior swing that got wicked through and closed back under.
         // Skipped while structureBias or HTF bias is bullish, or the market isn't trending --
@@ -653,6 +679,13 @@ if barstate.isconfirmed
                         tpActive := true
                     seqDir := na
                     seqPhase := na
+
+    // fires a lightweight status ping whenever the phase actually advanced
+    // this bar (na->sweep, sweep->cisd, cisd->retrace) -- not on invalidation
+    // or completion (seqPhase going back to na), since a real "setup" alert
+    // already covers completion with far richer detail.
+    if seqPhase != prevPhase and not na(seqPhase)
+        alert(buildStatusMessage(), alert.freq_once_per_bar_close)
 
 // ---------- tracked level line while a sequence is active ----------
 if showVisuals and not na(seqPhase)
