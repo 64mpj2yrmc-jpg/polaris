@@ -74,7 +74,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.05-6";
+const BUILD = "2026.08.05-7";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -3320,7 +3320,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                       {ts && <span style={{ fontSize: 10, color: C.faint }}>{ts.toLocaleString()}</span>}
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      {a.outcome && (
+                      {a.outcome ? (
                         <div style={{
                           fontSize: 10, letterSpacing: "0.08em", fontWeight: 700, padding: "4px 10px", borderRadius: 4,
                           color: a.outcome === "win" ? C.green : C.red,
@@ -3329,6 +3329,15 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                         }}>
                           {a.outcome === "win" ? "WON" : "LOST"}
                         </div>
+                      ) : (
+                        a.entryPrice != null && a.stopPrice != null && a.targetPrice != null && (
+                          <div title="Still tracking — resolves once price trades through the stop or target on the live feed" style={{
+                            fontSize: 10, letterSpacing: "0.08em", fontWeight: 700, padding: "4px 10px", borderRadius: 4,
+                            color: C.faint, border: `1px solid ${C.border}`, background: "transparent",
+                          }}>
+                            OPEN
+                          </div>
+                        )
                       )}
                       <div style={{
                         fontSize: 10, letterSpacing: "0.08em", fontWeight: 700, padding: "4px 10px", borderRadius: 4,
