@@ -264,61 +264,46 @@ buildAlertMessage(string setupType, float entryPrice, float stopPrice, float tar
      ',"confidence":' + str.tostring(confidence) + ',"riskReward":' + str.tostring(rr) +
      ',"symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
 
-// draws the entry/stop/target trade plan for a just-completed setup, clearing
-// out whatever plan was drawn before it -- only the single most recent
-// completed setup is ever shown on the chart at once.
-drawTradePlan(string dir, float entryP, float stopP, float targetP, int conf) =>
-    if not na(tpEntryLine)
-        line.delete(tpEntryLine)
-    if not na(tpStopLine)
-        line.delete(tpStopLine)
-    if not na(tpTargetLine)
-        line.delete(tpTargetLine)
-    if not na(tpEntryLbl)
-        label.delete(tpEntryLbl)
-    if not na(tpStopLbl)
-        label.delete(tpStopLbl)
-    if not na(tpTargetLbl)
-        label.delete(tpTargetLbl)
-    if not na(tpSetupLbl)
-        label.delete(tpSetupLbl)
+// Pine functions cannot reassign a global-scope variable (CE10088) -- only
+// top-level script code can. So these two helpers only ever READ the tp*
+// globals or act on values passed in as parameters; every actual `:=` to a
+// tp* global happens at the call site instead (see the 4 completion sites
+// below, and the "clear the tracked trade plan" block).
+deleteLineIfExists(line ln) =>
+    if not na(ln)
+        line.delete(ln)
+
+deleteLabelIfExists(label lb) =>
+    if not na(lb)
+        label.delete(lb)
+
+// deletes whatever trade-plan drawings are currently tracked (reads the tp*
+// globals, mutates nothing) -- called both when a new plan replaces an old
+// one and when the tracked plan is invalidated.
+clearTradePlanDrawings() =>
+    deleteLineIfExists(tpEntryLine)
+    deleteLineIfExists(tpStopLine)
+    deleteLineIfExists(tpTargetLine)
+    deleteLabelIfExists(tpEntryLbl)
+    deleteLabelIfExists(tpStopLbl)
+    deleteLabelIfExists(tpTargetLbl)
+    deleteLabelIfExists(tpSetupLbl)
+
+// builds the entry/stop/target trade-plan drawings for a just-completed
+// setup and returns their handles -- the call site is responsible for
+// clearing the previously-tracked plan first and assigning these into the
+// tp* globals (a plain function can't do either of those itself).
+buildTradePlanDrawings(string dir, float entryP, float stopP, float targetP, int conf) =>
     string setupText = dir == "bull" ? "▲ LONG SETUP\n" + str.tostring(conf) + "%" : "▼ SHORT SETUP\n" + str.tostring(conf) + "%"
     color setupColor = dir == "bull" ? #2FE08A : #FF5566
-    tpSetupLbl := label.new(bar_index, dir == "bull" ? high : low, setupText, style=dir == "bull" ? label.style_label_down : label.style_label_up, color=setupColor, textcolor=#030710, size=size.normal)
-    tpEntryLine := line.new(bar_index, entryP, bar_index + 15, entryP, color=#00D4FF, style=line.style_solid, width=2)
-    tpStopLine := line.new(bar_index, stopP, bar_index + 15, stopP, color=#FF5566, style=line.style_dashed, width=1)
-    tpTargetLine := line.new(bar_index, targetP, bar_index + 15, targetP, color=#2FE08A, style=line.style_dashed, width=1)
-    tpEntryLbl := label.new(bar_index + 15, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
-    tpStopLbl := label.new(bar_index + 15, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
-    tpTargetLbl := label.new(bar_index + 15, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
-    tpDir := dir
-    tpStop := stopP
-    tpTarget := targetP
-    tpActive := true
-
-// clears the tracked trade plan once price has actually traded through its
-// stop or target -- an entry that already played out shouldn't linger on
-// the chart as if it were still live.
-clearTradePlanIfInvalid() =>
-    if tpActive
-        bool stopped = tpDir == "bull" ? low <= tpStop : high >= tpStop
-        bool reached = tpDir == "bull" ? high >= tpTarget : low <= tpTarget
-        if stopped or reached
-            if not na(tpEntryLine)
-                line.delete(tpEntryLine)
-            if not na(tpStopLine)
-                line.delete(tpStopLine)
-            if not na(tpTargetLine)
-                line.delete(tpTargetLine)
-            if not na(tpEntryLbl)
-                label.delete(tpEntryLbl)
-            if not na(tpStopLbl)
-                label.delete(tpStopLbl)
-            if not na(tpTargetLbl)
-                label.delete(tpTargetLbl)
-            if not na(tpSetupLbl)
-                label.delete(tpSetupLbl)
-            tpActive := false
+    label setupLbl = label.new(bar_index, dir == "bull" ? high : low, setupText, style=dir == "bull" ? label.style_label_down : label.style_label_up, color=setupColor, textcolor=#030710, size=size.normal)
+    line entryLine = line.new(bar_index, entryP, bar_index + 15, entryP, color=#00D4FF, style=line.style_solid, width=2)
+    line stopLine = line.new(bar_index, stopP, bar_index + 15, stopP, color=#FF5566, style=line.style_dashed, width=1)
+    line targetLine = line.new(bar_index, targetP, bar_index + 15, targetP, color=#2FE08A, style=line.style_dashed, width=1)
+    label entryLbl = label.new(bar_index + 15, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
+    label stopLbl = label.new(bar_index + 15, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
+    label targetLbl = label.new(bar_index + 15, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
+    [setupLbl, entryLine, stopLine, targetLine, entryLbl, stopLbl, targetLbl]
 
 // ---------- order blocks (last opposing candle before a displacement move) ----------
 bool isDisplacement = math.abs(close - open) > atrVal * dispMult
@@ -435,8 +420,15 @@ bgcolor(showKillzones and inLondon ? color.new(#00D4FF, 95) : na, title="London 
 bgcolor(showKillzones and (inNyAm or inNyPm) ? color.new(#F5C86B, 95) : na, title="NY killzone")
 
 // ---------- clear the tracked trade plan once it's played out ----------
-if barstate.isconfirmed
-    clearTradePlanIfInvalid()
+// an entry that already hit its stop or target shouldn't linger on the
+// chart looking live -- top-level code (not a function) so it can actually
+// clear tpActive itself.
+if barstate.isconfirmed and tpActive
+    bool tpStopped = tpDir == "bull" ? low <= tpStop : high >= tpStop
+    bool tpReached = tpDir == "bull" ? high >= tpTarget : low <= tpTarget
+    if tpStopped or tpReached
+        clearTradePlanDrawings()
+        tpActive := false
 
 // ---------- main scan (mirrors advanceScan), only on confirmed/closed bars ----------
 if barstate.isconfirmed
@@ -532,7 +524,19 @@ if barstate.isconfirmed
                             float targetP = entryP - math.abs(entryP - stopP) * rMultiple
                             alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
                             if showVisuals
-                                drawTradePlan("bear", entryP, stopP, targetP, conf)
+                                clearTradePlanDrawings()
+                                [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
+                                tpSetupLbl := newSetupLbl
+                                tpEntryLine := newEntryLine
+                                tpStopLine := newStopLine
+                                tpTargetLine := newTargetLine
+                                tpEntryLbl := newEntryLbl
+                                tpStopLbl := newStopLbl
+                                tpTargetLbl := newTargetLbl
+                                tpDir := "bear"
+                                tpStop := stopP
+                                tpTarget := targetP
+                                tpActive := true
                             seqDir := na
                             seqPhase := na
                         else
@@ -548,7 +552,19 @@ if barstate.isconfirmed
                     float targetP = entryP - math.abs(entryP - stopP) * rMultiple
                     alert(buildAlertMessage("CHoCH_DOWN", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
                     if showVisuals
-                        drawTradePlan("bear", entryP, stopP, targetP, conf)
+                        clearTradePlanDrawings()
+                        [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
+                        tpSetupLbl := newSetupLbl
+                        tpEntryLine := newEntryLine
+                        tpStopLine := newStopLine
+                        tpTargetLine := newTargetLine
+                        tpEntryLbl := newEntryLbl
+                        tpStopLbl := newStopLbl
+                        tpTargetLbl := newTargetLbl
+                        tpDir := "bear"
+                        tpStop := stopP
+                        tpTarget := targetP
+                        tpActive := true
                     seqDir := na
                     seqPhase := na
         else if seqDir == "bull"
@@ -594,7 +610,19 @@ if barstate.isconfirmed
                             float targetP = entryP + math.abs(entryP - stopP) * rMultiple
                             alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
                             if showVisuals
-                                drawTradePlan("bull", entryP, stopP, targetP, conf)
+                                clearTradePlanDrawings()
+                                [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
+                                tpSetupLbl := newSetupLbl
+                                tpEntryLine := newEntryLine
+                                tpStopLine := newStopLine
+                                tpTargetLine := newTargetLine
+                                tpEntryLbl := newEntryLbl
+                                tpStopLbl := newStopLbl
+                                tpTargetLbl := newTargetLbl
+                                tpDir := "bull"
+                                tpStop := stopP
+                                tpTarget := targetP
+                                tpActive := true
                             seqDir := na
                             seqPhase := na
                         else
@@ -610,7 +638,19 @@ if barstate.isconfirmed
                     float targetP = entryP + math.abs(entryP - stopP) * rMultiple
                     alert(buildAlertMessage("CHoCH_UP", entryP, stopP, targetP, conf), alert.freq_once_per_bar_close)
                     if showVisuals
-                        drawTradePlan("bull", entryP, stopP, targetP, conf)
+                        clearTradePlanDrawings()
+                        [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
+                        tpSetupLbl := newSetupLbl
+                        tpEntryLine := newEntryLine
+                        tpStopLine := newStopLine
+                        tpTargetLine := newTargetLine
+                        tpEntryLbl := newEntryLbl
+                        tpStopLbl := newStopLbl
+                        tpTargetLbl := newTargetLbl
+                        tpDir := "bull"
+                        tpStop := stopP
+                        tpTarget := targetP
+                        tpActive := true
                     seqDir := na
                     seqPhase := na
 
