@@ -75,7 +75,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.06-2";
+const BUILD = "2026.08.06-3";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -1056,6 +1056,9 @@ function App() {
   const [rules, setRules] = useState(DEFAULT_RULES);
   const rulesRef = useRef(rules); rulesRef.current = rules;
   const [deskBusy, setDeskBusy] = useState(false);
+  const [insights, setInsights] = useState(null); // {text, at, count} | null
+  const insightsRef = useRef(insights); insightsRef.current = insights;
+  const [insightsBusy, setInsightsBusy] = useState(false);
 
   // ----- proactive presence -----
   const [proactiveMode, setProactiveMode] = useState(true);
@@ -1184,6 +1187,7 @@ function App() {
       try { const ch = await S.get("polaris-chat"); if (ch && ch.value) setChat(JSON.parse(ch.value)); } catch (e) {}
       chatLoadedRef.current = true;
       try { const m = await S.get("polaris-memory"); if (m && m.value) setMemory(m.value); } catch (e) {}
+      try { const pi = await S.get("polaris-insights"); if (pi && pi.value) setInsights(JSON.parse(pi.value)); } catch (e) {}
       try { const ru = await S.get("polaris-rules"); if (ru && ru.value) setRules({ ...DEFAULT_RULES, ...JSON.parse(ru.value) }); } catch (e) {}
       try { const pm = await S.get("polaris-proactive-mode"); if (pm && pm.value) setProactiveMode(pm.value === "true"); } catch (e) {}
       try { const pt = await S.get("polaris-pnl-threshold"); if (pt && pt.value) setPnlMilestone(Number(pt.value) || 500); } catch (e) {}
@@ -3091,6 +3095,40 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
     }
   }
 
+  // holistic pattern read across the whole journal -- unlike openDesk/closeDesk this is a
+  // written, DESK-tab-local readout, not a spoken monologue: no 120-word cap, not injected
+  // into the POLARIS chat transcript, not spoken aloud, and persisted via S so it survives
+  // a reload instead of living only in ephemeral chat history. Deliberately a single direct
+  // callAnthropic call rather than routed through sendToPolaris/POLARIS_TOOLS -- we already
+  // know it needs the whole journal, so there's nothing for the model to decide to look up.
+  async function analyzePatterns() {
+    const key = anthropicKeyRef.current.trim();
+    if (!key || insightsBusy || tradesRef.current.length < 5) return;
+    setInsightsBusy(true);
+    try {
+      const s = computeStats(tradesRef.current);
+      const rows = tradesRef.current.slice(0, 200).map((x) => ({
+        date: x.date, weekday: new Date(x.date + "T00:00:00").toLocaleDateString("en-US", { weekday: "short" }),
+        instrument: x.instrument, direction: x.direction, setup: x.setup,
+        pnl: +calcPnl(x).toFixed(2), r: calcR(x) != null ? +calcR(x).toFixed(2) : null, notes: x.notes || "",
+      }));
+      const sys = `You are POLARIS reviewing Landen's full trade journal for real patterns. Same personality: calm, dry British wit, loyal but honest — push back plainly where the data warrants it. This is a WRITTEN readout, not spoken aloud: plain text only, no markdown, no bullets, no asterisks. Hard limit: 250 words.
+
+Write 3-5 short paragraphs, each led by a short plain label like "BEST SETUP:", "WORST HABIT:", "TIMING:", or "ONE THING TO FIX:" — whichever are actually supported by the data. Skip any angle you don't have real evidence for rather than padding. Be specific and cite his actual numbers (win rate, avg R, P&L) per setup/day where relevant. If his notes reveal a behavioral pattern — revenge trading, FOMO entries, oversizing after a loss — say so plainly, don't soften it.
+
+AGGREGATE STATS: ${s ? `${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, profit factor ${s.pf === Infinity ? "inf" : s.pf.toFixed(2)}, avg R-multiple ${s.avgR == null ? "n/a" : s.avgR.toFixed(2) + "R"}.` : "No trades."}
+TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
+      const text = (await callAnthropic(key, sys, [{ role: "user", content: "Analyze my trading patterns." }], 900)) || "Nothing conclusive yet, sir — not enough signal in the data.";
+      const next = { text, at: Date.now(), count: tradesRef.current.length };
+      setInsights(next);
+      try { await S.set("polaris-insights", JSON.stringify(next)); } catch (e) { flash("Save failed"); }
+    } catch (e) {
+      flash("Couldn't analyze patterns — " + (e.message || "connection failed"));
+    } finally {
+      setInsightsBusy(false);
+    }
+  }
+
   function sendDraft() {
     const t = draft.trim();
     if (!t || voiceState === "thinking") return;
@@ -3366,6 +3404,27 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                 <Panel>
                   <Label color={C.cyan}>P&L calendar</Label>
                   <PnlCalendar trades={trades} />
+                </Panel>
+                <Panel>
+                  <Label color={C.cyan}>Pattern insights</Label>
+                  {stats.count < 5 ? (
+                    <div style={{ color: C.faint, fontSize: 12 }}>Log at least 5 trades to unlock this — five is a reasonable minimum before patterns mean anything.</div>
+                  ) : (
+                    <React.Fragment>
+                      <button onClick={analyzePatterns} disabled={!anthropicKey || insightsBusy}
+                        style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "10px 16px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                        {insightsBusy ? "ANALYZING…" : "◈ PATTERN INSIGHTS"}
+                      </button>
+                      {insights ? (
+                        <React.Fragment>
+                          <div style={{ whiteSpace: "pre-wrap", color: C.text, fontSize: 13, marginTop: 12, lineHeight: 1.5 }}>{insights.text}</div>
+                          <div style={{ color: C.faint, fontSize: 11, marginTop: 8 }}>Based on {insights.count} trades · generated {new Date(insights.at).toLocaleString()}</div>
+                        </React.Fragment>
+                      ) : (
+                        <div style={{ color: C.muted, fontSize: 12, marginTop: 10 }}>Tap to have Polaris review your full trade history for patterns — best/worst setups, day-of-week tendencies, and any tilt in your notes.</div>
+                      )}
+                    </React.Fragment>
+                  )}
                 </Panel>
               </React.Fragment>
             )}

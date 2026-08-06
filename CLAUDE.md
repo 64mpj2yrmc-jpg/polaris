@@ -51,6 +51,15 @@ best-effort convenience, not a requirement for the app to function.
 
 - **Trade journal** (LOG/JOURNAL/DESK/RISK tabs): manual entry, CSV/JSON export/import, P&L
   calendar, equity curve, badges. Pure functions `calcPnl`/`calcPoints`/`calcR`/`computeStats`.
+  DESK also has a **Pattern insights** panel: `analyzePatterns` (gated behind ≥5 trades logged)
+  sends `computeStats` plus a trimmed projection of the most recent 200 trades (with a
+  client-computed `weekday` field, not left for the model to derive) to `callAnthropic` for a
+  written, non-spoken readout — best/worst setups, day-of-week tendencies, tilt patterns surfaced
+  in `notes` — persisted via `S` under `polaris-insights` so it survives a reload. Deliberately a
+  direct one-shot call, not routed through `sendToPolaris`/`POLARIS_TOOLS`: this job already knows
+  it needs the whole journal, so there's nothing for the tool-use loop to decide to look up, and
+  routing through it would drag in the spoken-reply word cap and dump the result into the voice
+  chat transcript, both wrong for a longer written report.
 - **Screenshot-to-journal**: `scanScreenshot` sends a resized image to Claude vision
   (`callAnthropic`) and parses trade candidates out of the JSON response.
 - **Market scanner** (MARKET tab): `advanceScan` is a small state machine modeling
@@ -227,7 +236,7 @@ reads that fire too often to toast without flickering.
 `nq-trades`, `polaris-voice`, `polaris-ears-on`, `polaris-anthropic-key`, `polaris-chat`,
 `polaris-memory`, `polaris-rules`, `polaris-proactive-mode`, `polaris-pnl-threshold`,
 `polaris-sync-token`, `polaris-sync-gistid`, `polaris-sync-enabled`, `polaris-elevenlabs`,
-`polaris-tdkey`.
+`polaris-tdkey`, `polaris-insights`.
 
 ## External services (all called directly from the browser with user-supplied keys)
 
