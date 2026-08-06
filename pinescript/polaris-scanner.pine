@@ -992,7 +992,15 @@ buildTradePlanDrawings(string dir, float entryP, float stopP, float targetP, int
     label entryLbl = label.new(lineEnd, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
     label stopLbl = label.new(lineEnd, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
     label targetLbl = label.new(lineEnd, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
-    [tp1Price, tp2Price] = showTpLadder ? findLiquidityLevels(dir, entryP, targetP) : [float(na), float(na)]
+    // Pine ternaries can't return tuples (CE10163) -- findLiquidityLevels() returns
+    // one, so this has to be an if/else assigning into pre-declared na floats
+    // instead of the ternary pattern used everywhere else in this function.
+    float tp1Price = na
+    float tp2Price = na
+    if showTpLadder
+        [t1, t2] = findLiquidityLevels(dir, entryP, targetP)
+        tp1Price := t1
+        tp2Price := t2
     line newTp1Line = showTpLadder and not na(tp1Price) ? line.new(bar_index, tp1Price, lineEnd, tp1Price, color=color.new(#2FE08A, 60), style=line.style_dotted, width=1) : line(na)
     line newTp2Line = showTpLadder and not na(tp2Price) ? line.new(bar_index, tp2Price, lineEnd, tp2Price, color=color.new(#2FE08A, 40), style=line.style_dotted, width=1) : line(na)
     label newTp1Lbl = showTpLadder and not na(tp1Price) ? label.new(lineEnd, tp1Price, "TP1 " + str.tostring(tp1Price, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=color.new(#2FE08A, 40), size=size.small) : label(na)
