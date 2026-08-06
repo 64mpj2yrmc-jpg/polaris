@@ -577,6 +577,37 @@ app can't receive them — hence the exception to "no server logic" above). It d
      that actually says whether the system is working, since win% alone can't distinguish a 35%
      win rate at 3R average (a good system) from a 65% win rate at 1.2R average (a bad one).
 
+  **V2 Phase 6** adds a fifth entry trigger, prompted directly by a real missed setup: a clean
+  sweep, break of structure, and 1-minute entry that never fired an alert, traced back to the 1H
+  and 4H charts both showing price tap cleanly into a real fair value gap and reverse from it. The
+  core sweep/CISD/retrace engine only ever looks at FVGs on the chart's own native timeframe — the
+  existing HTF pulls (`grpHTF`/`grpDirection`) inform bias/direction, but nothing before this
+  looked at higher-timeframe FVG structure itself, so a setup built around tapping one was
+  structurally invisible no matter how clean the lower-timeframe confirmation was.
+  `detectHtfFvgReject(dir)` (new `grpHtfFvg` group, `allowHtfFvgReject` — defaults off, same as the
+  other invented triggers) tracks the single most recent untested fair value gap on a dedicated
+  higher timeframe (`htfFvgTimeframe`, default `"60"` = 1H, adjustable to `"240"` for 4H) by
+  reusing `fvgAtBull`/`fvgAtBear` as-is inside a `request.security` call — the exact same technique
+  `smtPh`/`smtPl` and `dirPh`/`dirPl` already use to evaluate a pure bar-series function in another
+  context, so no new gap-detection logic was needed. The moment price on the chart's own timeframe
+  wicks into that tracked zone and closes back out the far side, it starts a sequence exactly like
+  every other trigger — which still has to clear the same CISD + fresh lower-timeframe-FVG +
+  retrace + rejection pipeline before it actually fires a webhook, so this only adds a new way IN,
+  it doesn't loosen what counts as a completed setup. Maps to the already-reserved
+  `FVG_RETEST_BULL`/`FVG_RETEST_BEAR` webhook `setupType` codes — `functions/index.js`'s
+  `VALID_SETUP_TYPES` has carried these since before this trigger existed, so no backend change was
+  needed. `minHtfFvgSizeAtr` (default 1.0, 0 disables) floors how big that HTF gap has to be — x
+  the chart's own ATR(14), the same yardstick every other size filter in this file already uses —
+  before it's even tracked; a tracked-but-never-tapped zone also gets dropped if price later closes
+  decisively through it the wrong way without ever rejecting, so a long-stale, already-invalidated
+  gap can't fire out of context much later. `showHtfFvg` (default on) draws whichever zone is
+  currently tracked as a box on the chart, and the HUD gains a "HTF FVG {timeframe}" row showing
+  which side (if either) is currently live — both purely visual/informational, so this feature's
+  behavior is checkable at a glance rather than a silent internal state. One deliberate scope limit
+  worth naming: only the single most recent untested gap per direction is ever tracked (mirroring
+  how the trade-plan markup itself only ever tracks one active plan) — if a new HTF gap forms while
+  an older one is still untapped, the newer one replaces it rather than both being watched at once.
+
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
 with `onSnapshot` (`tvAlerts`/`tvAlertsStatus` state, `firestoreDbRef`), rendering each alert as a

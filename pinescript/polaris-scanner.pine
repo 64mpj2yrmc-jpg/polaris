@@ -201,6 +201,38 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // All three request.security pulls (HTF, direction, 1m) run unconditionally
 // every bar regardless of their toggles, same CW10003 reasoning as the
 // pre-existing htfClose/htfEma/SMT pulls.
+//
+// V2 Phase 6 -- a fifth entry trigger, prompted directly by a real missed
+// setup: a clean sweep + BOS + 1-minute entry that never fired, traced back
+// to the 1H/4H chart showing price tap into a real fair value gap and
+// reverse from it. The core sweep/CISD/retrace engine only ever looks at
+// FVGs on the chart's own native timeframe -- the existing HTF pulls
+// (grpHTF/grpDirection) inform bias/direction, but nothing before this
+// looked at higher-timeframe FVG structure itself, so a setup built around
+// tapping one was structurally invisible no matter how clean the lower-
+// timeframe confirmation was. detectHtfFvgReject(dir) (grpHtfFvg,
+// allowHtfFvgReject, default off like the other invented triggers) tracks
+// the single most recent untested fair value gap on a dedicated higher
+// timeframe (htfFvgTimeframe, default 60 = 1H) by reusing fvgAtBull/
+// fvgAtBear as-is inside a request.security call -- the exact same
+// technique smtPh/smtPl and dirPh/dirPl already use to evaluate a pure
+// bar-series function in another context, no new gap-detection logic
+// needed. The moment price on the CHART's own timeframe wicks into that
+// tracked zone and closes back out the far side, it starts a sequence --
+// which still has to clear the same CISD + fresh lower-timeframe-FVG +
+// retrace + rejection pipeline every other trigger does before it actually
+// fires a webhook, so this adds a new way IN without loosening what counts
+// as a real completed setup. Maps to the already-reserved
+// FVG_RETEST_BULL/FVG_RETEST_BEAR webhook setupType codes (functions/
+// index.js's VALID_SETUP_TYPES has carried these since before this trigger
+// existed) -- no backend change needed. minHtfFvgSizeAtr floors how big
+// that HTF gap has to be (x the chart's own ATR(14), the same yardstick
+// every other size filter in this file already uses) before it's even
+// tracked, and a tracked-but-never-tapped gap gets dropped if price later
+// closes decisively through it the wrong way, so a long-stale, already-
+// invalidated zone can't fire out of context months later. showHtfFvg
+// draws whichever zone is currently tracked so this is visible on the
+// chart, not just a silent internal state.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -347,6 +379,12 @@ grpSMT = "SMT Divergence"
 useSmtConfluence = input.bool(true, "Factor SMT divergence into confidence score (never blocks a signal)", group=grpSMT)
 smtSymbol        = input.symbol("CME_MINI:ES1!", "Correlated symbol to compare swing points against", group=grpSMT)
 
+grpHtfFvg = "Higher-Timeframe FVG Reject"
+allowHtfFvgReject = input.bool(false, "Allow higher-timeframe FVG reject setups (author's own extension -- see header note)", group=grpHtfFvg)
+htfFvgTimeframe   = input.timeframe("60", "Timeframe to detect fair value gaps on (e.g. 60 = 1H, 240 = 4H)", group=grpHtfFvg)
+minHtfFvgSizeAtr  = input.float(1.0, "Min HTF FVG size to track, x chart ATR(14) (0 disables the floor)", minval=0, step=0.1, group=grpHtfFvg)
+showHtfFvg        = input.bool(true, "Draw the currently tracked HTF FVG zone on the chart", group=grpHtfFvg)
+
 // ---------- types ----------
 type Swing
     int   idx
@@ -399,6 +437,20 @@ var bool  smtBullDiv  = false
 // directly (see the swing-detection block below) when useMtfDirection is on.
 var float dirPrevHigh = na
 var float dirPrevLow  = na
+
+// Higher-timeframe FVG tracking (htfFvgTimeframe, default 1H) -- the single
+// most recent untested gap in each direction. "Tested" means either
+// consumed as a trigger or invalidated (price closed decisively through it
+// the wrong way without ever rejecting) -- either way it stops being a live
+// zone until a new one forms. Boxes are visual only (showHtfFvg).
+var float htfBullFvgLo = na
+var float htfBullFvgHi = na
+var bool  htfBullFvgTested = true // true = no active untested zone
+var float htfBearFvgLo = na
+var float htfBearFvgHi = na
+var bool  htfBearFvgTested = true
+var box   htfFvgBullBox = na
+var box   htfFvgBearBox = na
 
 // ---------- persistent state: trade-plan markup (single most recent completed setup) ----------
 var line  tpEntryLine = na
@@ -627,6 +679,14 @@ bool regimeOk = not useRegimeFilter or adxVal >= adxThreshold
 float m1Range = m1h - m1l
 bool m1RejectionBear = m1Range > 0 and (m1h - math.max(m1o, m1c)) > m1Range * 0.5
 bool m1RejectionBull = m1Range > 0 and (math.min(m1o, m1c) - m1l) > m1Range * 0.5
+
+// Higher-timeframe FVG detection -- reuses fvgAtBull/fvgAtBear as-is,
+// evaluated on htfFvgTimeframe via request.security exactly the way
+// smtPh/smtPl and dirPh/dirPl already evaluate a pure bar-series function
+// in another context. lookahead=off means this only ever reflects the last
+// *closed* HTF bar, same repaint-safety as htfClose/htfEma/dirPh/dirPl.
+[htfFvgBullHasR, htfFvgBullLoR, htfFvgBullHiR] = request.security(syminfo.tickerid, htfFvgTimeframe, fvgAtBull(0), lookahead=barmerge.lookahead_off)
+[htfFvgBearHasR, htfFvgBearLoR, htfFvgBearHiR] = request.security(syminfo.tickerid, htfFvgTimeframe, fvgAtBear(0), lookahead=barmerge.lookahead_off)
 
 // declared here (not down by the order-block section it was originally
 // written for) because detectContinuation()/detectBreakout() below also
@@ -880,6 +940,33 @@ detectBreakout(string dir) =>
             cisdTarget := cisdTargetBear()
     [found, level, extreme, cisdTarget]
 
+// detectHtfFvgReject(dir) -- fires when price wicks into the single most
+// recent untested higher-timeframe FVG (tracked above) and closes back out
+// the far side. level = the zone's near edge (the boundary that has to
+// hold -- closing back through it the wrong way invalidates the sequence,
+// same as every other trigger); extreme = this bar's wick into the zone
+// (the stop basis). Reuses cisdTargetBull/Bear() as-is, same as every other
+// trigger. Does NOT mark the zone tested itself -- the call site does that,
+// same split as every other detector (functions only read state here).
+detectHtfFvgReject(string dir) =>
+    bool found = false
+    float level = na
+    float extreme = na
+    float cisdTarget = na
+    if dir == "bull" and not htfBullFvgTested and not na(htfBullFvgHi)
+        if low <= htfBullFvgHi and close > htfBullFvgHi
+            found := true
+            level := htfBullFvgHi
+            extreme := low
+            cisdTarget := cisdTargetBull()
+    else if dir == "bear" and not htfBearFvgTested and not na(htfBearFvgLo)
+        if high >= htfBearFvgLo and close < htfBearFvgLo
+            found := true
+            level := htfBearFvgLo
+            extreme := high
+            cisdTarget := cisdTargetBear()
+    [found, level, extreme, cisdTarget]
+
 // shouldFireSetup(setupType, dir) -- the master gate every candidate signal
 // passes through before a detector even runs. Per-type on/off toggle, the
 // bias/HTF/regime/session checks that started as inline bearAllowed/
@@ -891,7 +978,7 @@ detectBreakout(string dir) =>
 // at the 4 completion sites, since it depends on that specific sequence's
 // FVG, not something shouldFireSetup has visibility into at the sweep stage.
 shouldFireSetup(string setupType, string dir) =>
-    bool typeAllowed = setupType == "sweep" ? allowSweep : setupType == "reversal" ? allowReversal : setupType == "continuation" ? allowContinuation : setupType == "breakout" ? allowBreakout : false
+    bool typeAllowed = setupType == "sweep" ? allowSweep : setupType == "reversal" ? allowReversal : setupType == "continuation" ? allowContinuation : setupType == "breakout" ? allowBreakout : setupType == "htf_fvg" ? allowHtfFvgReject : false
     bool biasOk = dir == "bear" ? structureBias != "bull" : structureBias != "bear"
     bool htfOk = not useHtfBias or (dir == "bear" ? htfBias != "bull" : htfBias != "bear")
     bool sessionOk = not useSessionFilter or inAnyKillzone
@@ -915,6 +1002,7 @@ setupTypeForTrigger(string trigger, string dir) =>
     bool isDown = dir == "bear"
     trigger == "sweep" ? (isDown ? "LIQUIDITY_SWEEP_SELL" : "LIQUIDITY_SWEEP_BUY") :
      trigger == "reversal" ? (isDown ? "CHoCH_DOWN" : "CHoCH_UP") :
+     trigger == "htf_fvg" ? (isDown ? "FVG_RETEST_BEAR" : "FVG_RETEST_BULL") :
      (isDown ? "BOS_DOWN" : "BOS_UP")
 
 // ---------- webhook payload builders ----------
@@ -1148,6 +1236,41 @@ if showSessionVolatility and barstate.isconfirmed
         curSessionHigh := math.max(curSessionHigh, high)
         curSessionLow := math.min(curSessionLow, low)
 
+// ---------- higher-timeframe FVG tracking ----------
+// runs every confirmed bar: (1) adopt a freshly detected HTF gap as the new
+// tracked zone, size-filtered by minHtfFvgSizeAtr x the chart's own ATR;
+// (2) drop the tracked zone if price has since closed decisively through it
+// the wrong way without ever rejecting (a failed/invalidated gap shouldn't
+// linger and fire out of context later); (3) keep the visual box in sync.
+// Consuming a zone as an actual trigger (marking it tested) happens in the
+// main scan block below, not here.
+if barstate.isconfirmed
+    if htfFvgBullHasR and (htfFvgBullHiR - htfFvgBullLoR) >= minHtfFvgSizeAtr * atrVal and (na(htfBullFvgLo) or htfFvgBullLoR != htfBullFvgLo or htfFvgBullHiR != htfBullFvgHi)
+        htfBullFvgLo := htfFvgBullLoR
+        htfBullFvgHi := htfFvgBullHiR
+        htfBullFvgTested := false
+        if not na(htfFvgBullBox)
+            box.delete(htfFvgBullBox)
+        htfFvgBullBox := showHtfFvg ? box.new(bar_index - 50, top=htfBullFvgHi, right=bar_index + 10, bottom=htfBullFvgLo, border_color=color.new(#00D4FF, 25), bgcolor=color.new(#00D4FF, 90), extend=extend.right, text="HTF FVG", text_size=size.tiny, text_color=color.new(#00D4FF, 10)) : box(na)
+    if not htfBullFvgTested and not na(htfBullFvgLo) and close < htfBullFvgLo
+        htfBullFvgTested := true // failed -- closed back through the bottom without ever rejecting from the top
+        if not na(htfFvgBullBox)
+            box.delete(htfFvgBullBox)
+            htfFvgBullBox := box(na)
+
+    if htfFvgBearHasR and (htfFvgBearHiR - htfFvgBearLoR) >= minHtfFvgSizeAtr * atrVal and (na(htfBearFvgLo) or htfFvgBearLoR != htfBearFvgLo or htfFvgBearHiR != htfBearFvgHi)
+        htfBearFvgLo := htfFvgBearLoR
+        htfBearFvgHi := htfFvgBearHiR
+        htfBearFvgTested := false
+        if not na(htfFvgBearBox)
+            box.delete(htfFvgBearBox)
+        htfFvgBearBox := showHtfFvg ? box.new(bar_index - 50, top=htfBearFvgHi, right=bar_index + 10, bottom=htfBearFvgLo, border_color=color.new(#00D4FF, 25), bgcolor=color.new(#00D4FF, 90), extend=extend.right, text="HTF FVG", text_size=size.tiny, text_color=color.new(#00D4FF, 10)) : box(na)
+    if not htfBearFvgTested and not na(htfBearFvgLo) and close > htfBearFvgHi
+        htfBearFvgTested := true // failed -- closed back through the top without ever rejecting from the bottom
+        if not na(htfFvgBearBox)
+            box.delete(htfFvgBearBox)
+            htfFvgBearBox := box(na)
+
 // ---------- clear the tracked trade plan once it's played out ----------
 // an entry that already hit its stop or target shouldn't linger on the
 // chart looking live -- top-level code (not a function) so it can actually
@@ -1265,6 +1388,25 @@ if barstate.isconfirmed
                 if showVisuals
                     label.new(bar_index, high, "⚡ BREAKOUT", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
 
+        if na(seqDir) and shouldFireSetup("htf_fvg", "bear")
+            [found, level, extreme, cisdTarget] = detectHtfFvgReject("bear")
+            if found
+                seqDir := "bear"
+                seqPhase := "sweep"
+                seqLevel := level
+                seqSweepExtreme := extreme
+                seqCisdTarget := cisdTarget
+                seqSweepBar := bar_index
+                seqHasFvg := false
+                seqSmtAligned := smtBearDiv
+                seqTriggerType := "htf_fvg"
+                htfBearFvgTested := true
+                if not na(htfFvgBearBox)
+                    box.delete(htfFvgBearBox)
+                    htfFvgBearBox := box(na)
+                if showVisuals
+                    label.new(bar_index, high, "⚡ HTF FVG", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
+
         if na(seqDir) and shouldFireSetup("sweep", "bull")
             [found, level, extreme, cisdTarget] = detectSweep("bull")
             if found
@@ -1324,6 +1466,25 @@ if barstate.isconfirmed
                 seqTriggerType := "breakout"
                 if showVisuals
                     label.new(bar_index, low, "⚡ BREAKOUT", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
+
+        if na(seqDir) and shouldFireSetup("htf_fvg", "bull")
+            [found, level, extreme, cisdTarget] = detectHtfFvgReject("bull")
+            if found
+                seqDir := "bull"
+                seqPhase := "sweep"
+                seqLevel := level
+                seqSweepExtreme := extreme
+                seqCisdTarget := cisdTarget
+                seqSweepBar := bar_index
+                seqHasFvg := false
+                seqSmtAligned := smtBullDiv
+                seqTriggerType := "htf_fvg"
+                htfBullFvgTested := true
+                if not na(htfFvgBullBox)
+                    box.delete(htfFvgBullBox)
+                    htfFvgBullBox := box(na)
+                if showVisuals
+                    label.new(bar_index, low, "⚡ HTF FVG", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
 
     else
         if bar_index - seqSweepBar > maxBarsValid
@@ -1594,7 +1755,7 @@ if showVisuals and not na(seqPhase)
     line.new(seqSweepBar, seqLevel, bar_index, seqLevel, color=color.new(#F5C86B, 55), style=line.style_dashed, width=1)
 
 // ---------- status HUD (top-right) ----------
-var table hud = table.new(position=position.top_right, columns=2, rows=12, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
+var table hud = table.new(position=position.top_right, columns=2, rows=13, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
 
 if showHud and barstate.islast
     // "BIAS" row doubles as the direction row -- structureBias IS the direction
@@ -1630,6 +1791,10 @@ if showHud and barstate.islast
         string m1Txt = m1RejectionBear ? "BEAR REJ" : m1RejectionBull ? "BULL REJ" : "--"
         table.cell(hud, 0, 9, "M1", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
         table.cell(hud, 1, 9, m1Txt, text_color=m1Txt == "--" ? #6E93AD : #F5C86B, text_size=size.small, text_halign=text.align_right)
+    if allowHtfFvgReject or showHtfFvg
+        string htfFvgTxt = not htfBullFvgTested and not na(htfBullFvgLo) ? "BULL @ " + str.tostring(htfBullFvgHi, format.mintick) : not htfBearFvgTested and not na(htfBearFvgLo) ? "BEAR @ " + str.tostring(htfBearFvgLo, format.mintick) : "--"
+        table.cell(hud, 0, 12, "HTF FVG " + htfFvgTimeframe, text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 12, htfFvgTxt, text_color=htfFvgTxt == "--" ? #6E93AD : #00D4FF, text_size=size.small, text_halign=text.align_right)
     if showScorecard
         int totalResolved = scoreWins + scoreLosses
         string scoreTxt = totalResolved > 0 ? str.tostring(math.round(scoreWins / totalResolved * 100)) + "% (" + str.tostring(scoreWins) + "/" + str.tostring(totalResolved) + ")" : "-- (0/0)"
