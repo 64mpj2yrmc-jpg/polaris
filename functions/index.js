@@ -24,9 +24,17 @@
 //     always knows what the indicator is currently tracking (including its
 //     live scorecard) between full setups.
 //
-// Also fires a best-effort SMS via Twilio's REST API once a "setup" alert
-// is stored (see sendSmsAlert below) -- no Twilio SDK dependency, just
-// fetch, since Node 22's runtime has it built in.
+// Also fires a best-effort SMS AND a best-effort voice call via Twilio's
+// REST API once a "setup" alert is stored (see sendSmsAlert/sendVoiceCall
+// below) -- no Twilio SDK dependency, just fetch, since Node 22's runtime
+// has it built in. Both reuse the same four Twilio env vars/numbers; the
+// call places to the same TWILIO_TO_NUMBER the text goes to. The call is
+// the "wake me up" mechanism (deliberately doesn't read exact prices aloud
+// -- TTS misreads decimals easily, and the SMS/app already have the exact
+// numbers); the text is the written record. An optional QUIET_HOURS_START/
+// QUIET_HOURS_END window (America/New_York, both required to enable) can
+// suppress the call overnight without affecting the text or the Firestore
+// write -- see isQuietHours.
 
 const functions = require("@google-cloud/functions-framework");
 const admin = require("firebase-admin");
@@ -48,6 +56,15 @@ const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
 const TWILIO_TO_NUMBER = process.env.TWILIO_TO_NUMBER;
+
+// Optional overnight suppression window for sendVoiceCall only -- plain env
+// vars (not secrets), 24hr "HH:MM" in America/New_York (matching the timezone
+// convention the rest of this system already uses, e.g. the Pine script's
+// killzone sessions). Both must be set and parseable to enable; either
+// missing/malformed disables the window entirely, so the call always goes
+// through by default until you deliberately configure this.
+const QUIET_HOURS_START = process.env.QUIET_HOURS_START; // e.g. "22:00"
+const QUIET_HOURS_END = process.env.QUIET_HOURS_END; // e.g. "07:00"
 
 // Keep this list in sync with whatever setup labels your Pine Script emits.
 // Rejecting unknown types catches typos/drift early instead of letting junk
@@ -185,6 +202,86 @@ async function sendSmsAlert(data) {
   }
 }
 
+function parseHHMM(s) {
+  const m = typeof s === "string" && s.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+// Checked only by sendVoiceCall -- the SMS and Firestore write are never
+// gated by this. Wraps past midnight the same way the Pine script's Asia
+// killzone session string does (e.g. start=22:00, end=07:00).
+function isQuietHours() {
+  const start = parseHHMM(QUIET_HOURS_START);
+  const end = parseHHMM(QUIET_HOURS_END);
+  if (start == null || end == null) return false; // not configured -- never quiet
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", hour12: false, hour: "numeric", minute: "numeric",
+  }).formatToParts(new Date());
+  const hour = Number(parts.find((p) => p.type === "hour").value);
+  const minute = Number(parts.find((p) => p.type === "minute").value);
+  const nowMin = hour * 60 + minute;
+  return start <= end ? (nowMin >= start && nowMin < end) : (nowMin >= start || nowMin < end);
+}
+
+function escapeXml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" }[c]));
+}
+
+// Parallel, simplified version of index.html's own client-side
+// setupTypeLabel() (not importable here -- separate runtime) for a spoken
+// line. Falls back to a de-underscored, lowercased version of the raw code
+// for anything not explicitly mapped, so a future setupType still reads as
+// words instead of a code.
+function setupTypeSpokenLabel(setupType) {
+  const map = {
+    CHoCH_UP: "a bullish change of character",
+    CHoCH_DOWN: "a bearish change of character",
+    BOS_UP: "a bullish break of structure",
+    BOS_DOWN: "a bearish break of structure",
+    LIQUIDITY_SWEEP_BUY: "a bullish liquidity sweep",
+    LIQUIDITY_SWEEP_SELL: "a bearish liquidity sweep",
+    FVG_RETEST_BULL: "a bullish fair value gap retest",
+    FVG_RETEST_BEAR: "a bearish fair value gap retest",
+  };
+  return map[setupType] || String(setupType).replace(/_/g, " ").toLowerCase();
+}
+
+// Best-effort wake-up call -- never throws, never blocks or fails the webhook
+// response. By the time this runs the alert is already safely stored in
+// Firestore (and the text already fired), so a failed/skipped call never
+// loses the alert. Deliberately doesn't read exact entry/stop/target prices
+// aloud (easy to mishear over a phone call, and the SMS/app already have the
+// exact numbers) -- this call's only job is to wake you and point you at
+// them, so the line is short and said twice for clarity.
+async function sendVoiceCall(data) {
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER || !TWILIO_TO_NUMBER) return;
+  if (isQuietHours()) {
+    console.log("sendVoiceCall: skipped — inside quiet hours");
+    return;
+  }
+  try {
+    const label = setupTypeSpokenLabel(data.setupType);
+    const line = escapeXml(`Polaris alert. ${label} on ${data.symbol || "the chart"}, ${data.timeframe || ""} timeframe. Confidence ${data.confidence} percent. Check the app.`);
+    const twiml = `<Response><Say voice="Polly.Matthew">${line}</Say><Pause length="1"/><Say voice="Polly.Matthew">Repeating. ${line}</Say></Response>`;
+    const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+    const params = new URLSearchParams({ To: TWILIO_TO_NUMBER, From: TWILIO_FROM_NUMBER, Twiml: twiml });
+    const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls.json`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${auth}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: params,
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.error("sendVoiceCall: Twilio request failed", res.status, errText);
+    }
+  } catch (err) {
+    console.error("sendVoiceCall: failed to place call", err);
+  }
+}
+
 functions.http("receiveAlert", async (req, res) => {
   if (req.method !== "POST") {
     res.status(405).json({ ok: false, error: "Method not allowed — use POST" });
@@ -245,7 +342,7 @@ functions.http("receiveAlert", async (req, res) => {
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
     });
     console.log("receiveAlert: stored alert", docRef.id, result.data.setupType);
-    await sendSmsAlert(result.data);
+    await Promise.all([sendSmsAlert(result.data), sendVoiceCall(result.data)]);
     res.status(201).json({ ok: true, id: docRef.id });
   } catch (err) {
     console.error("receiveAlert: Firestore write failed", err);

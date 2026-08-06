@@ -305,14 +305,26 @@ app can't receive them — hence the exception to "no server logic" above). It d
   `process.env.WEBHOOK_SECRET`, bound via a Secret Manager reference set in the Cloud Run console
   (service → Edit & deploy new revision → Container(s) → Variables & Secrets → Secrets), not
   `defineSecret`. Validates the payload and writes to the Firestore `alerts` collection via the
-  Admin SDK either way. Also fires a best-effort SMS via Twilio's plain REST API (`sendSmsAlert`,
-  called after the Firestore write succeeds, `fetch` + HTTP Basic Auth — no Twilio SDK dependency,
-  Node's runtime has `fetch` built in) once a setup fires. Four env vars gate it, all-or-nothing:
+  Admin SDK either way. Also fires a best-effort SMS AND a best-effort voice call via Twilio's
+  plain REST API (`sendSmsAlert`/`sendVoiceCall`, both run concurrently via `Promise.all` after the
+  Firestore write succeeds, `fetch` + HTTP Basic Auth — no Twilio SDK dependency, Node's runtime
+  has `fetch` built in) once a setup fires. Four env vars gate both, all-or-nothing:
   `TWILIO_ACCOUNT_SID`, `TWILIO_FROM_NUMBER`, `TWILIO_TO_NUMBER` are plain (non-secret) environment
   variables — only `TWILIO_AUTH_TOKEN` is an actual credential, so only it goes through the same
-  Secret Manager reference dance as `WEBHOOK_SECRET`. Any of the four missing and it no-ops
-  silently; a failed text is logged but never fails the webhook response — the alert is already
-  safely stored in Firestore by that point.
+  Secret Manager reference dance as `WEBHOOK_SECRET`. Any of the four missing and both no-op
+  silently; a failed text/call is logged but never fails the webhook response — the alert is
+  already safely stored in Firestore by that point. `sendVoiceCall` places an outbound call
+  (Twilio's `Calls` endpoint, inline `Twiml` param — no separate TwiML-hosting endpoint needed)
+  reusing the same four env vars/numbers as the text; deliberately doesn't read exact entry/stop/
+  target prices aloud (easy to mishear over a phone call, and the SMS/app already have the exact
+  numbers) — the line is short (setup type in plain English via `setupTypeSpokenLabel`, symbol,
+  timeframe, confidence, "check the app") and said twice for clarity, since its only job is to wake
+  you and point you at the text/app, not replace either. An optional overnight suppression window
+  — `QUIET_HOURS_START`/`QUIET_HOURS_END`, plain `"HH:MM"` env vars in America/New_York, both
+  required to enable, wraps past midnight the same way the Pine script's Asia killzone session
+  string does — gates only the call via `isQuietHours()`; the text and Firestore write are never
+  affected by it. Leaving both unset means the call always goes through, so this is opt-in, not a
+  default behavior change.
 - `firestore.rules` — deliberately does **not** allow unauthenticated client writes to `/alerts`,
   even though that was the original ask. The Cloud Function's Admin SDK write bypasses rules
   entirely, so it's already the real security boundary; opening Firestore itself to public writes
