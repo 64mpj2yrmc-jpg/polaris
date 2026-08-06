@@ -276,6 +276,24 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // same bias-agnostic fallback premium/discount already uses. Never a gate
 // or a confidence input -- purely a visual reference, same as premium/
 // discount and the killzone shading.
+//
+// V2 Phase 8 -- prompted by a real MNQ scorecard reading (win rate/EXP) that
+// covers all five trigger types blended into one number, with no way to see
+// which trigger is actually earning that edge and which might be dragging it
+// down. buildAlertMessage() now includes a "triggerType" field carrying the
+// raw seqTriggerType value ("sweep"/"reversal"/"continuation"/"breakout"/
+// "htf_fvg") alongside the existing setupType -- setupType alone can't
+// distinguish continuation from breakout (both report BOS_UP/BOS_DOWN, see
+// setupTypeForTrigger() above, since functions/index.js's VALID_SETUP_TYPES
+// has no separate breakout slot), so this is a second, untranslated field
+// specifically so the dashboard can break performance out by all five real
+// trigger types instead of four. Purely additive to the webhook payload --
+// setupType, riskReward, targetSource, everything else is unchanged, and
+// functions/index.js accepts the new field as optional so alerts fired
+// before this change still validate fine (they just come through with no
+// triggerType, and index.html falls back to inferring what it can from
+// setupType for that older data). See index.html's "Indicator performance
+// tracking" section for how the dashboard actually uses this.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -1094,7 +1112,14 @@ buildAlertMessage(string setupType, float entryPrice, float stopPrice, float tar
     float risk = math.abs(entryPrice - stopPrice)
     float reward = math.abs(targetPrice - entryPrice)
     float rr = risk > 0 ? math.round((reward / risk) * 100) / 100 : na
-    '{"secret":"' + webhookSecret + '","kind":"setup","setupType":"' + setupType + '","entryPrice":' + str.tostring(entryPrice) +
+    // triggerType rides along as its own field, separate from setupType --
+    // setupType is constrained to what functions/index.js's VALID_SETUP_TYPES
+    // already accepts (continuation and breakout both report BOS_*, see
+    // setupTypeForTrigger() above), but triggerType carries the real
+    // seqTriggerType value ("sweep"/"reversal"/"continuation"/"breakout"/
+    // "htf_fvg") untranslated, so the dashboard can tell continuation and
+    // breakout apart even though the webhook setupType alone can't.
+    '{"secret":"' + webhookSecret + '","kind":"setup","setupType":"' + setupType + '","triggerType":"' + seqTriggerType + '","entryPrice":' + str.tostring(entryPrice) +
      ',"stopPrice":' + str.tostring(stopPrice) + ',"targetPrice":' + str.tostring(targetPrice) +
      ',"confidence":' + str.tostring(confidence) + ',"riskReward":' + str.tostring(rr) +
      ',"targetSource":"' + (targetIsPool ? "pool" : "fallback") + '"' +

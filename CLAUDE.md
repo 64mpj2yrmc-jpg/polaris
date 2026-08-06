@@ -635,6 +635,16 @@ app can't receive them — hence the exception to "no server logic" above). It d
   when there's no bias yet, the same bias-agnostic fallback premium/discount uses. Never a gate or a
   confidence input, same as premium/discount and killzone shading.
 
+  **V2 Phase 8** — prompted by a real MNQ scorecard reading (win rate/EXP) that blends all five
+  trigger types into one number with no way to see which one is actually earning it.
+  `buildAlertMessage()` now also sends a `triggerType` field (the raw `seqTriggerType` value —
+  `"sweep"`/`"reversal"`/`"continuation"`/`"breakout"`/`"htf_fvg"` — untranslated) alongside the
+  existing `setupType` on every setup webhook, since `setupType` alone can't tell continuation and
+  breakout apart (both report `BOS_*`, `functions/index.js`'s `VALID_SETUP_TYPES` has no separate
+  breakout slot). Purely additive — every other field is unchanged, and the Cloud Function accepts
+  the new field as optional so alerts fired before this change still validate fine with it absent.
+  See `index.html`'s "Indicator performance tracking" entry below for how the dashboard uses it.
+
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
 with `onSnapshot` (`tvAlerts`/`tvAlertsStatus` state, `firestoreDbRef`), rendering each alert as a
@@ -708,6 +718,32 @@ Polaris's own track record, not judged in a vacuum) and `buildSystemPrompt()` (s
 actually any good at this" in chat gets a real, sample-size-aware answer), shown on the ALERTS tab
 as a "◆ POLARIS CALIBRATION" panel (hidden until at least one bucket has data), and each alert
 card gets a WON/LOST badge next to its status badge once resolved.
+
+**Indicator performance tracking (by trigger type / confidence).** The Pine scanner's own on-chart
+scorecard (SCORE/EXP) blends all five entry triggers — sweep, reversal, continuation, breakout,
+HTF FVG reject — into one number, which can't say whether one trigger type is quietly carrying
+the edge while another drags it down. Prompted by a real MNQ read (25/64, +0.18R) where that
+question had no answer. `buildAlertMessage()` in the Pine script now sends a `triggerType` field
+(the raw `seqTriggerType` value, untranslated) alongside `setupType` on every setup webhook —
+`setupType` alone can't distinguish continuation from breakout (both report `BOS_*`, since
+`functions/index.js`'s `VALID_SETUP_TYPES` has no separate breakout slot), so this rides along as
+a second field specifically for this. `functions/index.js` accepts it as optional
+(`VALID_TRIGGER_TYPES` allow-list, silently dropped to `null` if absent/unrecognized rather than
+rejecting the alert) and stores it as-is — alerts fired before this field existed still validate
+fine, just without it. In `index.html`, `alertTriggerBucket(a)` (module scope) prefers `a.triggerType`
+when present and falls back to inferring what `setupType` alone can distinguish for older alerts —
+sweep/reversal/htf_fvg map cleanly, `BOS_*` lands in a combined `"structure"` bucket since
+continuation and breakout can't be told apart after the fact. `alertRealizedR(a)` computes each
+resolved alert's realized R using the identical convention the Pine scorecard's own EXP already
+uses (a loss is always exactly `-1R`; a win pays its own real `riskReward`, falling back to `1R`
+only if that wasn't computable at fire time). Two `useMemo`s over `tvAlerts` —
+`performanceByTrigger` and `performanceByConfidence` (the latter bucketed by `confidenceTier(conf)`:
+low `<50`, mid `50-74`, high `≥75`) — tally `{n, w, sumR}` per bucket, resolved alerts only. Shown
+on the ALERTS tab as a "◆ INDICATOR PERFORMANCE" panel (hidden until at least one bucket has data,
+same convention as the calibration panel), each populated bucket showing win% and EXP
+(`sumR / n`) side by side — this is the number that answers "which trigger type/confidence tier
+is actually earning its keep," meant to inform which of the Pine script's `allow*` toggles or
+`minRiskReward`/session/ADX gates are worth tightening, rather than changing any of them blind.
 
 **Live indicator status (between full setups).** The Pine scanner also fires a second, much
 lighter webhook payload on every phase advance (sweep detected → CISD confirmed → retracing) —

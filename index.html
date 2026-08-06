@@ -75,7 +75,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.06-3";
+const BUILD = "2026.08.06-4";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -288,6 +288,51 @@ function setupTypeLabel(setupType) {
     FVG_RETEST_BEAR: "Bearish fair value gap retest",
   };
   return labels[setupType] || setupType || "Setup";
+}
+
+// Which of the Pine scanner's five real entry triggers produced an alert.
+// Prefers the alert's own triggerType field (added alongside setupType
+// specifically because setupType alone can't tell continuation and breakout
+// apart — both report BOS_*, see pinescript/polaris-scanner.pine's
+// setupTypeForTrigger()). Alerts fired before triggerType existed fall back
+// to inferring what setupType alone can distinguish — sweep/reversal/htf_fvg
+// map cleanly, BOS_* lands in a combined "structure" bucket since there's no
+// way to split it further after the fact.
+const TRIGGER_BUCKET_LABELS = {
+  sweep: "Sweep",
+  reversal: "Reversal",
+  continuation: "Continuation",
+  breakout: "Breakout",
+  htf_fvg: "HTF FVG reject",
+  structure: "Structure break (continuation + breakout, older alerts)",
+};
+function alertTriggerBucket(a) {
+  if (a.triggerType && TRIGGER_BUCKET_LABELS[a.triggerType]) return a.triggerType;
+  const st = a.setupType || "";
+  if (st.startsWith("LIQUIDITY_SWEEP")) return "sweep";
+  if (st.startsWith("CHoCH")) return "reversal";
+  if (st.startsWith("FVG_RETEST")) return "htf_fvg";
+  if (st.startsWith("BOS")) return "structure";
+  return null;
+}
+
+// Confidence tier an alert's setupConfidence() score falls into (0-100 scale).
+function confidenceTier(conf) {
+  if (typeof conf !== "number") return null;
+  if (conf >= 75) return "high";
+  if (conf >= 50) return "mid";
+  return "low";
+}
+const CONFIDENCE_TIER_LABELS = { high: "High (75-100)", mid: "Mid (50-74)", low: "Low (<50)" };
+
+// Realized R for one resolved alert — losses always resolve at the stop
+// (-1R, same convention the Pine scanner's own scorecard uses), wins pay out
+// that alert's own real riskReward rather than a fixed amount, falling back
+// to 1R only in the rare case riskReward wasn't computable at fire time.
+function alertRealizedR(a) {
+  if (a.outcome === "win") return typeof a.riskReward === "number" && a.riskReward > 0 ? a.riskReward : 1;
+  if (a.outcome === "loss") return -1;
+  return null;
 }
 
 // Deterministic explanation of why an alert's entry/stop/target sit where
@@ -1427,6 +1472,45 @@ Judge this ONE setup on its own merits — structure quality, risk/reward, wheth
     });
     return parts.join(", ");
   }
+
+  // Indicator performance tracking — breaks the aggregate scorecard win
+  // rate/EXP the Pine indicator already shows apart by which of its five
+  // real entry triggers (or confidence tier) actually produced each
+  // resolved alert, so a single blended number can't hide one trigger type
+  // quietly dragging the edge down while another carries it. Same win/loss →
+  // R convention as the Pine scorecard's own EXP (sumR / n): a loss is
+  // always -1R, a win pays its own real riskReward. Only resolved alerts
+  // (outcome set by resolveAlertOutcomes) count — n=0 buckets are hidden in
+  // the UI rather than shown as a misleading 0%.
+  const performanceByTrigger = useMemo(() => {
+    const buckets = {};
+    tvAlerts.forEach((a) => {
+      const r = alertRealizedR(a);
+      if (r == null) return;
+      const key = alertTriggerBucket(a);
+      if (!key) return;
+      if (!buckets[key]) buckets[key] = { n: 0, w: 0, sumR: 0 };
+      buckets[key].n++;
+      if (a.outcome === "win") buckets[key].w++;
+      buckets[key].sumR += r;
+    });
+    return buckets;
+  }, [tvAlerts]);
+
+  const performanceByConfidence = useMemo(() => {
+    const buckets = {};
+    tvAlerts.forEach((a) => {
+      const r = alertRealizedR(a);
+      if (r == null) return;
+      const tier = confidenceTier(a.confidence);
+      if (!tier) return;
+      if (!buckets[tier]) buckets[tier] = { n: 0, w: 0, sumR: 0 };
+      buckets[tier].n++;
+      if (a.outcome === "win") buckets[tier].w++;
+      buckets[tier].sumR += r;
+    });
+    return buckets;
+  }, [tvAlerts]);
 
   useEffect(() => {
     if (syncReadyRef.current) return;
@@ -3780,6 +3864,55 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
                     );
                   })}
                 </div>
+              </Panel>
+            )}
+
+            {(Object.keys(performanceByTrigger).length > 0 || Object.keys(performanceByConfidence).length > 0) && (
+              <Panel>
+                <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold, marginBottom: 8 }}>◆ INDICATOR PERFORMANCE</div>
+                <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
+                  Win rate and EXP (average realized R) by what actually triggered each resolved alert, and by how confident the indicator was — resolved alerts only, small buckets mean small confidence.
+                </div>
+                {Object.keys(performanceByTrigger).length > 0 && (
+                  <React.Fragment>
+                    <Label>By trigger type</Label>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, fontSize: 12, marginTop: 4, marginBottom: 12 }}>
+                      {["sweep", "reversal", "continuation", "breakout", "htf_fvg", "structure"].map((key) => {
+                        const b = performanceByTrigger[key];
+                        if (!b || b.n === 0) return null;
+                        const pct = Math.round((b.w / b.n) * 100);
+                        const exp = b.sumR / b.n;
+                        return (
+                          <div key={key}>
+                            <Label>{TRIGGER_BUCKET_LABELS[key]}</Label>
+                            <div style={{ color: pct >= 50 ? C.green : C.red }}>{pct}% ({b.w}/{b.n})</div>
+                            <div style={{ fontSize: 11, color: exp >= 0 ? C.green : C.red }}>{exp >= 0 ? "+" : ""}{exp.toFixed(2)}R</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </React.Fragment>
+                )}
+                {Object.keys(performanceByConfidence).length > 0 && (
+                  <React.Fragment>
+                    <Label>By confidence</Label>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, fontSize: 12, marginTop: 4 }}>
+                      {["high", "mid", "low"].map((key) => {
+                        const b = performanceByConfidence[key];
+                        if (!b || b.n === 0) return null;
+                        const pct = Math.round((b.w / b.n) * 100);
+                        const exp = b.sumR / b.n;
+                        return (
+                          <div key={key}>
+                            <Label>{CONFIDENCE_TIER_LABELS[key]}</Label>
+                            <div style={{ color: pct >= 50 ? C.green : C.red }}>{pct}% ({b.w}/{b.n})</div>
+                            <div style={{ fontSize: 11, color: exp >= 0 ? C.green : C.red }}>{exp >= 0 ? "+" : ""}{exp.toFixed(2)}R</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </React.Fragment>
+                )}
               </Panel>
             )}
 

@@ -14,9 +14,12 @@
 //     secret, setupType, entryPrice, stopPrice, targetPrice, confidence
 //     required; riskReward, targetSource ("pool"|"fallback" -- lets the
 //     dashboard explain, not just display, why the target sits where it
-//     does), symbol, timeframe, sourceTimestamp optional. Appended to the
-//     "alerts" collection, one doc per setup, AI-reviewed on the dashboard,
-//     triggers sendSmsAlert.
+//     does), triggerType ("sweep"|"reversal"|"continuation"|"breakout"|
+//     "htf_fvg" -- the real detector that started the sequence, since
+//     setupType alone can't tell continuation and breakout apart), symbol,
+//     timeframe, sourceTimestamp optional. Appended to the "alerts"
+//     collection, one doc per setup, AI-reviewed on the dashboard, triggers
+//     sendSmsAlert.
 //   kind:"status" -- a lightweight phase-transition ping. Expected body:
 //     secret, structureBias, htfBias, regime, adx, phase, dir, wins,
 //     losses, symbol, timeframe. Overwrites the single "scannerStatus/
@@ -81,6 +84,14 @@ const VALID_SETUP_TYPES = new Set([
   "OTHER",
 ]);
 
+// The real detector that started the sequence, distinct from setupType --
+// setupType is constrained to the allow-list above (continuation and
+// breakout both report BOS_*), so this rides along as a second, untranslated
+// field letting the dashboard break performance out by all five real trigger
+// types. Optional: alerts fired before this field existed still validate
+// fine with it absent.
+const VALID_TRIGGER_TYPES = new Set(["sweep", "reversal", "continuation", "breakout", "htf_fvg"]);
+
 // Generous for this payload shape (a handful of numbers + short strings) —
 // tight enough to reject anything that looks like abuse rather than a
 // genuine alert.
@@ -129,10 +140,17 @@ function validateAlertPayload(body) {
   // older alerts fired before this field existed still validate fine.
   const targetSource = body.targetSource === "pool" || body.targetSource === "fallback" ? body.targetSource : null;
 
+  // triggerType: optional, silently dropped to null if absent or unrecognized
+  // rather than rejecting the whole alert over it -- it's informational
+  // (dashboard performance breakdown), not load-bearing for anything else
+  // the webhook does.
+  const triggerType = typeof body.triggerType === "string" && VALID_TRIGGER_TYPES.has(body.triggerType) ? body.triggerType : null;
+
   return {
     ok: true,
     data: {
       setupType,
+      triggerType,
       entryPrice: nums.entryPrice,
       stopPrice: nums.stopPrice,
       targetPrice: nums.targetPrice,
