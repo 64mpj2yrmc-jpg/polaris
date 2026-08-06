@@ -608,6 +608,33 @@ app can't receive them — hence the exception to "no server logic" above). It d
   how the trade-plan markup itself only ever tracks one active plan) — if a new HTF gap forms while
   an older one is still untapped, the newer one replaces it rather than both being watched at once.
 
+  **V2 Phase 7** was prompted by a live session where a strong one-directional grind produced a wall
+  of overlapping `⚡ SWEEP` labels — each one a real but invalidated attempt, since sweep is a
+  mean-reversion trigger and there was no reversal to catch — plus a direct request to run every
+  trigger type live at once rather than opting them in one at a time. Two changes: (1)
+  `allowSweep`/`allowReversal`/`allowContinuation`/`allowBreakout`/`allowHtfFvgReject` all now
+  default `true` — each still independently gated by `shouldFireSetup()` (bias/HTF/regime/session/
+  contradiction) exactly as before, this only changes which trigger types are allowed to compete for
+  a sequence start. (2) `showTriggerLabels` (new, `grpScan`, default `false`, separate from
+  `showVisuals`): with five trigger types live, a choppy session can draw a `⚡ TYPE` label on every
+  attempt, most of which invalidate before completing — exactly the wall-of-labels situation that
+  prompted this. `showVisuals` still controls the tracked-level line while a sequence is active and
+  the completed trade-plan markup; `showTriggerLabels` now separately controls only the per-attempt
+  start label, off by default so the chart only shows what actually resolves. Also tightened
+  `eqTolPct`'s default from `0.05` to `0.01` (its own `minval`) — fewer marginal swings now qualify
+  as "equal," meaning fewer low-conviction pool matches feeding sweep/reversal in the first place.
+
+  Also added: **Fibonacci / equilibrium / OTE** (`grpFib`, `showFib`, default on) — a third, purely
+  visual/informational overlay on the same active swing range premium/discount already uses. Draws
+  the standard retracement ladder (23.6/38.2/50/61.8/78.6%), labels the 50% level "EQ 50" (the same
+  price premium/discount's own `eq` already splits on), and shades the 61.8–78.6% band as the OTE
+  (optimal trade entry) zone. Unlike a fixed top-of-range/bottom-of-range Fib draw, the ladder is
+  oriented by `structureBias` — measured from the high down for a bull bias, from the low up for a
+  bear bias — so the OTE band always lands on the actual pullback-into-continuation side of the
+  range rather than a fixed convention that might point the wrong way; defaults to low→high (0%=low)
+  when there's no bias yet, the same bias-agnostic fallback premium/discount uses. Never a gate or a
+  confidence input, same as premium/discount and killzone shading.
+
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
 with `onSnapshot` (`tvAlerts`/`tvAlertsStatus` state, `firestoreDbRef`), rendering each alert as a

@@ -93,8 +93,9 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 //      tracked swing on that side) are real now, tried in that order after
 //      detectSweep() on every bar with no active sequence. Each is
 //      independently gated by allowSweep/allowReversal/allowContinuation/
-//      allowBreakout -- only allowSweep defaults on, so nothing changes
-//      until you opt the others in. Whichever detector actually triggers
+//      allowBreakout (all five setup types, including allowHtfFvgReject,
+//      now default ON per direct request -- see the V2 Phase 7 note near
+//      the end of this block for why). Whichever detector actually triggers
 //      is reported as the webhook's setupType via setupTypeForTrigger()
 //      (sweep -> LIQUIDITY_SWEEP_*, reversal -> CHoCH_*, continuation and
 //      breakout -> BOS_*, reusing functions/index.js's existing allow-list).
@@ -170,10 +171,11 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // real, working implementations, but -- unlike detectSweep(), which mirrors
 // the original JS model this whole indicator was ported from -- they're
 // this author's own reasonable-but-invented interpretation of those ICT
-// concepts, not something battle-tested against the original model. They
-// default OFF (allowReversal/allowContinuation/allowBreakout) specifically
-// so turning each on is a deliberate choice, and the scorecard will tell
-// you fairly quickly whether a given one is actually pulling its weight.
+// concepts, not something battle-tested against the original model.
+// allowReversal/allowContinuation/allowBreakout/allowHtfFvgReject now
+// default ON (all five setup types on, per direct request -- see V2 Phase
+// 7 below), not because they've since been proven -- watch the scorecard's
+// SCORE/EXP rows to judge each honestly now that they're live together.
 //
 // Multi-timeframe framework (grpHTF/grpDirection/grpM1): a top-down, four-layer
 // read instead of everything happening on one timeframe.
@@ -233,6 +235,46 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // invalidated zone can't fire out of context months later. showHtfFvg
 // draws whichever zone is currently tracked so this is visible on the
 // chart, not just a silent internal state.
+//
+// V2 Phase 7 -- prompted by a live session where a strong one-directional
+// grind produced a wall of overlapping ⚡ SWEEP labels (each a real but
+// invalidated attempt -- sweep is a mean-reversion trigger and there was no
+// reversal to catch) and a direct request to run every trigger type live
+// rather than opting them in one at a time. Two changes:
+//   1. allowSweep/allowReversal/allowContinuation/allowBreakout/
+//      allowHtfFvgReject all now default TRUE. This does not relax any
+//      individual trigger's own logic -- it just means all five compete for
+//      whichever sequence starts first, each still independently gated by
+//      shouldFireSetup() (bias/HTF/regime/session/contradiction) same as
+//      always.
+//   2. showTriggerLabels (grpScan, default FALSE, separate from
+//      showVisuals): with five trigger types live, a choppy session can
+//      draw a "⚡ TYPE" label on every attempt, most of which invalidate
+//      before completing -- exactly the wall-of-labels situation that
+//      prompted this. showVisuals still controls the tracked-level line
+//      while a sequence is active and the completed trade-plan markup;
+//      showTriggerLabels now separately controls only the per-attempt
+//      start label, off by default so the chart only shows what actually
+//      resolves. Turn it on to watch attempts live if you want the detail.
+// Also tightened eqTolPct's default from 0.05 to 0.01 (its own minval) --
+// fewer marginal swings now qualify as "equal," which should mean fewer
+// low-conviction pool matches feeding into sweep/reversal in the first
+// place, on top of the label-visibility fix above.
+//
+// Fibonacci / equilibrium / OTE (grpFib, showFib, default true): a third,
+// purely visual/informational overlay on the same active swing range
+// premium/discount already uses -- draws the standard retracement ladder
+// (23.6/38.2/50/61.8/78.6%), labels the 50% level "EQ 50" (the same price
+// premium/discount's own eq splits on), and shades the 61.8-78.6% band as
+// the OTE (optimal trade entry) zone. Unlike a fixed top-of-range/bottom-
+// of-range Fib draw, the ladder is oriented by structureBias -- measured
+// from the high down for a bull bias, from the low up for a bear bias --
+// so the OTE band always lands on the actual pullback-into-continuation
+// side of the range, not just a fixed convention that might point the
+// wrong way. Defaults to low->high (0%=low) when there's no bias yet, the
+// same bias-agnostic fallback premium/discount already uses. Never a gate
+// or a confidence input -- purely a visual reference, same as premium/
+// discount and the killzone shading.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -242,6 +284,14 @@ maxBarsValid  = input.int(40, "Max bars before a sequence expires", minval=5, gr
 maxSwings     = input.int(20, "Max recent swings tracked per side", minval=5, maxval=50, group=grpScan)
 showVisuals   = input.bool(true, "Show sweep/CISD/trade-plan markup", group=grpScan)
 showHud       = input.bool(true, "Show status panel (top-right)", group=grpScan)
+// Separate from showVisuals -- showVisuals still controls the tracked-level
+// line while a sequence is in progress and the completed trade-plan markup;
+// this controls only the per-attempt "⚡ SWEEP/REVERSAL/CONTINUATION/
+// BREAKOUT/HTF FVG" label that fires the instant a sequence STARTS. With all
+// 5 trigger types on, most starts never complete (a real signal, not a bug --
+// see shouldFireSetup), so this defaults off to avoid a chart full of labels
+// for attempts that immediately invalidate. Turn on to watch attempts live.
+showTriggerLabels = input.bool(false, "Show a label every time a new sequence starts (can get noisy with multiple setup types on)", group=grpScan)
 
 grpTrade = "Trade parameters (for the webhook payload only)"
 stopBufferPts     = input.float(0.0, "Stop buffer beyond the sweep extreme (points)", minval=0, group=grpTrade)
@@ -280,7 +330,7 @@ maxOB        = input.int(12, "Max order blocks shown", minval=1, maxval=40, grou
 
 grpEQ = "Equal Highs / Lows"
 showEQ   = input.bool(true, "Mark equal highs/lows (liquidity pools)", group=grpEQ)
-eqTolPct = input.float(0.05, "Equal tolerance (% of price)", minval=0.01, step=0.01, group=grpEQ)
+eqTolPct = input.float(0.01, "Equal tolerance (% of price)", minval=0.01, step=0.01, group=grpEQ)
 // sweep-eligibility (isPool, used by detectSweep/detectReversal) is untouched by this --
 // it still fires on the first match, same as always. This only raises the bar for what
 // counts as a real TARGET/TP: a level barely qualifying on one match isn't necessarily
@@ -289,6 +339,18 @@ minPoolTouches = input.int(2, "Min touches for a level to count as a real target
 
 grpPD = "Premium / Discount"
 showPD = input.bool(false, "Shade premium/discount zone", group=grpPD)
+
+grpFib = "Fibonacci / Equilibrium / OTE"
+// Same active swing range as premium/discount above (hiS/loS from the most
+// recent tracked swing high/low) -- purely visual/informational, same as
+// SMT/M1/premium-discount, never a gate. Draws the standard retracement
+// ladder (23.6/38.2/61.8/78.6%), calls out 50% specifically as equilibrium
+// (same price premium/discount's own eq already splits on), and shades the
+// 61.8-78.6% band as the OTE (optimal trade entry) zone -- oriented off
+// structureBias so it sits on the actual pullback-into-continuation side of
+// the range (measured from the high down for a bull bias, from the low up
+// for a bear bias), not just a fixed top-of-range/bottom-of-range choice.
+showFib = input.bool(true, "Show Fibonacci retracement ladder + equilibrium + OTE zone on the active swing range", group=grpFib)
 
 grpKZ = "Killzones (New York time)"
 showKillzones       = input.bool(false, "Shade killzone sessions", group=grpKZ)
@@ -349,9 +411,9 @@ volAvgLen = input.int(20, "Volume average length", minval=5, group=grpVolume)
 // suddenly starve you of signals, but every gate is now real, not cosmetic.
 grpSetups = "Setup Types"
 allowSweep        = input.bool(true, "Allow sweep-based setups", group=grpSetups)
-allowReversal     = input.bool(false, "Allow reversal-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
-allowContinuation = input.bool(false, "Allow continuation-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
-allowBreakout     = input.bool(false, "Allow breakout-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
+allowReversal     = input.bool(true, "Allow reversal-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
+allowContinuation = input.bool(true, "Allow continuation-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
+allowBreakout     = input.bool(true, "Allow breakout-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
 
 grpGates = "Signal Quality Gates"
 useVolFloor       = input.bool(false, "Require a minimum volume ratio to fire", group=grpGates)
@@ -380,7 +442,7 @@ useSmtConfluence = input.bool(true, "Factor SMT divergence into confidence score
 smtSymbol        = input.symbol("CME_MINI:ES1!", "Correlated symbol to compare swing points against", group=grpSMT)
 
 grpHtfFvg = "Higher-Timeframe FVG Reject"
-allowHtfFvgReject = input.bool(false, "Allow higher-timeframe FVG reject setups (author's own extension -- see header note)", group=grpHtfFvg)
+allowHtfFvgReject = input.bool(true, "Allow higher-timeframe FVG reject setups (author's own extension -- see header note)", group=grpHtfFvg)
 htfFvgTimeframe   = input.timeframe("60", "Timeframe to detect fair value gaps on (e.g. 60 = 1H, 240 = 4H)", group=grpHtfFvg)
 minHtfFvgSizeAtr  = input.float(1.0, "Min HTF FVG size to track, x chart ATR(14) (0 disables the floor)", minval=0, step=0.1, group=grpHtfFvg)
 showHtfFvg        = input.bool(true, "Draw the currently tracked HTF FVG zone on the chart", group=grpHtfFvg)
@@ -479,6 +541,21 @@ var array<box> obBoxes      = array.new<box>()
 var box premiumBox = na
 var box discountBox = na
 var line eqLine = na
+
+// Fibonacci / equilibrium / OTE (showFib) -- redrawn from scratch whenever
+// the active swing range changes, same delete-then-recreate pattern as
+// premium/discount above.
+var line fib236Line = na
+var line fib382Line = na
+var line fib500Line = na
+var line fib618Line = na
+var line fib786Line = na
+var label fib236Lbl  = na
+var label fib382Lbl  = na
+var label fib500Lbl  = na
+var label fib618Lbl  = na
+var label fib786Lbl  = na
+var box   oteBox     = na
 
 // ---------- persistent state: scorecard ----------
 // every fired setup gets recorded here until price actually trades through
@@ -1190,22 +1267,74 @@ if showAllFvg and barstate.isconfirmed
                     array.remove(fvgBoxDir, i)
                     array.remove(fvgBoxDone, i)
 
-// ---------- premium / discount zone (around the active swing range) ----------
-if showPD and barstate.isconfirmed and array.size(swingHighs) > 0 and array.size(swingLows) > 0
+// ---------- premium / discount zone + Fibonacci / equilibrium / OTE (around the active swing range) ----------
+if (showPD or showFib) and barstate.isconfirmed and array.size(swingHighs) > 0 and array.size(swingLows) > 0
     Swing hiS = array.get(swingHighs, 0)
     Swing loS = array.get(swingLows, 0)
     if hiS.price > loS.price
         float eq = (hiS.price + loS.price) / 2
         int leftX = math.min(hiS.idx, loS.idx)
-        if not na(premiumBox)
-            box.delete(premiumBox)
-        if not na(discountBox)
-            box.delete(discountBox)
-        if not na(eqLine)
-            line.delete(eqLine)
-        premiumBox := box.new(leftX, top=hiS.price, right=bar_index + 10, bottom=eq, border_color=color.new(#FF5566, 75), bgcolor=color.new(#FF5566, 94), extend=extend.none, text="PREMIUM", text_size=size.tiny, text_color=color.new(#FF5566, 30))
-        discountBox := box.new(leftX, top=eq, right=bar_index + 10, bottom=loS.price, border_color=color.new(#2FE08A, 75), bgcolor=color.new(#2FE08A, 94), extend=extend.none, text="DISCOUNT", text_size=size.tiny, text_color=color.new(#2FE08A, 30))
-        eqLine := line.new(leftX, eq, bar_index + 10, eq, color=color.new(#F5C86B, 40), style=line.style_dotted, width=1)
+        if showPD
+            if not na(premiumBox)
+                box.delete(premiumBox)
+            if not na(discountBox)
+                box.delete(discountBox)
+            if not na(eqLine)
+                line.delete(eqLine)
+            premiumBox := box.new(leftX, top=hiS.price, right=bar_index + 10, bottom=eq, border_color=color.new(#FF5566, 75), bgcolor=color.new(#FF5566, 94), extend=extend.none, text="PREMIUM", text_size=size.tiny, text_color=color.new(#FF5566, 30))
+            discountBox := box.new(leftX, top=eq, right=bar_index + 10, bottom=loS.price, border_color=color.new(#2FE08A, 75), bgcolor=color.new(#2FE08A, 94), extend=extend.none, text="DISCOUNT", text_size=size.tiny, text_color=color.new(#2FE08A, 30))
+            eqLine := line.new(leftX, eq, bar_index + 10, eq, color=color.new(#F5C86B, 40), style=line.style_dotted, width=1)
+
+        if showFib
+            float swingRange = hiS.price - loS.price
+            // measured in the direction price would need to retrace for a
+            // continuation entry: from the high down for a bull bias, from
+            // the low up for a bear bias -- so 61.8/78.6% (the OTE band)
+            // always lands on the actual pullback-into-continuation side,
+            // not just a fixed top-of-range/bottom-of-range choice. Defaults
+            // to low->high (0%=low) when there's no bias yet, same
+            // bias-agnostic framing premium/discount already uses.
+            bool measureFromHigh = structureBias == "bull"
+            float p236 = measureFromHigh ? hiS.price - swingRange * 0.236 : loS.price + swingRange * 0.236
+            float p382 = measureFromHigh ? hiS.price - swingRange * 0.382 : loS.price + swingRange * 0.382
+            float p500 = eq
+            float p618 = measureFromHigh ? hiS.price - swingRange * 0.618 : loS.price + swingRange * 0.618
+            float p786 = measureFromHigh ? hiS.price - swingRange * 0.786 : loS.price + swingRange * 0.786
+            if not na(fib236Line)
+                line.delete(fib236Line)
+            if not na(fib382Line)
+                line.delete(fib382Line)
+            if not na(fib500Line)
+                line.delete(fib500Line)
+            if not na(fib618Line)
+                line.delete(fib618Line)
+            if not na(fib786Line)
+                line.delete(fib786Line)
+            if not na(fib236Lbl)
+                label.delete(fib236Lbl)
+            if not na(fib382Lbl)
+                label.delete(fib382Lbl)
+            if not na(fib500Lbl)
+                label.delete(fib500Lbl)
+            if not na(fib618Lbl)
+                label.delete(fib618Lbl)
+            if not na(fib786Lbl)
+                label.delete(fib786Lbl)
+            if not na(oteBox)
+                box.delete(oteBox)
+            fib236Line := line.new(leftX, p236, bar_index + 10, p236, color=color.new(#6E93AD, 55), style=line.style_dotted, width=1)
+            fib382Line := line.new(leftX, p382, bar_index + 10, p382, color=color.new(#6E93AD, 55), style=line.style_dotted, width=1)
+            fib500Line := line.new(leftX, p500, bar_index + 10, p500, color=color.new(#F5C86B, 40), style=line.style_dashed, width=1)
+            fib618Line := line.new(leftX, p618, bar_index + 10, p618, color=color.new(#00D4FF, 45), style=line.style_dotted, width=1)
+            fib786Line := line.new(leftX, p786, bar_index + 10, p786, color=color.new(#00D4FF, 45), style=line.style_dotted, width=1)
+            fib236Lbl := label.new(bar_index + 10, p236, "23.6", style=label.style_label_left, color=color.new(#0B1626, 20), textcolor=#6E93AD, size=size.tiny)
+            fib382Lbl := label.new(bar_index + 10, p382, "38.2", style=label.style_label_left, color=color.new(#0B1626, 20), textcolor=#6E93AD, size=size.tiny)
+            fib500Lbl := label.new(bar_index + 10, p500, "EQ 50", style=label.style_label_left, color=color.new(#0B1626, 20), textcolor=#F5C86B, size=size.tiny)
+            fib618Lbl := label.new(bar_index + 10, p618, "61.8", style=label.style_label_left, color=color.new(#0B1626, 20), textcolor=#00D4FF, size=size.tiny)
+            fib786Lbl := label.new(bar_index + 10, p786, "78.6 OTE", style=label.style_label_left, color=color.new(#0B1626, 20), textcolor=#00D4FF, size=size.tiny)
+            float oteTop = math.max(p618, p786)
+            float oteBottom = math.min(p618, p786)
+            oteBox := box.new(leftX, top=oteTop, right=bar_index + 10, bottom=oteBottom, border_color=color.new(#00D4FF, 40), bgcolor=color.new(#00D4FF, 88), extend=extend.none, text="OTE", text_size=size.tiny, text_color=color.new(#00D4FF, 15))
 
 // ---------- per-session volatility tracking ----------
 // runs every confirmed bar regardless of showKillzones/useSessionFilter --
@@ -1340,7 +1469,7 @@ if barstate.isconfirmed
                 seqHasFvg := false
                 seqSmtAligned := smtBearDiv
                 seqTriggerType := "sweep"
-                if showVisuals
+                if showTriggerLabels
                     label.new(bar_index, high, "⚡ SWEEP", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
 
         if na(seqDir) and shouldFireSetup("reversal", "bear")
@@ -1355,7 +1484,7 @@ if barstate.isconfirmed
                 seqHasFvg := false
                 seqSmtAligned := smtBearDiv
                 seqTriggerType := "reversal"
-                if showVisuals
+                if showTriggerLabels
                     label.new(bar_index, high, "⚡ REVERSAL", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
 
         if na(seqDir) and shouldFireSetup("continuation", "bear")
@@ -1370,7 +1499,7 @@ if barstate.isconfirmed
                 seqHasFvg := false
                 seqSmtAligned := smtBearDiv
                 seqTriggerType := "continuation"
-                if showVisuals
+                if showTriggerLabels
                     label.new(bar_index, high, "⚡ CONTINUATION", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
 
         if na(seqDir) and shouldFireSetup("breakout", "bear")
@@ -1385,7 +1514,7 @@ if barstate.isconfirmed
                 seqHasFvg := false
                 seqSmtAligned := smtBearDiv
                 seqTriggerType := "breakout"
-                if showVisuals
+                if showTriggerLabels
                     label.new(bar_index, high, "⚡ BREAKOUT", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
 
         if na(seqDir) and shouldFireSetup("htf_fvg", "bear")
@@ -1404,7 +1533,7 @@ if barstate.isconfirmed
                 if not na(htfFvgBearBox)
                     box.delete(htfFvgBearBox)
                     htfFvgBearBox := box(na)
-                if showVisuals
+                if showTriggerLabels
                     label.new(bar_index, high, "⚡ HTF FVG", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
 
         if na(seqDir) and shouldFireSetup("sweep", "bull")
@@ -1419,7 +1548,7 @@ if barstate.isconfirmed
                 seqHasFvg := false
                 seqSmtAligned := smtBullDiv
                 seqTriggerType := "sweep"
-                if showVisuals
+                if showTriggerLabels
                     label.new(bar_index, low, "⚡ SWEEP", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
 
         if na(seqDir) and shouldFireSetup("reversal", "bull")
@@ -1434,7 +1563,7 @@ if barstate.isconfirmed
                 seqHasFvg := false
                 seqSmtAligned := smtBullDiv
                 seqTriggerType := "reversal"
-                if showVisuals
+                if showTriggerLabels
                     label.new(bar_index, low, "⚡ REVERSAL", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
 
         if na(seqDir) and shouldFireSetup("continuation", "bull")
@@ -1449,7 +1578,7 @@ if barstate.isconfirmed
                 seqHasFvg := false
                 seqSmtAligned := smtBullDiv
                 seqTriggerType := "continuation"
-                if showVisuals
+                if showTriggerLabels
                     label.new(bar_index, low, "⚡ CONTINUATION", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
 
         if na(seqDir) and shouldFireSetup("breakout", "bull")
@@ -1464,7 +1593,7 @@ if barstate.isconfirmed
                 seqHasFvg := false
                 seqSmtAligned := smtBullDiv
                 seqTriggerType := "breakout"
-                if showVisuals
+                if showTriggerLabels
                     label.new(bar_index, low, "⚡ BREAKOUT", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
 
         if na(seqDir) and shouldFireSetup("htf_fvg", "bull")
@@ -1483,7 +1612,7 @@ if barstate.isconfirmed
                 if not na(htfFvgBullBox)
                     box.delete(htfFvgBullBox)
                     htfFvgBullBox := box(na)
-                if showVisuals
+                if showTriggerLabels
                     label.new(bar_index, low, "⚡ HTF FVG", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
 
     else
