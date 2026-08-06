@@ -31,7 +31,12 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 //                direction (a real draw of liquidity, findLiquidityTarget)
 //                -- falls back to entry +/- risk * rMultiple only when no
 //                pool exists yet. A setup only actually alerts if that
-//                projected move is at least minTargetAtrMult x ATR(14);
+//                projected move clears BOTH minTargetAtrMult x ATR(14) AND
+//                minTargetPts (a flat, ATR-independent point floor -- a
+//                quiet-market ATR compression can satisfy the ATR-relative
+//                check on a handful of points alone, which is how a real
+//                4-point NQ alert got through; the two gates are ANDed so
+//                neither one alone can let a too-small move fire);
 //                smaller draws still resolve the sequence, they just don't
 //                fire a webhook.
 //   confidence = FVG size relative to ATR(14) blended with volume strength
@@ -159,6 +164,12 @@ grpTrade = "Trade parameters (for the webhook payload only)"
 stopBufferPts     = input.float(0.0, "Stop buffer beyond the sweep extreme (points)", minval=0, group=grpTrade)
 rMultiple         = input.float(2.0, "Fallback target R-multiple (only used if no liquidity pool sits in the trade's direction)", minval=0.1, group=grpTrade)
 minTargetAtrMult  = input.float(3.0, "Min projected move to actually alert (x ATR) -- smaller draws complete the sequence but don't fire", minval=0, step=0.5, group=grpTrade)
+// ATR-relative alone isn't enough -- a genuinely quiet stretch (thin holiday session,
+// low-liquidity overnight hours) can compress ATR far enough that "3x ATR" is satisfied
+// by a handful of points, which is how a real 4-point NQ alert got through on the 5m
+// chart. This is a second, unconditional floor in raw instrument points -- both gates
+// must pass, so a quiet market can no longer talk its way around the ATR check.
+minTargetPts      = input.float(20.0, "Absolute minimum projected move to alert (points, instrument-native -- independent of ATR)", minval=0, step=1, group=grpTrade)
 
 grpHook = "Webhook"
 webhookSecret = input.string("", "Webhook secret (must match WEBHOOK_SECRET)", group=grpHook)
@@ -1156,7 +1167,7 @@ if barstate.isconfirmed
                             float entryP = close
                             float stopP = seqSweepExtreme + stopBufferPts + (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                             [targetP, targetIsPool] = computeTarget("bear", entryP, stopP)
-                            if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
+                            if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and math.abs(targetP - entryP) >= minTargetPts and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
                                 alert(buildAlertMessage(setupTypeForTrigger(seqTriggerType, "bear"), entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
                                 lastSetupDir := "bear"
                                 lastSetupBar := bar_index
@@ -1201,7 +1212,7 @@ if barstate.isconfirmed
                     float entryP = close
                     float stopP = seqSweepExtreme + stopBufferPts + (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                     [targetP, targetIsPool] = computeTarget("bear", entryP, stopP)
-                    if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
+                    if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and math.abs(targetP - entryP) >= minTargetPts and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
                         alert(buildAlertMessage(setupTypeForTrigger(seqTriggerType, "bear"), entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
                         lastSetupDir := "bear"
                         lastSetupBar := bar_index
@@ -1276,7 +1287,7 @@ if barstate.isconfirmed
                             float entryP = close
                             float stopP = seqSweepExtreme - stopBufferPts - (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                             [targetP, targetIsPool] = computeTarget("bull", entryP, stopP)
-                            if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
+                            if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and math.abs(targetP - entryP) >= minTargetPts and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
                                 alert(buildAlertMessage(setupTypeForTrigger(seqTriggerType, "bull"), entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
                                 lastSetupDir := "bull"
                                 lastSetupBar := bar_index
@@ -1321,7 +1332,7 @@ if barstate.isconfirmed
                     float entryP = close
                     float stopP = seqSweepExtreme - stopBufferPts - (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                     [targetP, targetIsPool] = computeTarget("bull", entryP, stopP)
-                    if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
+                    if math.abs(targetP - entryP) >= minTargetAtrMult * atrVal and math.abs(targetP - entryP) >= minTargetPts and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
                         alert(buildAlertMessage(setupTypeForTrigger(seqTriggerType, "bull"), entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
                         lastSetupDir := "bull"
                         lastSetupBar := bar_index
