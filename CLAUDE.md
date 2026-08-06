@@ -419,6 +419,31 @@ app can't receive them — hence the exception to "no server logic" above). It d
   else; the webhook payload, scorecard, and `targetP` itself are untouched and still resolve
   against the one real target regardless of whether the ladder is shown.
 
+  **V2 Phase 4** adds a genuine minimum-move floor and a top-down multi-timeframe framework,
+  prompted by a real 4-point NQ alert on the 5m chart — `minTargetAtrMult` alone is ATR-relative,
+  and a quiet-market ATR compression can satisfy "3x ATR" on a handful of points alone.
+  `minTargetPts` is a new, unconditional floor in raw instrument points, ANDed with the existing
+  ATR check at all 4 completion sites so neither gate alone can let a too-small move through.
+  Separately, four layers now run top-down instead of everything happening on one timeframe: 1H
+  **bias** (`useHtfBias`/`htfTimeframe`, unchanged — HTF close vs its own EMA, gates counter-bias
+  setups); 15m **direction** (new `grpDirection`/`useMtfDirection`/`directionTimeframe` —
+  `structureBias` itself gets re-sourced from a dedicated timeframe's pivots, `dirPh`/`dirPl` via
+  `request.security` compared against `dirPrevHigh`/`dirPrevLow` the same pattern SMT already uses
+  for its own pivot pair, instead of the chart's own 5m swings; off reverts to exactly the old
+  chart-native behavior; this is a gate, same as bias always was, since `shouldFireSetup()`'s
+  `biasOk` check is unchanged — it just now reads a `structureBias` sourced from 15m); 5m **state**
+  (unchanged — the sweep/CISD/retrace sequence tracker still runs on whatever timeframe the chart
+  itself is on); and 1m **entries** (new `grpM1`/`useM1Confirmation` — the most recently confirmed
+  1-minute candle's OHLC via `request.security`, reduced to a simple long-wick rejection read
+  `m1RejectionBear`/`m1RejectionBull` and folded into `setupConfidence()` as one more sub-score,
+  deliberately informational only and never a gate, since stacking a fourth mandatory confluence
+  layer on top of bias/direction/state risked strangling an already-infrequent signal further). All
+  three `request.security` pulls run unconditionally every bar regardless of their toggles, same
+  CW10003 reasoning as the pre-existing `htfClose`/`htfEma`/SMT pulls. The HUD's old "BIAS" row now
+  doubles as the direction row (relabeled "DIR 15m" when `useMtfDirection` is on, since
+  `structureBias` *is* the direction reading at that point — showing it twice would just be the
+  same value under two labels) and gained an "M1" row alongside the existing "SMT" row.
+
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
 with `onSnapshot` (`tvAlerts`/`tvAlertsStatus` state, `firestoreDbRef`), rendering each alert as a

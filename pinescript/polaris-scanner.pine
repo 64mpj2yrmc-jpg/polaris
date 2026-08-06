@@ -150,6 +150,33 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // default OFF (allowReversal/allowContinuation/allowBreakout) specifically
 // so turning each on is a deliberate choice, and the scorecard will tell
 // you fairly quickly whether a given one is actually pulling its weight.
+//
+// Multi-timeframe framework (grpHTF/grpDirection/grpM1): a top-down, four-layer
+// read instead of everything happening on one timeframe.
+//   1H  BIAS      -- useHtfBias/htfTimeframe (existing, unchanged): HTF close vs
+//                    its own EMA, gates counter-bias setups.
+//   15m DIRECTION -- useMtfDirection/directionTimeframe (new): structureBias
+//                    itself gets re-sourced from a dedicated timeframe's pivots
+//                    (dirPh/dirPl via request.security, compared against
+//                    dirPrevHigh/dirPrevLow the same way SMT compares its own
+//                    pivot pair) instead of the chart's own swings. Off ->
+//                    structureBias reverts to exactly the old chart-native
+//                    behavior. This is a GATE, same as bias always was --
+//                    shouldFireSetup()'s biasOk check is unchanged, it just now
+//                    reads a structureBias sourced from 15m instead of 5m.
+//   5m  STATE     -- unchanged: the sweep/CISD/retrace sequence tracker below
+//                    still runs on whatever timeframe the chart itself is on.
+//   1m  ENTRIES   -- useM1Confirmation (new): the most recently confirmed
+//                    1-minute candle's OHLC (m1o/m1h/m1l/m1c via
+//                    request.security), reduced to a simple long-wick rejection
+//                    read (m1RejectionBear/m1RejectionBull) and folded into
+//                    setupConfidence() as one more sub-score. Deliberately
+//                    informational only, never a gate -- stacking a fourth
+//                    mandatory confluence layer on top of bias/direction/state
+//                    risked strangling an already-infrequent signal further.
+// All three request.security pulls (HTF, direction, 1m) run unconditionally
+// every bar regardless of their toggles, same CW10003 reasoning as the
+// pre-existing htfClose/htfEma/SMT pulls.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -207,6 +234,22 @@ grpHTF = "Higher Timeframe Bias"
 useHtfBias   = input.bool(true, "Require higher-timeframe agreement", group=grpHTF)
 htfTimeframe = input.timeframe("60", "Higher timeframe", group=grpHTF)
 htfEmaLen    = input.int(50, "HTF EMA length", minval=5, group=grpHTF)
+
+// ---------- multi-timeframe framework ----------
+// Four layers, top-down: 1H bias (grpHTF above), 15m direction (this group --
+// structureBias itself, normally sourced from whatever timeframe the chart is
+// on, gets re-sourced from a dedicated higher timeframe instead), 5m current
+// state (the sweep/CISD/retrace sequence tracker below -- unchanged, still
+// runs on whatever timeframe the chart is actually on), and 1m entries (next
+// group -- a finer-grained rejection-candle read folded into confidence only,
+// never a gate, so it can't choke signal frequency on top of the other three
+// layers).
+grpDirection = "Direction (structure-bias timeframe)"
+useMtfDirection    = input.bool(true, "Source structure bias/direction from a dedicated timeframe instead of the chart's own swings", group=grpDirection)
+directionTimeframe = input.timeframe("15", "Direction timeframe", group=grpDirection)
+
+grpM1 = "1-Minute Entry Confirmation"
+useM1Confirmation = input.bool(true, "Factor a 1-minute rejection-candle read into confidence score (never blocks a signal)", group=grpM1)
 
 grpRegime = "Market Regime"
 useRegimeFilter = input.bool(true, "Only scan when the market is trending (ADX filter)", group=grpRegime)
@@ -308,6 +351,13 @@ var float smtPrevLow  = na
 var bool  smtBearDiv  = false
 var bool  smtBullDiv  = false
 
+// Direction (15m by default) tracking -- same pattern as the SMT pair above:
+// dirPrevHigh/dirPrevLow remember the direction timeframe's own last confirmed
+// pivot so the next one can be compared against it, updating structureBias
+// directly (see the swing-detection block below) when useMtfDirection is on.
+var float dirPrevHigh = na
+var float dirPrevLow  = na
+
 // ---------- persistent state: trade-plan markup (single most recent completed setup) ----------
 var line  tpEntryLine = na
 var line  tpStopLine  = na
@@ -376,6 +426,13 @@ pl = ta.pivotlow(swingStrength, swingStrength)
 smtPh = request.security(smtSymbol, timeframe.period, ta.pivothigh(swingStrength, swingStrength))
 smtPl = request.security(smtSymbol, timeframe.period, ta.pivotlow(swingStrength, swingStrength))
 
+// Direction source: same pivot function pulled from a dedicated timeframe (15m by
+// default) instead of a correlated symbol -- called unconditionally every bar
+// regardless of useMtfDirection, matching the smtPh/smtPl pattern above (a
+// request.security call gated by an if-block trips Pine's CW10003 warning).
+dirPh = request.security(syminfo.tickerid, directionTimeframe, ta.pivothigh(swingStrength, swingStrength))
+dirPl = request.security(syminfo.tickerid, directionTimeframe, ta.pivotlow(swingStrength, swingStrength))
+
 if not na(ph)
     int newHighIdx = bar_index - swingStrength
     // pool-matching runs unconditionally (it decides which swings are sweep-eligible
@@ -395,11 +452,15 @@ if not na(ph)
     if array.size(swingHighs) > 0
         Swing prevHigh = array.get(swingHighs, 0)
         if ph > prevHigh.price
-            structureBias := "bull"
+            // structureBias only set from the chart's own swings when useMtfDirection
+            // is off -- otherwise the dedicated direction-timeframe block below owns it
+            if not useMtfDirection
+                structureBias := "bull"
             // bearish SMT: we made a higher high, the correlated symbol didn't
             smtBearDiv := not na(smtPh) and not na(smtPrevHigh) and smtPh <= smtPrevHigh
         else if ph < prevHigh.price
-            structureBias := "bear"
+            if not useMtfDirection
+                structureBias := "bear"
     if not na(smtPh)
         smtPrevHigh := smtPh
     array.unshift(swingHighs, Swing.new(newHighIdx, ph, poolMatch))
@@ -423,16 +484,33 @@ if not na(pl)
     if array.size(swingLows) > 0
         Swing prevLow = array.get(swingLows, 0)
         if pl < prevLow.price
-            structureBias := "bear"
+            if not useMtfDirection
+                structureBias := "bear"
             // bullish SMT: we made a lower low, the correlated symbol didn't
             smtBullDiv := not na(smtPl) and not na(smtPrevLow) and smtPl >= smtPrevLow
         else if pl > prevLow.price
-            structureBias := "bull"
+            if not useMtfDirection
+                structureBias := "bull"
     if not na(smtPl)
         smtPrevLow := smtPl
     array.unshift(swingLows, Swing.new(newLowIdx, pl, poolMatchLow))
     if array.size(swingLows) > maxSwings
         array.pop(swingLows)
+
+// direction-timeframe structure bias -- only when useMtfDirection is on. Updates
+// independently of the chart's own ph/pl pivots above, since a 15m pivot confirms
+// on its own schedule, not bar-for-bar with the chart's 5m swings. Same
+// higher-high/higher-low vs lower-high/lower-low logic as the chart-native version,
+// just comparing the direction timeframe's own last two confirmed pivots.
+if useMtfDirection
+    if not na(dirPh)
+        if not na(dirPrevHigh)
+            structureBias := dirPh > dirPrevHigh ? "bull" : dirPh < dirPrevHigh ? "bear" : structureBias
+        dirPrevHigh := dirPh
+    if not na(dirPl)
+        if not na(dirPrevLow)
+            structureBias := dirPl < dirPrevLow ? "bear" : dirPl > dirPrevLow ? "bull" : structureBias
+        dirPrevLow := dirPl
 
 // ---------- helpers ----------
 // mirrors cisdTargetBear/Bull(cs, idx) -- only ever called at idx == current
@@ -481,6 +559,17 @@ string htfBias = htfClose > htfEma ? "bull" : htfClose < htfEma ? "bear" : na
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
 bool regimeOk = not useRegimeFilter or adxVal >= adxThreshold
 
+// 1-minute entry read: the most recently confirmed 1m candle's OHLC, pulled
+// unconditionally every bar (same CW10003 reasoning as htfClose/htfEma above).
+// A long wick relative to the candle's own range is a simple, defensible
+// rejection-leg proxy -- informational only (see grpM1/useM1Confirmation),
+// folded into setupConfidence(), never a gate, so it can't choke signal
+// frequency on top of the 1H bias / 15m direction / 5m state gates.
+[m1o, m1h, m1l, m1c] = request.security(syminfo.tickerid, "1", [open, high, low, close], lookahead=barmerge.lookahead_off)
+float m1Range = m1h - m1l
+bool m1RejectionBear = m1Range > 0 and (m1h - math.max(m1o, m1c)) > m1Range * 0.5
+bool m1RejectionBull = m1Range > 0 and (math.min(m1o, m1c) - m1l) > m1Range * 0.5
+
 // declared here (not down by the order-block section it was originally
 // written for) because detectContinuation()/detectBreakout() below also
 // need it, and Pine requires an identifier declared above the code that
@@ -501,13 +590,14 @@ float volRatio = avgVolume > 0 ? volume / avgVolume : na
 // captured at sweep time -- see seqSmtAligned). None of these ever block a
 // signal from firing; they're only ever ingredients in the confidence
 // number, not gates.
-setupConfidence(float fvgLo, float fvgHi, float atr, float volRatioNow, bool smtAligned) =>
+setupConfidence(float fvgLo, float fvgHi, float atr, float volRatioNow, bool smtAligned, bool m1Aligned) =>
     float size = fvgHi - fvgLo
     float sizeRatio = atr > 0 ? size / atr : 0
     int sizeScore = math.round(math.max(30, math.min(95, 40 + sizeRatio * 40)))
     float vr = na(volRatioNow) ? 1.0 : volRatioNow
     int volScore = math.round(math.max(30, math.min(95, 40 + vr * 30)))
     int smtScore = smtAligned ? 90 : 60
+    int m1Score = m1Aligned ? 90 : 55
     float sum = sizeScore
     float cnt = 1.0
     if useVolumeConfirm and not na(volRatioNow)
@@ -515,6 +605,9 @@ setupConfidence(float fvgLo, float fvgHi, float atr, float volRatioNow, bool smt
         cnt := cnt + 1
     if useSmtConfluence
         sum := sum + smtScore
+        cnt := cnt + 1
+    if useM1Confirmation
+        sum := sum + m1Score
         cnt := cnt + 1
     math.round(sum / cnt)
 
@@ -1163,7 +1256,7 @@ if barstate.isconfirmed
                         seqPhase := na
                     else if high >= seqFvgLo
                         if close < seqFvgLo
-                            int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned)
+                            int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned, seqDir == "bear" ? m1RejectionBear : m1RejectionBull)
                             float entryP = close
                             float stopP = seqSweepExtreme + stopBufferPts + (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                             [targetP, targetIsPool] = computeTarget("bear", entryP, stopP)
@@ -1208,7 +1301,7 @@ if barstate.isconfirmed
                     seqDir := na
                     seqPhase := na
                 else if close < seqFvgLo
-                    int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned)
+                    int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned, seqDir == "bear" ? m1RejectionBear : m1RejectionBull)
                     float entryP = close
                     float stopP = seqSweepExtreme + stopBufferPts + (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                     [targetP, targetIsPool] = computeTarget("bear", entryP, stopP)
@@ -1283,7 +1376,7 @@ if barstate.isconfirmed
                         seqPhase := na
                     else if low <= seqFvgHi
                         if close > seqFvgHi
-                            int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned)
+                            int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned, seqDir == "bear" ? m1RejectionBear : m1RejectionBull)
                             float entryP = close
                             float stopP = seqSweepExtreme - stopBufferPts - (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                             [targetP, targetIsPool] = computeTarget("bull", entryP, stopP)
@@ -1328,7 +1421,7 @@ if barstate.isconfirmed
                     seqDir := na
                     seqPhase := na
                 else if close > seqFvgHi
-                    int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned)
+                    int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned, seqDir == "bear" ? m1RejectionBear : m1RejectionBull)
                     float entryP = close
                     float stopP = seqSweepExtreme - stopBufferPts - (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
                     [targetP, targetIsPool] = computeTarget("bull", entryP, stopP)
@@ -1379,12 +1472,17 @@ if showVisuals and not na(seqPhase)
     line.new(seqSweepBar, seqLevel, bar_index, seqLevel, color=color.new(#F5C86B, 55), style=line.style_dashed, width=1)
 
 // ---------- status HUD (top-right) ----------
-var table hud = table.new(position=position.top_right, columns=2, rows=10, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
+var table hud = table.new(position=position.top_right, columns=2, rows=11, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
 
 if showHud and barstate.islast
+    // "BIAS" row doubles as the direction row -- structureBias IS the direction
+    // reading once useMtfDirection is on (see the swing-detection block above), so
+    // this is a single row with a label that names its actual source, not two rows
+    // showing the same value.
+    string biasLabel = useMtfDirection ? "DIR " + directionTimeframe : "BIAS"
     table.cell(hud, 0, 0, "◆ POLARIS", text_color=#F5C86B, text_size=size.small, text_halign=text.align_left)
     table.cell(hud, 1, 0, "SCANNER", text_color=#F5C86B, text_size=size.small, text_halign=text.align_right)
-    table.cell(hud, 0, 1, "BIAS", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 0, 1, biasLabel, text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
     table.cell(hud, 1, 1, na(structureBias) ? "--" : (structureBias == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(structureBias) ? #6E93AD : (structureBias == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
     table.cell(hud, 0, 2, "HTF " + htfTimeframe, text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
     table.cell(hud, 1, 2, na(htfBias) ? "--" : (htfBias == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(htfBias) ? #6E93AD : (htfBias == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
@@ -1406,8 +1504,12 @@ if showHud and barstate.islast
         string smtTxt = smtBearDiv ? "BEAR DIV" : smtBullDiv ? "BULL DIV" : "--"
         table.cell(hud, 0, 8, "SMT", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
         table.cell(hud, 1, 8, smtTxt, text_color=smtTxt == "--" ? #6E93AD : #F5C86B, text_size=size.small, text_halign=text.align_right)
+    if useM1Confirmation
+        string m1Txt = m1RejectionBear ? "BEAR REJ" : m1RejectionBull ? "BULL REJ" : "--"
+        table.cell(hud, 0, 9, "M1", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 9, m1Txt, text_color=m1Txt == "--" ? #6E93AD : #F5C86B, text_size=size.small, text_halign=text.align_right)
     if showScorecard
         int totalResolved = scoreWins + scoreLosses
         string scoreTxt = totalResolved > 0 ? str.tostring(math.round(scoreWins / totalResolved * 100)) + "% (" + str.tostring(scoreWins) + "/" + str.tostring(totalResolved) + ")" : "-- (0/0)"
-        table.cell(hud, 0, 9, "SCORE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(hud, 1, 9, scoreTxt, text_color=totalResolved > 0 and scoreWins / totalResolved >= 0.5 ? #2FE08A : #DDF3FF, text_size=size.small, text_halign=text.align_right)
+        table.cell(hud, 0, 10, "SCORE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 10, scoreTxt, text_color=totalResolved > 0 and scoreWins / totalResolved >= 0.5 ? #2FE08A : #DDF3FF, text_size=size.small, text_halign=text.align_right)
