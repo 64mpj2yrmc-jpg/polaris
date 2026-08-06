@@ -58,11 +58,12 @@ best-effort convenience, not a requirement for the app to function.
   `runScanner`. Data comes from Twelve Data (QQQ proxy, US hours) or a Yahoo Finance relay
   (`NQ=F`, delayed, 24hr) depending on `source`/`activeSource`. Scanner events are chimed and
   spoken (`emit` → `speak`) when live (not the initial silent backfill).
-- **POLARIS chat** (POLARIS tab): `sendToPolaris` builds a system prompt from
-  `buildSystemPrompt()` (journal stats, recent trades, market feed, scanner state, memory) and
-  streams a reply from Claude — see "Streaming voice pipeline" below. Replies may end with a
-  `<trade>{...}</trade>` block (voice-logged trades), parsed by `parseTradeBlock` and stripped
-  from what's shown/spoken.
+- **POLARIS chat** (POLARIS tab): `sendToPolaris` builds a short `buildSystemPrompt()` snapshot
+  (today/all-time journal stats, last price, scanner phase, memory, calibration) and runs a bounded
+  agentic tool-use loop against Claude — see "Tool-use (agentic chat)" below — streaming the reply
+  as it goes, same pipeline as "Streaming voice pipeline" below. The old `<trade>{...}</trade>`
+  tag/`parseTradeBlock` path still exists as a zero-cost fallback but Polaris is no longer told
+  about it; `log_trade` is the real mechanism now.
 - **Long-term memory**: after each exchange, `updateMemory` asks Claude to fold the exchange into
   a running ≤300-word memory blob, stored via `saveMemory`, injected into every system prompt.
 - **Rules engine ("the guardian")**: `DEFAULT_RULES` (max trades/day, max daily loss, cooldown
@@ -150,6 +151,76 @@ than fixed timers wherever real data exists:
   non-repeating) so a message Polaris initiates gets a visually distinct "I'm speaking up" beat,
   separate from `reactorFlash` (the scanner's own sustained speed/color change on a completed
   setup) and from the ordinary listening→thinking→speaking cycle when responding to you.
+
+## Tool-use (agentic chat)
+
+Landen asked for Polaris to feel "more like" an agentic assistant — adaptive/reactive, deciding
+what to look up rather than reasoning off one fixed context dump. `buildSystemPrompt()` used to
+embed a large JSON dump (last 25 trades, last 20 candles, last 6 scan events, the full indicator
+status paragraph) into every single message; it's now a short "QUICK SNAPSHOT" (today/all-time net
+P&L + win rate + streak in one line, last price/day% in one line, scanner on/off + phase in one
+line, plus the memory blob and calibration string, both already short) so trivial questions don't
+force a tool round trip, and a short paragraph tells the model tools exist for anything beyond that.
+
+`POLARIS_TOOLS` (module scope, near `explainTradePlan`) is the real Anthropic `tools` array — 5
+read-only lookups (`get_journal_stats`, `get_recent_trades`, `get_market_snapshot`,
+`get_scanner_status`, `get_alerts`) plus 2 write tools (`log_trade`, `mark_alert_status`), each with
+a JSON Schema `input_schema`. `coerceTradeInput(raw)` (module scope) holds the trade
+validation/coercion logic (instrument/direction enums, `Number.isFinite` checks, contracts > 0,
+setup-enum-or-"Other", date regex-or-today) shared by both `log_trade` and the legacy `<trade>` tag
+fallback in `parseTradeBlock` — one validator, two entry points. `executeTool(name, input)`
+(component scope, closes over the same refs `buildSystemPrompt` already reads —
+`tradesRef`/`candlesRef`/`dayInfoRef`/`scanningRef`/`scanEventsRef`/`scannerStatusRef`/
+`tvAlertsRef`) dispatches each call defensively, returning `{error}` instead of throwing so the
+model can adapt. `log_trade` updates `tradesRef.current` synchronously (not just through
+`persist`'s `setTrades`, which drives a React re-render) before `await persist(next)`, so a
+`get_recent_trades` call later in the *same* tool loop sees the trade just logged.
+`mark_alert_status` rejects client-side if the target alert isn't currently `"pending"` (mirroring
+what the ALERTS tab's own MARK TRADED/MISSED buttons permit — `firestore.rules` alone only
+restricts *which field* can change, not *when*), and writes Firestore directly rather than calling
+the existing `setAlertStatus(id, status)` helper, since that helper swallows its own errors
+internally (`flash()`es and resolves `undefined` either way) and would leave `executeTool` unable
+to report success/failure back to the model accurately.
+
+Deliberately excluded from tool scope: anything that would let Polaris adjust the guardian rules
+(`DEFAULT_RULES`/max trades/max loss/cooldown exist specifically to constrain Landen — letting the
+model loosen them defeats the point) and `applyAlertToJournal`'s tab-switch/form-prefill (autonomous
+UI navigation triggered by chat would be disorienting — stays a manual button only). The app has no
+live order-execution capability anywhere, so the worst case of any tool misuse is a wrong journal
+entry or a wrongly-marked alert status, both trivially human-correctable.
+
+`streamAnthropicChat` now accepts an optional `tools` array and handles the full Anthropic
+streaming tool-use SSE sequence, not just bare text: `content_block_start` (type `"text"` or
+`"tool_use"`, tracked by `index` since a turn can carry a text block followed by one-or-more
+`tool_use` blocks), `content_block_delta` (`text_delta.text` streamed into `onDelta` exactly as
+before, or `input_json_delta.partial_json` concatenated per-block-index and only `JSON.parse`d once
+that block's `content_block_stop` arrives — parsing a partial fragment throws), and
+`message_delta.delta.stop_reason` as the authoritative "is the model done or does it want to call a
+tool" signal. Return contract changed from a plain string to `{content, stopReason, fullText}`
+(`content` is an array of `{type:"text", text}` / `{type:"tool_use", id, name, input}` blocks) —
+`sendToPolaris` is the only caller, so this is a contained breaking change.
+
+`sendToPolaris` is a bounded agentic loop, `MAX_TOOL_ROUNDS = 4`: each round calls
+`streamAnthropicChat` with the running `conversation` array and `tools: POLARIS_TOOLS` (omitted on
+the forced final round to guarantee a text-only wrap-up rather than let the loop run away), streams
+text into the **same** transcript bubble across rounds by accumulating `visibleAccum` (prior
+rounds' finalized text) instead of resetting per round, and — when `stopReason === "tool_use"` —
+runs every `tool_use` block in that response through `executeTool` **concurrently** (`Promise.all`,
+per Anthropic's documented best practice for parallel tool calls), appends one assistant turn (the
+raw content blocks) plus one user turn (all corresponding `tool_result` blocks, `is_error: true`
+set when a result carries `{error}`) to `conversation`, and loops. `parseTradeBlock` now runs
+exactly once, after the loop, on the fully-accumulated `visibleAccum` — the tag's trailing-anchor
+regex is correct automatically since `visibleAccum` *is* the end of the reply by construction, no
+extra scoping needed. With zero tool calls the loop behaves identically to the pre-tool-use
+implementation (one round, immediate break, same final `<trade>`/fallback-message logic) — this is
+a strict superset of the old control flow, not a rewrite of the non-tool path. One `AbortController`
+is created once and reused across every round, so an interrupt between rounds makes the next
+`streamAnthropicChat` call reject immediately with `AbortError`, caught by the same top-level
+`catch` as always.
+
+Write tools get a post-execution confirmation toast via `TOOL_RESULT_FLASH` (module scope, maps
+tool name → a `flash()` message formatter); read tools don't, since they're near-instant local ref
+reads that fire too often to toast without flickering.
 
 ## Persisted localStorage keys
 

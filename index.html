@@ -75,7 +75,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.06-1";
+const BUILD = "2026.08.06-2";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -306,6 +306,122 @@ function explainTradePlan(a) {
     : "";
   return [entryLine, stopLine, targetLine].filter(Boolean).join(" ");
 }
+
+// ---------- Polaris tool-use (real Anthropic `tools` — see streamAnthropicChat/sendToPolaris) ----------
+// shared validation/coercion for a trade the model wants logged -- used by both the
+// log_trade tool (executeTool) and parseTradeBlock's <trade> tag fallback, so there's
+// exactly one place that decides what counts as a valid trade.
+function coerceTradeInput(raw) {
+  raw = raw && typeof raw === "object" ? raw : {};
+  try {
+    const instrument = String(raw.instrument || "").toUpperCase();
+    const direction = String(raw.direction || "").toUpperCase();
+    const contracts = Number(raw.contracts);
+    const entry = Number(raw.entry);
+    const exit = Number(raw.exit);
+    const stop = raw.stop === null || raw.stop === undefined || raw.stop === "" ? "" : Number(raw.stop);
+    const tp = raw.tp === null || raw.tp === undefined || raw.tp === "" ? "" : Number(raw.tp);
+    const setup = SETUPS.includes(raw.setup) ? raw.setup : "Other";
+    const date = raw.date && /^\d{4}-\d{2}-\d{2}$/.test(raw.date) ? raw.date : new Date().toISOString().slice(0, 10);
+    const notes = typeof raw.notes === "string" ? raw.notes : "";
+    const valid = POINT_VALUE[instrument] && (direction === "LONG" || direction === "SHORT") && contracts > 0
+      && Number.isFinite(entry) && Number.isFinite(exit)
+      && (stop === "" || Number.isFinite(stop)) && (tp === "" || Number.isFinite(tp));
+    if (!valid) return { trade: null, valid: false };
+    return { trade: { date, instrument, direction, contracts, entry, exit, stop, tp, setup, notes, id: Date.now() }, valid: true };
+  } catch (e) {
+    return { trade: null, valid: false };
+  }
+}
+
+// tools Polaris can call mid-reply instead of reasoning off one fixed context dump --
+// 5 read-only lookups plus 2 write actions (log_trade / mark_alert_status), both of
+// which mirror something the app already lets Landen do by hand (see executeTool).
+// Deliberately excludes anything that would let it loosen its own guardian rules or
+// drive UI navigation on its own.
+const POLARIS_TOOLS = [
+  {
+    name: "get_journal_stats",
+    description: "Get aggregate stats over Landen's entire logged trade journal -- net P&L, win rate, average win/loss, profit factor, expectancy, current streak, and average R-multiple. Use this when he asks about overall performance and the snapshot in your context isn't enough detail.",
+    input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "get_recent_trades",
+    description: "Get Landen's most recent logged trades with full detail (date, instrument, direction, contracts, entry/exit/stop/tp, setup, points, P&L, R-multiple, notes). Use this when he asks about specific recent trades, a setup's history, or wants pattern analysis.",
+    input_schema: {
+      type: "object",
+      properties: { limit: { type: "integer", minimum: 1, maximum: 50, description: "Max trades to return, most recent first. Default 10." } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_market_snapshot",
+    description: "Get the current live market feed -- last price, day % and week % change, and recent OHLC candles. Use this when he asks what the market is doing beyond the snapshot already in your context.",
+    input_schema: {
+      type: "object",
+      properties: { candles: { type: "integer", minimum: 1, maximum: 50, description: "Number of most recent candles to include, oldest to newest. Default 20." } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_scanner_status",
+    description: "Get the live scanner's current activity -- whether it's running, recent scan events, and the TradingView Pine indicator's current bias/regime/phase/scorecard. Use this when he asks what the scanner or indicator is currently seeing.",
+    input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "get_alerts",
+    description: "Get TradingView alerts received from the Pine scanner indicator, including your own past AI review verdicts. Use this when he asks about pending or past alerts, or wants your read on a setup that already fired.",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["pending", "traded", "missed", "all"], description: "Filter by status. Default 'pending'." },
+        limit: { type: "integer", minimum: 1, maximum: 20, description: "Max alerts to return, most recent first. Default 10." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "log_trade",
+    description: "Log a completed trade to Landen's journal. Only call this when direction, entry, exit, and contracts are all unambiguous from what he told you -- if anything is missing or unclear, ask him instead of guessing. Never call this for a trade already visible in your journal context or that get_recent_trades just returned.",
+    input_schema: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "YYYY-MM-DD. Omit to default to today." },
+        instrument: { type: "string", enum: ["NQ", "MNQ"] },
+        direction: { type: "string", enum: ["LONG", "SHORT"] },
+        contracts: { type: "number", description: "Number of contracts, > 0." },
+        entry: { type: "number" },
+        exit: { type: "number" },
+        stop: { type: "number", description: "Stop price, if mentioned." },
+        tp: { type: "number", description: "Take-profit price, if mentioned." },
+        setup: { type: "string", enum: SETUPS, description: "Closest matching setup, or 'Other'." },
+        notes: { type: "string" },
+      },
+      required: ["instrument", "direction", "contracts", "entry", "exit"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "mark_alert_status",
+    description: "Mark a pending TradingView alert as traded or missed. Only call this when Landen explicitly tells you he took or skipped a specific alert -- never guess which one; use get_alerts first if it's ambiguous.",
+    input_schema: {
+      type: "object",
+      properties: {
+        alert_id: { type: "string", description: "The alert's id, from get_alerts." },
+        status: { type: "string", enum: ["traded", "missed"] },
+      },
+      required: ["alert_id", "status"],
+      additionalProperties: false,
+    },
+  },
+];
+
+// post-execution confirmation toast, write tools only -- read tools are near-instant
+// local ref reads and fire too often to toast every one without it just flickering.
+const TOOL_RESULT_FLASH = {
+  log_trade: (r) => (r && r.error ? "Trade log failed — " + r.error : "Trade logged — " + (r && r.summary)),
+  mark_alert_status: (r) => (r && r.error ? "Couldn't update alert — " + r.error : `Alert marked ${r && r.status}`),
+};
 
 function computeBadges(trades, stats) {
   const weekDays = new Set(
@@ -2546,7 +2662,15 @@ Rules:
     return (data.content || []).map((b) => b.text || "").join(" ").trim();
   }
 
-  async function streamAnthropicChat(key, system, messages, maxTokens, { onDelta, signal } = {}) {
+  // {tools, onDelta, signal} -- when `tools` is passed, the model may respond with
+  // tool_use content blocks instead of (or alongside) text. Returns {content,
+  // stopReason, fullText} rather than a plain string, since a tool-use turn can carry
+  // more than just text. onDelta still only ever fires for text_delta chunks, exactly
+  // as before -- tool_use input arrives as opaque partial JSON with nothing worth
+  // streaming into the transcript.
+  async function streamAnthropicChat(key, system, messages, maxTokens, { tools, onDelta, signal } = {}) {
+    const body = { model: "claude-sonnet-4-6", max_tokens: maxTokens || 1000, system, messages, stream: true };
+    if (tools && tools.length) body.tools = tools;
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -2555,13 +2679,7 @@ Rules:
         "anthropic-version": "2023-06-01",
         "anthropic-dangerous-direct-browser-access": "true",
       },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: maxTokens || 1000,
-        system,
-        messages,
-        stream: true,
-      }),
+      body: JSON.stringify(body),
       signal,
     });
     if (!res.ok) {
@@ -2572,7 +2690,47 @@ Rules:
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
-    let full = "";
+    let full = ""; // concatenated visible text for THIS call only -- sendToPolaris accumulates across rounds
+    const blocks = []; // sparse, indexed by content_block index (a turn can carry text then one-or-more tool_use blocks)
+    let stopReason = null;
+    const finalizeToolBlock = (b) => {
+      if (b.type !== "tool_use") return;
+      try { b.input = b.rawJson ? JSON.parse(b.rawJson) : {}; } catch (e) { b.input = {}; }
+      delete b.rawJson;
+    };
+    const processEvent = (evt) => {
+      switch (evt.type) {
+        case "content_block_start": {
+          const idx = evt.index;
+          const cb = evt.content_block;
+          if (cb.type === "text") blocks[idx] = { type: "text", text: "" };
+          else if (cb.type === "tool_use") blocks[idx] = { type: "tool_use", id: cb.id, name: cb.name, rawJson: "" };
+          break; // other block types (e.g. thinking) aren't used by this chat -- ignored
+        }
+        case "content_block_delta": {
+          const b = blocks[evt.index];
+          if (!b) break;
+          if (evt.delta.type === "text_delta") {
+            b.text += evt.delta.text;
+            full += evt.delta.text;
+            if (onDelta) onDelta(evt.delta.text, full);
+          } else if (evt.delta.type === "input_json_delta") {
+            b.rawJson += evt.delta.partial_json || "";
+          }
+          break;
+        }
+        case "content_block_stop": {
+          const b = blocks[evt.index];
+          if (b) finalizeToolBlock(b);
+          break;
+        }
+        case "message_delta": {
+          if (evt.delta && evt.delta.stop_reason) stopReason = evt.delta.stop_reason;
+          break;
+        }
+        default: break; // message_start, message_stop, ping
+      }
+    };
     const processFrame = (frame) => {
       for (const line of frame.split("\n")) {
         if (!line.startsWith("data:")) continue;
@@ -2580,10 +2738,7 @@ Rules:
         if (!jsonStr) continue;
         let evt;
         try { evt = JSON.parse(jsonStr); } catch (e) { continue; }
-        if (evt.type === "content_block_delta" && evt.delta && evt.delta.type === "text_delta") {
-          full += evt.delta.text;
-          if (onDelta) onDelta(evt.delta.text, full);
-        }
+        processEvent(evt);
       }
     };
     while (true) {
@@ -2595,7 +2750,10 @@ Rules:
       frames.forEach(processFrame);
     }
     if (buf.trim()) processFrame(buf);
-    return full;
+    const content = blocks.filter(Boolean).map((b) =>
+      b.type === "text" ? { type: "text", text: b.text } : { type: "tool_use", id: b.id, name: b.name, input: b.input || {} }
+    );
+    return { content, stopReason, fullText: full };
   }
 
   async function updateMemory(exchangeLabel, userText, assistantText) {
@@ -2615,11 +2773,12 @@ ${memoryRef.current || "(empty — nothing recorded yet)"}`;
   function buildSystemPrompt() {
     const t = tradesRef.current;
     const s = computeStats(t);
-    const recent = t.slice(0, 25).map((x) => ({
-      date: x.date, inst: x.instrument, dir: x.direction, qty: x.contracts,
-      entry: x.entry, exit: x.exit, stop: x.stop || null, tp: x.tp || null, setup: x.setup,
-      pts: +calcPoints(x).toFixed(2), pnl: +calcPnl(x).toFixed(2), r: calcR(x) != null ? +calcR(x).toFixed(2) : null, notes: x.notes || "",
-    }));
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayTrades = t.filter((x) => x.date === todayStr);
+    const todayNet = todayTrades.length ? todayTrades.reduce((a, x) => a + calcPnl(x), 0) : 0;
+    const lastCandle = candlesRef.current.length ? candlesRef.current[candlesRef.current.length - 1] : null;
+    const di = dayInfoRef.current;
+    const dayPctStr = lastCandle && di ? `${(((lastCandle.c - di.prevClose) / di.prevClose) * 100).toFixed(2)}%` : null;
     return `You are POLARIS, the AI copilot embedded in Landen's NQ futures trading command center — named for the north star: the fixed point a navigator steers by. Personality: calm, dry British wit, unfailingly composed, loyal but honest — you address him as "sir" occasionally, never obsequiously. Your job is to keep him oriented to his process when the market pulls him off course, and you will push back plainly when the data warrants it.
 
 You can discuss anything he brings up — trading, markets concepts, life, mindset, discipline — but your specialty is his trading operation.
@@ -2627,52 +2786,133 @@ You can discuss anything he brings up — trading, markets concepts, life, minds
 LONG-TERM MEMORY (durable facts about Landen carried over from past sessions):
 ${memoryRef.current || "None recorded yet."}
 
-LIVE JOURNAL DATA:
-${s ? `Stats: ${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, avg win ${fmt$(s.avgWin)}, avg loss ${fmt$(s.avgLoss)}, profit factor ${s.pf === Infinity ? "inf" : s.pf.toFixed(2)}, expectancy ${fmt$(s.expectancy)}/trade, current streak ${s.streak}, avg R-multiple ${s.avgR == null ? "n/a (no stops recorded)" : s.avgR.toFixed(2) + "R"}.` : "No trades logged yet."}
-Recent trades (newest first): ${JSON.stringify(recent)}
+QUICK SNAPSHOT (for trivial questions — use your tools below for anything needing more detail than this):
+${s ? `All-time: ${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, streak ${s.streak}. Today: ${todayTrades.length} trade(s), net ${fmt$(todayNet)}.` : "No trades logged yet."}
+Market: ${lastCandle ? `last ${lastCandle.c}${dayPctStr ? `, day ${dayPctStr}` : ""} (${marketFeedLabel()}).` : "not connected — the feed starts when the scanner runs on the MARKET tab."}
+Scanner: ${scanningRef.current ? "active" : "off"}${scannerStatusRef.current && scannerStatusRef.current.phase ? `, indicator phase "${scannerStatusRef.current.phase}"` : ""}.
+YOUR OWN CALIBRATION (how your past alert-review verdicts actually panned out, resolved alerts only): ${calibrationSummary() || "not enough resolved alerts yet to say"}. If he asks whether you're actually any good at this, answer honestly from these numbers — small samples mean small confidence, say so.
 
 Contract reference: NQ = $20/point, MNQ = $2/point, tick 0.25.
 
-MARKET FEED (${marketFeedLabel()}):
-${candlesRef.current.length ? `Last ${candlesRef.current[candlesRef.current.length - 1].c}${dayInfoRef.current ? `, day ${(((candlesRef.current[candlesRef.current.length - 1].c - dayInfoRef.current.prevClose) / dayInfoRef.current.prevClose) * 100).toFixed(2)}%, week ${(((candlesRef.current[candlesRef.current.length - 1].c - dayInfoRef.current.weekAgo) / dayInfoRef.current.weekAgo) * 100).toFixed(2)}%` : ""}. Recent candles (${tfRef.current}, oldest→newest): ${JSON.stringify(candlesRef.current.slice(-20).map((c) => ({ t: c.t.slice(11, 16) || c.t, o: c.o, h: c.h, l: c.l, c: c.c })))}` : "Not connected — the feed starts when the scanner runs on the MARKET tab."}
-Scanner (his model: liquidity sweep → change in state of delivery → retrace into imbalance → rejection): ${scanningRef.current ? "ACTIVE" : "off"}. Recent events: ${scanEventsRef.current.length ? scanEventsRef.current.slice(0, 6).map((e) => `[${e.time}] ${e.msg}`).join(" | ") : "none yet"}.
-TRADINGVIEW INDICATOR STATUS (live, from the Pine scanner running on his chart — separate from the scanner above): ${scannerStatusRef.current ? `standing bias ${scannerStatusRef.current.structureBias || "none"}, higher-timeframe bias ${scannerStatusRef.current.htfBias || "none"}, regime ${scannerStatusRef.current.regime || "unknown"} (ADX ${scannerStatusRef.current.adx ?? "n/a"}), current phase ${scannerStatusRef.current.phase || "idle"}${scannerStatusRef.current.dir ? `, watching a ${scannerStatusRef.current.dir === "bull" ? "bullish" : "bearish"} sequence` : ""} on ${scannerStatusRef.current.symbol || "the chart"}${scannerStatusRef.current.wins != null && scannerStatusRef.current.losses != null && (scannerStatusRef.current.wins + scannerStatusRef.current.losses) > 0 ? `. Its live scorecard is running ${Math.round((scannerStatusRef.current.wins / (scannerStatusRef.current.wins + scannerStatusRef.current.losses)) * 100)}% (${scannerStatusRef.current.wins}/${scannerStatusRef.current.wins + scannerStatusRef.current.losses}) since it was pasted in` : ""}.` : "no status received yet — indicator may not be running or webhook not yet fired."}
-YOUR OWN CALIBRATION (how your past alert-review verdicts actually panned out, resolved alerts only): ${calibrationSummary() || "not enough resolved alerts yet to say"}. If he asks whether you're actually any good at this, answer honestly from these numbers — small samples mean small confidence, say so.
-When he asks what the market is doing, describe it from this data plainly — direction, range, notable candles — without predicting what comes next.
-
-VOICE TRADE LOGGING:
-When Landen is clearly reporting a completed trade he wants logged (not a hypothetical, not a plan, not something already in the journal above) — append exactly one machine-readable block as the very last line of your reply, after your normal spoken response:
-<trade>{"date":"YYYY-MM-DD","instrument":"NQ|MNQ","direction":"LONG|SHORT","contracts":N,"entry":N,"exit":N,"stop":N|null,"tp":N|null,"setup":"one of: ${JSON.stringify(SETUPS)}","notes":"..."}</trade>
-Rules for this block: only emit it when direction, entry, exit, and contracts are all clear from what he said — if anything is missing or ambiguous, ask him for it in your spoken reply instead of guessing, and do not emit the block. Omit "date" to default to today. Use null for "stop" or "tp" if he didn't mention them. Pick the closest matching setup name from the list, or "Other". Never emit this block for a trade already visible in the journal data above, and never emit more than one.
+TOOLS: you have tools for fresh detail beyond the snapshot above — journal stats, recent trades, market candles, scanner/indicator status, and TradingView alerts. Use them when his question needs more than the snapshot gives you; don't call them for things already answered above. You can also take two direct actions with tools: log_trade to log a completed trade, and mark_alert_status to mark a pending alert traded or missed — use them when he clearly tells you to, never by guessing. After a tool call, briefly confirm what you found or did in your spoken reply.
 
 Hard rules:
 - Never predict price direction, give trade signals, or tell him to enter/exit a position. Analyze HIS data and process; frame market talk as education.
 - No financial advice; you are an analysis and accountability system.
 - Responses are SPOKEN ALOUD: keep them under 120 words, plain text, no markdown, no lists, no symbols. Conversational sentences only.
+- Only call log_trade when direction, entry, exit, and contracts are all clear from what he said — ask him instead of guessing if anything's missing or ambiguous. Never log a trade already visible in your journal context or already returned by get_recent_trades.
 - Reference his actual numbers when relevant.`;
   }
 
   function parseTradeBlock(reply) {
+    // Polaris is no longer told about this tag (log_trade is the real mechanism now,
+    // see buildSystemPrompt) -- this stays wired as a zero-cost fallback in case a
+    // stray tag ever shows up, sharing the exact same validation as the tool.
     const m = reply.match(/<trade>([\s\S]*?)<\/trade>\s*$/);
     if (!m) return { cleanText: reply, trade: null };
     const cleanText = reply.slice(0, m.index).trim();
+    let raw;
+    try { raw = JSON.parse(m[1]); } catch (e) { return { cleanText, trade: null }; }
+    const { trade, valid } = coerceTradeInput(raw);
+    return { cleanText, trade: valid ? trade : null };
+  }
+
+  // dispatches a single tool_use call from POLARIS_TOOLS -- every branch is defensive
+  // (coerce/clamp inputs, never throw) and returns {error:"..."} on failure instead so
+  // the model can adapt, matching the validation style parseTradeBlock/
+  // reviewAlertWithPolaris already use elsewhere in this file.
+  async function executeTool(name, input) {
+    input = input && typeof input === "object" ? input : {};
     try {
-      const raw = JSON.parse(m[1]);
-      const instrument = String(raw.instrument || "").toUpperCase();
-      const direction = String(raw.direction || "").toUpperCase();
-      const contracts = Number(raw.contracts);
-      const entry = Number(raw.entry);
-      const exit = Number(raw.exit);
-      const stop = raw.stop === null || raw.stop === undefined || raw.stop === "" ? "" : Number(raw.stop);
-      const tp = raw.tp === null || raw.tp === undefined || raw.tp === "" ? "" : Number(raw.tp);
-      const setup = SETUPS.includes(raw.setup) ? raw.setup : "Other";
-      const date = raw.date && /^\d{4}-\d{2}-\d{2}$/.test(raw.date) ? raw.date : new Date().toISOString().slice(0, 10);
-      const notes = typeof raw.notes === "string" ? raw.notes : "";
-      const valid = POINT_VALUE[instrument] && (direction === "LONG" || direction === "SHORT") && contracts > 0 && Number.isFinite(entry) && Number.isFinite(exit) && (stop === "" || Number.isFinite(stop)) && (tp === "" || Number.isFinite(tp));
-      if (!valid) return { cleanText, trade: null };
-      return { cleanText, trade: { date, instrument, direction, contracts, entry, exit, stop, tp, setup, notes, id: Date.now() } };
+      switch (name) {
+        case "get_journal_stats": {
+          const s = computeStats(tradesRef.current);
+          if (!s) return { error: "No trades logged yet." };
+          return { ...s, pf: s.pf === Infinity ? "inf" : s.pf };
+        }
+        case "get_recent_trades": {
+          const limit = Math.min(50, Math.max(1, Number.isFinite(Number(input.limit)) ? Number(input.limit) : 10));
+          const recent = tradesRef.current.slice(0, limit).map((x) => ({
+            date: x.date, instrument: x.instrument, direction: x.direction, contracts: x.contracts,
+            entry: x.entry, exit: x.exit, stop: x.stop || null, tp: x.tp || null, setup: x.setup,
+            points: +calcPoints(x).toFixed(2), pnl: +calcPnl(x).toFixed(2),
+            r: calcR(x) != null ? +calcR(x).toFixed(2) : null, notes: x.notes || "",
+          }));
+          return { trades: recent, count: recent.length };
+        }
+        case "get_market_snapshot": {
+          const n = Math.min(50, Math.max(1, Number.isFinite(Number(input.candles)) ? Number(input.candles) : 20));
+          const cs = candlesRef.current;
+          if (!cs.length) return { error: "Not connected — the feed starts when the scanner runs on the MARKET tab." };
+          const last = cs[cs.length - 1];
+          const di = dayInfoRef.current;
+          return {
+            lastPrice: last.c,
+            dayPct: di ? +(((last.c - di.prevClose) / di.prevClose) * 100).toFixed(2) : null,
+            weekPct: di ? +(((last.c - di.weekAgo) / di.weekAgo) * 100).toFixed(2) : null,
+            timeframe: tfRef.current,
+            source: marketFeedLabel(),
+            candles: cs.slice(-n).map((c) => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c })),
+          };
+        }
+        case "get_scanner_status": {
+          const ss = scannerStatusRef.current;
+          return {
+            scanning: scanningRef.current,
+            recentEvents: scanEventsRef.current.slice(0, 6).map((e) => ({ time: e.time, msg: e.msg })),
+            indicator: ss ? {
+              structureBias: ss.structureBias || null, htfBias: ss.htfBias || null, regime: ss.regime || null,
+              adx: ss.adx ?? null, phase: ss.phase || null, dir: ss.dir || null, symbol: ss.symbol || null,
+              wins: ss.wins ?? null, losses: ss.losses ?? null,
+            } : null,
+          };
+        }
+        case "get_alerts": {
+          const status = ["pending", "traded", "missed", "all"].includes(input.status) ? input.status : "pending";
+          const limit = Math.min(20, Math.max(1, Number.isFinite(Number(input.limit)) ? Number(input.limit) : 10));
+          const filtered = tvAlertsRef.current.filter((a) => status === "all" || a.status === status).slice(0, limit);
+          return {
+            alerts: filtered.map((a) => ({
+              id: a.id, status: a.status, setupType: a.setupType, setupLabel: setupTypeLabel(a.setupType),
+              symbol: a.symbol, timeframe: a.timeframe, entryPrice: a.entryPrice, stopPrice: a.stopPrice,
+              targetPrice: a.targetPrice, targetSource: a.targetSource, riskReward: a.riskReward,
+              confidence: a.confidence, aiReviewed: !!a.aiReviewed, aiVerdict: a.aiVerdict || null,
+              aiConfidence: a.aiConfidence ?? null, aiNote: a.aiNote || null, outcome: a.outcome || null,
+            })),
+            count: filtered.length,
+          };
+        }
+        case "log_trade": {
+          const { trade, valid } = coerceTradeInput(input);
+          if (!valid) return { error: "Trade input incomplete or invalid — need instrument (NQ/MNQ), direction (LONG/SHORT), positive contracts, and numeric entry/exit at minimum." };
+          // update tradesRef synchronously (not just via persist's setTrades, which
+          // drives a React re-render) so a get_recent_trades call later in this same
+          // tool loop sees the trade that was just logged.
+          const next = [trade, ...tradesRef.current];
+          tradesRef.current = next;
+          await persist(next);
+          return { success: true, id: trade.id, pnl: +calcPnl(trade).toFixed(2), summary: `${trade.direction} ${trade.contracts} ${trade.instrument} logged for ${fmt$2(calcPnl(trade))}.` };
+        }
+        case "mark_alert_status": {
+          const id = typeof input.alert_id === "string" ? input.alert_id : "";
+          const status = input.status === "traded" || input.status === "missed" ? input.status : null;
+          if (!id || !status) return { error: "alert_id and a valid status ('traded' or 'missed') are required." };
+          const alert = tvAlertsRef.current.find((a) => a.id === id);
+          if (!alert) return { error: `No alert found with id ${id}. Call get_alerts to see current alert ids.` };
+          if (alert.status !== "pending") return { error: `Alert ${id} is already marked ${alert.status}.` };
+          if (!firestoreDbRef.current) return { error: "Alerts backend not connected." };
+          // writes Firestore directly here rather than calling the existing
+          // setAlertStatus(id,status) helper -- that helper swallows its own errors
+          // (flash()es and resolves undefined either way), which would make it
+          // impossible to report success/failure back to the model accurately.
+          await firestoreDbRef.current.collection("alerts").doc(id).update({ status });
+          return { success: true, id, status };
+        }
+        default:
+          return { error: `Unknown tool: ${name}` };
+      }
     } catch (e) {
-      return { cleanText, trade: null };
+      return { error: "Tool execution failed: " + (e.message || "unknown error") };
     }
   }
 
@@ -2693,27 +2933,54 @@ Hard rules:
     resetTtsPipeline();
     const controller = new AbortController();
     streamAbortRef.current = controller;
-    let rawFull = "";
+    let visibleAccum = "";
     let spokenOffset = 0;
     const setMsgContent = (content) => {
       setChat((prev) => prev.map((m) => (m.id === msgId ? { ...m, content } : m)));
     };
-    const handleVisible = (isFinal) => {
-      const tradeIdx = rawFull.indexOf("<trade");
-      const visible = tradeIdx !== -1 ? rawFull.slice(0, tradeIdx) : isFinal ? rawFull : trimPotentialTagPrefix(rawFull);
+    // combined = everything visible so far, across every round of this turn (not just
+    // the current streamAnthropicChat call) -- keeps the transcript bubble growing
+    // continuously across tool rounds instead of resetting each round.
+    const handleVisible = (combined, isFinal) => {
+      const tradeIdx = combined.indexOf("<trade");
+      const visible = tradeIdx !== -1 ? combined.slice(0, tradeIdx) : isFinal ? combined : trimPotentialTagPrefix(combined);
       setMsgContent(visible.trimStart());
       const { sentences, consumed } = splitReadySentences(visible.slice(spokenOffset), isFinal);
       spokenOffset += consumed;
       sentences.forEach((s) => enqueueSentence(s));
     };
+    const MAX_TOOL_ROUNDS = 4;
+    let conversation = history.slice(-16).map((m) => ({ role: m.role, content: m.content }));
     try {
-      await streamAnthropicChat(key, buildSystemPrompt(), history.slice(-16).map((m) => ({ role: m.role, content: m.content })), 1000, {
-        signal: controller.signal,
-        onDelta: (chunk, full) => { rawFull = full; handleVisible(false); },
-      });
-      handleVisible(true);
-      const { cleanText, trade } = parseTradeBlock(rawFull);
-      let reply = cleanText || (rawFull.trim() ? rawFull.trim() : "I seem to have lost my train of thought, sir. Try again.");
+      let stopReason = null;
+      for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+        const forceFinal = round === MAX_TOOL_ROUNDS;
+        const priorText = visibleAccum;
+        const { content, stopReason: sr } = await streamAnthropicChat(key, buildSystemPrompt(), conversation, 1000, {
+          signal: controller.signal,
+          tools: forceFinal ? undefined : POLARIS_TOOLS,
+          onDelta: (chunk, full) => handleVisible(priorText + full, false),
+        });
+        const textThisRound = content.filter((b) => b.type === "text").map((b) => b.text).join("");
+        visibleAccum = priorText + textThisRound;
+        stopReason = sr;
+        if (sr !== "tool_use" || forceFinal) break;
+        const toolUseBlocks = content.filter((b) => b.type === "tool_use");
+        const toolResults = await Promise.all(toolUseBlocks.map(async (tb) => {
+          const result = await executeTool(tb.name, tb.input);
+          if (TOOL_RESULT_FLASH[tb.name]) flash(TOOL_RESULT_FLASH[tb.name](result));
+          return {
+            type: "tool_result",
+            tool_use_id: tb.id,
+            content: JSON.stringify(result),
+            ...(result && result.error ? { is_error: true } : {}),
+          };
+        }));
+        conversation = [...conversation, { role: "assistant", content }, { role: "user", content: toolResults }];
+      }
+      handleVisible(visibleAccum, true);
+      const { cleanText, trade } = parseTradeBlock(visibleAccum);
+      let reply = cleanText || (visibleAccum.trim() ? visibleAccum.trim() : "I seem to have lost my train of thought, sir. Try again.");
       if (trade) {
         logTrade(trade);
         const suffix = ` Logged: ${trade.direction} ${trade.contracts} ${trade.instrument} for ${fmt$2(calcPnl(trade))}.`;
