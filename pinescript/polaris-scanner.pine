@@ -213,7 +213,8 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // looked at higher-timeframe FVG structure itself, so a setup built around
 // tapping one was structurally invisible no matter how clean the lower-
 // timeframe confirmation was. detectHtfFvgReject(dir) (grpHtfFvg,
-// allowHtfFvgReject, default off like the other invented triggers) tracks
+// allowHtfFvgReject -- defaulted off here at first, now on by default as of
+// V2 Phase 7 below, same as the other invented triggers) tracks
 // the single most recent untested fair value gap on a dedicated higher
 // timeframe (htfFvgTimeframe, default 60 = 1H) by reusing fvgAtBull/
 // fvgAtBear as-is inside a request.security call -- the exact same
