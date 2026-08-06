@@ -434,12 +434,19 @@ var line eqLine = na
 // Pine replays this over the whole visible chart history on every reload,
 // so this reflects a real backtest under the current rules, not just
 // signals fired since you last opened the chart.
+// sumR is why win% alone is the wrong number to judge this by: every fired
+// setup already clears minRiskReward, so a loss always costs exactly -1R
+// (it resolves at the stop) but a win pays out whatever THAT trade's real
+// reward:risk was, not a fixed amount. A 35% win rate at 3R average beats
+// a 65% win rate at 1.2R average. sumR / (wins+losses) is real expectancy
+// in R-multiples -- the number that actually says whether this is working.
 var array<string> pendingDir    = array.new<string>()
 var array<float> pendingEntry   = array.new<float>()
 var array<float> pendingStop    = array.new<float>()
 var array<float> pendingTarget  = array.new<float>()
 var int scoreWins   = 0
 var int scoreLosses = 0
+var float sumR      = 0.0
 
 // ---------- persistent state: per-session volatility ----------
 // running average of each killzone's realized range (high-low across the
@@ -1159,6 +1166,7 @@ if barstate.isconfirmed and tpActive
 if showScorecard and barstate.isconfirmed and array.size(pendingDir) > 0
     for i = array.size(pendingDir) - 1 to 0
         string pDir = array.get(pendingDir, i)
+        float pEntry = array.get(pendingEntry, i)
         float pStop = array.get(pendingStop, i)
         float pTarget = array.get(pendingTarget, i)
         bool hitStop = pDir == "bull" ? low <= pStop : high >= pStop
@@ -1169,8 +1177,17 @@ if showScorecard and barstate.isconfirmed and array.size(pendingDir) > 0
             // it counts as a loss rather than assuming the favorable order
             if hitTarget and not hitStop
                 scoreWins := scoreWins + 1
+                // a win pays out THIS trade's real reward:risk, not a fixed
+                // amount -- risk is what actually happened at entry, so this
+                // is real realized R, not the minRiskReward floor
+                float riskAtEntry = math.abs(pEntry - pStop)
+                if riskAtEntry > 0
+                    sumR := sumR + math.abs(pTarget - pEntry) / riskAtEntry
             else
                 scoreLosses := scoreLosses + 1
+                // a loss always costs exactly -1R by definition -- it
+                // resolved at the stop, i.e. the full risked distance
+                sumR := sumR - 1.0
             array.remove(pendingDir, i)
             array.remove(pendingEntry, i)
             array.remove(pendingStop, i)
@@ -1577,7 +1594,7 @@ if showVisuals and not na(seqPhase)
     line.new(seqSweepBar, seqLevel, bar_index, seqLevel, color=color.new(#F5C86B, 55), style=line.style_dashed, width=1)
 
 // ---------- status HUD (top-right) ----------
-var table hud = table.new(position=position.top_right, columns=2, rows=11, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
+var table hud = table.new(position=position.top_right, columns=2, rows=12, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
 
 if showHud and barstate.islast
     // "BIAS" row doubles as the direction row -- structureBias IS the direction
@@ -1618,3 +1635,10 @@ if showHud and barstate.islast
         string scoreTxt = totalResolved > 0 ? str.tostring(math.round(scoreWins / totalResolved * 100)) + "% (" + str.tostring(scoreWins) + "/" + str.tostring(totalResolved) + ")" : "-- (0/0)"
         table.cell(hud, 0, 10, "SCORE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
         table.cell(hud, 1, 10, scoreTxt, text_color=totalResolved > 0 and scoreWins / totalResolved >= 0.5 ? #2FE08A : #DDF3FF, text_size=size.small, text_halign=text.align_right)
+        // the number that actually says whether this is working -- win% alone
+        // can't tell a 35%-win-at-3R system (great) from a 65%-win-at-1.2R one
+        // (bad). Real average R-multiple per resolved trade, not win count.
+        float avgR = totalResolved > 0 ? sumR / totalResolved : na
+        string expTxt = na(avgR) ? "--" : (avgR >= 0 ? "+" : "") + str.tostring(avgR, "#.##") + "R"
+        table.cell(hud, 0, 11, "EXP", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 11, expTxt, text_color=na(avgR) ? #6E93AD : (avgR >= 0 ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)

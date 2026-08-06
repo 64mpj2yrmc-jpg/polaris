@@ -471,6 +471,19 @@ app can't receive them — hence the exception to "no server logic" above). It d
      liquidity pools (same `minPoolTouches` filter) actually sitting between entry and target,
      drawing fewer than two lines rather than fabricating a percentage-based one if that's all that
      exists in range.
+  4. CE10163 fix: `buildTradePlanDrawings()`'s `showTpLadder ? findLiquidityLevels(...) :
+     [float(na), float(na)]` tripped "ternary operations cannot return tuples" — Pine ternaries
+     can only return a single value. Replaced with an `if showTpLadder` block assigning into two
+     pre-declared `na` floats (`tp1Price`/`tp2Price`) instead, the same tuple-avoidance pattern
+     used elsewhere in this file for conditionals that need a multi-value function's result.
+  5. Real expectancy on the scorecard: after a live win rate (11/28, 39%) read as "broken" on its
+     own, added `sumR` (new persistent float) tracking the actual realized R-multiple of every
+     resolved trade — a loss is always exactly -1R (it resolved at the stop), but a win pays out
+     THAT trade's real reward:risk, not a fixed amount, computed from `pendingEntry`/`pendingStop`/
+     `pendingTarget` at resolution time in the same loop that already tallies `scoreWins`/
+     `scoreLosses`. New HUD "EXP" row shows `sumR / (wins+losses)` as e.g. "+0.18R" — the number
+     that actually says whether the system is working, since win% alone can't distinguish a 35%
+     win rate at 3R average (a good system) from a 65% win rate at 1.2R average (a bad one).
 
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
