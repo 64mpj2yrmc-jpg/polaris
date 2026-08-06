@@ -75,7 +75,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.06-4";
+const BUILD = "2026.08.06-5";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -3227,7 +3227,7 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
     speaking: "SPEAKING — TAP TO INTERRUPT",
   }[voiceState];
 
-  const tabs = ["POLARIS", "MARKET", "ALERTS", "DESK", "LOG", "JOURNAL", "RISK", "SETUP"];
+  const tabs = ["POLARIS", "MARKET", "ALERTS", "INDICATOR", "DESK", "LOG", "JOURNAL", "RISK", "SETUP"];
 
   return (
     <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 700px at 50% -10%, #06182B 0%, ${C.bg} 55%)`, color: C.text, fontFamily: mono }}>
@@ -3826,96 +3826,6 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
               )}
             </Panel>
 
-            {scannerStatus && (
-              <Panel>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
-                  <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold }}>◆ LIVE INDICATOR STATUS</div>
-                  <div style={{ fontSize: 10, color: C.faint }}>{scannerStatus.symbol || ""} {scannerStatus.timeframe || ""}</div>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))", gap: 10, fontSize: 12 }}>
-                  <div><Label>Bias</Label><div style={{ color: scannerStatus.structureBias === "bull" ? C.green : scannerStatus.structureBias === "bear" ? C.red : C.faint }}>{scannerStatus.structureBias ? scannerStatus.structureBias.toUpperCase() : "—"}</div></div>
-                  <div><Label>HTF</Label><div style={{ color: scannerStatus.htfBias === "bull" ? C.green : scannerStatus.htfBias === "bear" ? C.red : C.faint }}>{scannerStatus.htfBias ? scannerStatus.htfBias.toUpperCase() : "—"}</div></div>
-                  <div><Label>Regime</Label><div style={{ color: scannerStatus.regime === "trend" ? C.text : C.faint }}>{scannerStatus.regime ? scannerStatus.regime.toUpperCase() : "—"}{scannerStatus.adx != null ? ` (${scannerStatus.adx.toFixed(1)})` : ""}</div></div>
-                  <div><Label>Phase</Label><div style={{ color: scannerStatus.phase && scannerStatus.phase !== "idle" ? C.gold : C.faint }}>{scannerStatus.phase ? scannerStatus.phase.toUpperCase() : "IDLE"}</div></div>
-                  {scannerStatus.wins != null && scannerStatus.losses != null && (scannerStatus.wins + scannerStatus.losses) > 0 && (
-                    <div><Label>Score</Label><div style={{ color: (scannerStatus.wins / (scannerStatus.wins + scannerStatus.losses)) >= 0.5 ? C.green : C.text }}>{Math.round((scannerStatus.wins / (scannerStatus.wins + scannerStatus.losses)) * 100)}% ({scannerStatus.wins}/{scannerStatus.wins + scannerStatus.losses})</div></div>
-                  )}
-                </div>
-              </Panel>
-            )}
-
-            {(verdictAccuracy.favorable.w + verdictAccuracy.favorable.l + verdictAccuracy.caution.w + verdictAccuracy.caution.l + verdictAccuracy.avoid.w + verdictAccuracy.avoid.l) > 0 && (
-              <Panel>
-                <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold, marginBottom: 8 }}>◆ POLARIS CALIBRATION</div>
-                <div style={{ fontSize: 11, color: C.faint, marginBottom: 8, lineHeight: 1.5 }}>
-                  How its own verdicts have actually panned out, resolved alerts only — small samples, weight accordingly.
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))", gap: 10, fontSize: 12 }}>
-                  {["favorable", "caution", "avoid"].map((v) => {
-                    const b = verdictAccuracy[v];
-                    const n = b.w + b.l;
-                    if (n === 0) return null;
-                    const pct = Math.round((b.w / n) * 100);
-                    return (
-                      <div key={v}>
-                        <Label>{v.charAt(0).toUpperCase() + v.slice(1)}</Label>
-                        <div style={{ color: v === "avoid" ? (pct < 50 ? C.green : C.red) : (pct >= 50 ? C.green : C.red) }}>{pct}% ({b.w}/{n})</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </Panel>
-            )}
-
-            {(Object.keys(performanceByTrigger).length > 0 || Object.keys(performanceByConfidence).length > 0) && (
-              <Panel>
-                <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold, marginBottom: 8 }}>◆ INDICATOR PERFORMANCE</div>
-                <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
-                  Win rate and EXP (average realized R) by what actually triggered each resolved alert, and by how confident the indicator was — resolved alerts only, small buckets mean small confidence.
-                </div>
-                {Object.keys(performanceByTrigger).length > 0 && (
-                  <React.Fragment>
-                    <Label>By trigger type</Label>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, fontSize: 12, marginTop: 4, marginBottom: 12 }}>
-                      {["sweep", "reversal", "continuation", "breakout", "htf_fvg", "structure"].map((key) => {
-                        const b = performanceByTrigger[key];
-                        if (!b || b.n === 0) return null;
-                        const pct = Math.round((b.w / b.n) * 100);
-                        const exp = b.sumR / b.n;
-                        return (
-                          <div key={key}>
-                            <Label>{TRIGGER_BUCKET_LABELS[key]}</Label>
-                            <div style={{ color: pct >= 50 ? C.green : C.red }}>{pct}% ({b.w}/{b.n})</div>
-                            <div style={{ fontSize: 11, color: exp >= 0 ? C.green : C.red }}>{exp >= 0 ? "+" : ""}{exp.toFixed(2)}R</div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </React.Fragment>
-                )}
-                {Object.keys(performanceByConfidence).length > 0 && (
-                  <React.Fragment>
-                    <Label>By confidence</Label>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, fontSize: 12, marginTop: 4 }}>
-                      {["high", "mid", "low"].map((key) => {
-                        const b = performanceByConfidence[key];
-                        if (!b || b.n === 0) return null;
-                        const pct = Math.round((b.w / b.n) * 100);
-                        const exp = b.sumR / b.n;
-                        return (
-                          <div key={key}>
-                            <Label>{CONFIDENCE_TIER_LABELS[key]}</Label>
-                            <div style={{ color: pct >= 50 ? C.green : C.red }}>{pct}% ({b.w}/{b.n})</div>
-                            <div style={{ fontSize: 11, color: exp >= 0 ? C.green : C.red }}>{exp >= 0 ? "+" : ""}{exp.toFixed(2)}R</div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </React.Fragment>
-                )}
-              </Panel>
-            )}
-
             {!tvAlertsStatus && tvAlerts.length === 0 && (
               <Panel>
                 <div style={{ textAlign: "center", padding: "30px 10px", color: C.faint, fontSize: 13 }}>
@@ -4006,6 +3916,116 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
                 </Panel>
               );
             })}
+          </React.Fragment>
+        )}
+
+        {/* ================= INDICATOR ================= */}
+        {tab === "INDICATOR" && (
+          <React.Fragment>
+            <Panel>
+              <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>INDICATOR STATS</div>
+              <div style={{ color: C.muted, fontSize: 12, lineHeight: 1.6 }}>
+                What the Pine Script scanner is currently tracking, how well its past AI-reviewed verdicts have panned out, and win rate/expectancy broken out by what actually triggered each alert. The ALERTS tab is the raw feed and actions — this tab is the numbers behind it.
+              </div>
+            </Panel>
+
+            {scannerStatus && (
+              <Panel>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
+                  <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold }}>◆ LIVE INDICATOR STATUS</div>
+                  <div style={{ fontSize: 10, color: C.faint }}>{scannerStatus.symbol || ""} {scannerStatus.timeframe || ""}</div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))", gap: 10, fontSize: 12 }}>
+                  <div><Label>Bias</Label><div style={{ color: scannerStatus.structureBias === "bull" ? C.green : scannerStatus.structureBias === "bear" ? C.red : C.faint }}>{scannerStatus.structureBias ? scannerStatus.structureBias.toUpperCase() : "—"}</div></div>
+                  <div><Label>HTF</Label><div style={{ color: scannerStatus.htfBias === "bull" ? C.green : scannerStatus.htfBias === "bear" ? C.red : C.faint }}>{scannerStatus.htfBias ? scannerStatus.htfBias.toUpperCase() : "—"}</div></div>
+                  <div><Label>Regime</Label><div style={{ color: scannerStatus.regime === "trend" ? C.text : C.faint }}>{scannerStatus.regime ? scannerStatus.regime.toUpperCase() : "—"}{scannerStatus.adx != null ? ` (${scannerStatus.adx.toFixed(1)})` : ""}</div></div>
+                  <div><Label>Phase</Label><div style={{ color: scannerStatus.phase && scannerStatus.phase !== "idle" ? C.gold : C.faint }}>{scannerStatus.phase ? scannerStatus.phase.toUpperCase() : "IDLE"}</div></div>
+                  {scannerStatus.wins != null && scannerStatus.losses != null && (scannerStatus.wins + scannerStatus.losses) > 0 && (
+                    <div><Label>Score</Label><div style={{ color: (scannerStatus.wins / (scannerStatus.wins + scannerStatus.losses)) >= 0.5 ? C.green : C.text }}>{Math.round((scannerStatus.wins / (scannerStatus.wins + scannerStatus.losses)) * 100)}% ({scannerStatus.wins}/{scannerStatus.wins + scannerStatus.losses})</div></div>
+                  )}
+                </div>
+              </Panel>
+            )}
+
+            {(verdictAccuracy.favorable.w + verdictAccuracy.favorable.l + verdictAccuracy.caution.w + verdictAccuracy.caution.l + verdictAccuracy.avoid.w + verdictAccuracy.avoid.l) > 0 && (
+              <Panel>
+                <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold, marginBottom: 8 }}>◆ POLARIS CALIBRATION</div>
+                <div style={{ fontSize: 11, color: C.faint, marginBottom: 8, lineHeight: 1.5 }}>
+                  How its own verdicts have actually panned out, resolved alerts only — small samples, weight accordingly.
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))", gap: 10, fontSize: 12 }}>
+                  {["favorable", "caution", "avoid"].map((v) => {
+                    const b = verdictAccuracy[v];
+                    const n = b.w + b.l;
+                    if (n === 0) return null;
+                    const pct = Math.round((b.w / n) * 100);
+                    return (
+                      <div key={v}>
+                        <Label>{v.charAt(0).toUpperCase() + v.slice(1)}</Label>
+                        <div style={{ color: v === "avoid" ? (pct < 50 ? C.green : C.red) : (pct >= 50 ? C.green : C.red) }}>{pct}% ({b.w}/{n})</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </Panel>
+            )}
+
+            {(Object.keys(performanceByTrigger).length > 0 || Object.keys(performanceByConfidence).length > 0) && (
+              <Panel>
+                <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold, marginBottom: 8 }}>◆ INDICATOR PERFORMANCE</div>
+                <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
+                  Win rate and EXP (average realized R) by what actually triggered each resolved alert, and by how confident the indicator was — resolved alerts only, small buckets mean small confidence.
+                </div>
+                {Object.keys(performanceByTrigger).length > 0 && (
+                  <React.Fragment>
+                    <Label>By trigger type</Label>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, fontSize: 12, marginTop: 4, marginBottom: 12 }}>
+                      {["sweep", "reversal", "continuation", "breakout", "htf_fvg", "structure"].map((key) => {
+                        const b = performanceByTrigger[key];
+                        if (!b || b.n === 0) return null;
+                        const pct = Math.round((b.w / b.n) * 100);
+                        const exp = b.sumR / b.n;
+                        return (
+                          <div key={key}>
+                            <Label>{TRIGGER_BUCKET_LABELS[key]}</Label>
+                            <div style={{ color: pct >= 50 ? C.green : C.red }}>{pct}% ({b.w}/{b.n})</div>
+                            <div style={{ fontSize: 11, color: exp >= 0 ? C.green : C.red }}>{exp >= 0 ? "+" : ""}{exp.toFixed(2)}R</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </React.Fragment>
+                )}
+                {Object.keys(performanceByConfidence).length > 0 && (
+                  <React.Fragment>
+                    <Label>By confidence</Label>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, fontSize: 12, marginTop: 4 }}>
+                      {["high", "mid", "low"].map((key) => {
+                        const b = performanceByConfidence[key];
+                        if (!b || b.n === 0) return null;
+                        const pct = Math.round((b.w / b.n) * 100);
+                        const exp = b.sumR / b.n;
+                        return (
+                          <div key={key}>
+                            <Label>{CONFIDENCE_TIER_LABELS[key]}</Label>
+                            <div style={{ color: pct >= 50 ? C.green : C.red }}>{pct}% ({b.w}/{b.n})</div>
+                            <div style={{ fontSize: 11, color: exp >= 0 ? C.green : C.red }}>{exp >= 0 ? "+" : ""}{exp.toFixed(2)}R</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </React.Fragment>
+                )}
+              </Panel>
+            )}
+
+            {!scannerStatus && (verdictAccuracy.favorable.w + verdictAccuracy.favorable.l + verdictAccuracy.caution.w + verdictAccuracy.caution.l + verdictAccuracy.avoid.w + verdictAccuracy.avoid.l) === 0 && Object.keys(performanceByTrigger).length === 0 && Object.keys(performanceByConfidence).length === 0 && (
+              <Panel>
+                <div style={{ textAlign: "center", padding: "30px 10px", color: C.faint, fontSize: 13 }}>
+                  No indicator data yet — waiting on TradingView.
+                </div>
+              </Panel>
+            )}
           </React.Fragment>
         )}
 

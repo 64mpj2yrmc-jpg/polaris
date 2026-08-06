@@ -715,9 +715,9 @@ it as a short string (e.g. `"favorable 71% (5/7), avoid 25% (1/4)"`, omitting an
 `n=0`) — this is genuine self-calibration: does an `avoid` call actually lose more than a
 `favorable` one? It's fed into both `buildAlertReviewPrompt()` (so future reviews are informed by
 Polaris's own track record, not judged in a vacuum) and `buildSystemPrompt()` (so asking "are you
-actually any good at this" in chat gets a real, sample-size-aware answer), shown on the ALERTS tab
-as a "◆ POLARIS CALIBRATION" panel (hidden until at least one bucket has data), and each alert
-card gets a WON/LOST badge next to its status badge once resolved.
+actually any good at this" in chat gets a real, sample-size-aware answer), shown on the INDICATOR
+tab as a "◆ POLARIS CALIBRATION" panel (hidden until at least one bucket has data), and each alert
+card on the ALERTS tab gets a WON/LOST badge next to its status badge once resolved.
 
 **Indicator performance tracking (by trigger type / confidence).** The Pine scanner's own on-chart
 scorecard (SCORE/EXP) blends all five entry triggers — sweep, reversal, continuation, breakout,
@@ -739,11 +739,24 @@ uses (a loss is always exactly `-1R`; a win pays its own real `riskReward`, fall
 only if that wasn't computable at fire time). Two `useMemo`s over `tvAlerts` —
 `performanceByTrigger` and `performanceByConfidence` (the latter bucketed by `confidenceTier(conf)`:
 low `<50`, mid `50-74`, high `≥75`) — tally `{n, w, sumR}` per bucket, resolved alerts only. Shown
-on the ALERTS tab as a "◆ INDICATOR PERFORMANCE" panel (hidden until at least one bucket has data,
+on the INDICATOR tab as a "◆ INDICATOR PERFORMANCE" panel (hidden until at least one bucket has data,
 same convention as the calibration panel), each populated bucket showing win% and EXP
 (`sumR / n`) side by side — this is the number that answers "which trigger type/confidence tier
 is actually earning its keep," meant to inform which of the Pine script's `allow*` toggles or
 `minRiskReward`/session/ADX gates are worth tightening, rather than changing any of them blind.
+
+**INDICATOR tab (split out from ALERTS).** Originally the LIVE INDICATOR STATUS, POLARIS
+CALIBRATION, and INDICATOR PERFORMANCE panels above all lived on the ALERTS tab alongside the raw
+alert feed and its MARK TRADED/MISSED actions — on request, they moved to their own `"INDICATOR"`
+tab (added to `tabs`, sits right after `"ALERTS"`) so the two stay conceptually separate: ALERTS
+is "what fired and what did I do about it," INDICATOR is "how well is this actually performing."
+No state or computation changed, purely a JSX relocation — the same `scannerStatus`,
+`verdictAccuracy`, `performanceByTrigger`/`performanceByConfidence` `useMemo`s feed both the
+INDICATOR tab's panels and (unchanged) `buildSystemPrompt()`/`buildAlertReviewPrompt()`. The
+ALERTS tab keeps its header panel, the "no alerts yet" empty state, and the alert card list
+(WON/LOST badges, AI-review verdict, MARK TRADED/MISSED); the INDICATOR tab gets its own header
+panel plus a "no indicator data yet" empty state shown only once none of its three panels have
+anything to show.
 
 **Live indicator status (between full setups).** The Pine scanner also fires a second, much
 lighter webhook payload on every phase advance (sweep detected → CISD confirmed → retracing) —
@@ -759,7 +772,7 @@ current mid-sequence). `firestore.rules` gates it read-only for signed-in client
 
 `index.html` subscribes to that doc in the same Firebase `useEffect` that subscribes to `/alerts`
 (`scannerStatus` state, `scannerStatusRef`), and it feeds into three places: a compact "LIVE
-INDICATOR STATUS" strip at the top of the ALERTS tab (bias/HTF/regime/phase, plus a `Score` cell
+INDICATOR STATUS" strip at the top of the INDICATOR tab (bias/HTF/regime/phase, plus a `Score` cell
 once `wins + losses > 0`, mirroring the indicator's own on-chart HUD); `buildSystemPrompt()`, so
 asking Polaris in chat what it's seeing — including its actual win rate — gets a real answer tied
 to the indicator's live state, not just the separate market-feed candles; and a dedicated
