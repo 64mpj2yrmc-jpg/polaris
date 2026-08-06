@@ -109,6 +109,48 @@ best-effort convenience, not a requirement for the app to function.
    gold for 5s on a completed setup (`reactorFlash` state, set from the scanner's `emit` function);
    active voice states always take priority over scanner mood.
 
+## Making Polaris feel more present (cosmetic pass)
+
+Five additions layered on top of the `Reactor`/voice pipeline above, all driven by real state rather
+than fixed timers wherever real data exists:
+
+- **Audio-reactive Reactor** — a live 0-1 `audioLevel` (state `audioLevel` + mirror
+  `audioLevelRef`) feeds a `level` prop into every `<Reactor>`. Three sources, all funneling into
+  the same `setLevel()`: a second, independent `getUserMedia` stream analysed with a Web Audio
+  `AnalyserNode` (`startMicLevelMeter`) while `voiceState === "listening"` — `SpeechRecognition`
+  itself exposes no levels, hence the extra capture just for visualization; a real `AnalyserNode` on
+  the ElevenLabs `<audio>` element while it's actually playing (`startElementLevelMeter`, wired into
+  both `speakEleven` and the `pumpTtsQueue` eleven branch), routed back through to
+  `ctx.destination` so this never changes what's actually heard; and, since device
+  `speechSynthesis` exposes no waveform at all, a decaying spike on each `SpeechSynthesisUtterance`
+  `onboundary` event (`startDeviceLevelDecay`) as a best-effort stand-in, honestly weaker than the
+  two real analyser-driven paths. `stopLevelMeter()` is the single cleanup call (tears down the mic
+  stream/AudioContext, zeroes the level) — wired into `haltAllSpeech`, every TTS `onended`/`onerror`,
+  and the listening `rec.onend`/`onerror`. All three sources are wrapped in try/catch and just leave
+  the level at 0 on failure (mic denied, no AudioContext, etc.) — additive, never load-bearing, since
+  the Reactor already has its full state-driven fallback animation underneath.
+- **Distinct thinking-state visual** — `voiceState === "thinking"` now also draws a ticking radar
+  sweep line (`animation: spin 1s steps(9, end) infinite` — stepped, not smooth, deliberately reads
+  as "searching" rather than just another spinning ring) so waiting on the Claude stream has its own
+  visual signature instead of reusing a generic fast pulse.
+- **Persistent mini-Reactor** — a small (`size={26}`) `<Reactor>` now sits in the status bar next
+  to the POLARIS wordmark (renders on every tab, not just the POLARIS tab), wired to the same
+  `voiceState`/`awake`/`seqPhase`/`flash`/`level` props as the main one so it's never out of sync,
+  and its `onClick` is the same `toggleListening` — meaning tap-to-talk now works from any tab, not
+  just POLARIS.
+- **Chat transcript personality** — each transcript bubble now mounts with a one-shot `panelIn`
+  entrance (keyed by array index, so it only plays once per genuinely new message, never replays on
+  a streaming content update); Polaris's messages get a small north-star mark (the same path used in
+  `Reactor`'s core, at `9x9`) next to the "POLARIS" label and a 2px cyan left accent on the bubble;
+  and a `streamingMsgId` state (set when `sendToPolaris` creates the streaming placeholder, cleared
+  once that stream finishes or aborts) drives a blinking `▌` caret appended to whichever bubble is
+  still actively streaming in.
+- **Proactive-speech visual tell** — `speakProactive()` now also fires a one-shot `proactiveTell`
+  state (true for 1.2s, via `reactorRipple` — an outward-expanding, fading ring, `1.1s ease-out`,
+  non-repeating) so a message Polaris initiates gets a visually distinct "I'm speaking up" beat,
+  separate from `reactorFlash` (the scanner's own sustained speed/color change on a completed
+  setup) and from the ordinary listening→thinking→speaking cycle when responding to you.
+
 ## Persisted localStorage keys
 
 `nq-trades`, `polaris-voice`, `polaris-ears-on`, `polaris-anthropic-key`, `polaris-chat`,

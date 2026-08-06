@@ -32,6 +32,7 @@
   @keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
   @keyframes spinrev { from { transform: rotate(360deg);} to { transform: rotate(0deg);} }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+  @keyframes reactorRipple { 0% { transform: translate(-50%, -50%) scale(0.4); opacity: 0.85; } 100% { transform: translate(-50%, -50%) scale(1.7); opacity: 0; } }
   @keyframes blink { 0%,49% {opacity:1} 50%,100% {opacity:0} }
   @keyframes panelIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
@@ -74,7 +75,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.05-7";
+const BUILD = "2026.08.06-1";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -760,7 +761,7 @@ function PnlCalendar({ trades }) {
 }
 
 // ---------- wayfinder mark (astrolabe + north star) ----------
-function Reactor({ state, onClick, size = 150, awake, seqPhase, flash }) {
+function Reactor({ state, onClick, size = 150, awake, seqPhase, flash, level = 0, proactive }) {
   // while idle (no active voice interaction), let scanner activity drive the ambient pulse:
   // sweep < cisd < retrace speed up progressively, and a completed setup flashes gold.
   const PHASE_SPEED = {
@@ -782,9 +783,24 @@ function Reactor({ state, onClick, size = 150, awake, seqPhase, flash }) {
     state === "listening" ? "pulse 0.8s ease-in-out infinite" :
     state === "speaking" ? "pulse 0.45s ease-in-out infinite" :
     "pulse 3.2s ease-in-out infinite";
+  // live audio level (real mic RMS while listening, real/simulated playback level while
+  // speaking) only means something in those two states -- everywhere else it's just 0.
+  // Driven straight off React state rather than a CSS animation, so it can react
+  // immediately frame-to-frame instead of fighting the ambient `pulse` keyframe above.
+  const reactive = state === "listening" || state === "speaking";
+  const liveLevel = reactive ? level : 0;
   return (
     <button onClick={onClick} aria-label={state === "listening" ? "Stop listening" : "Talk to POLARIS"}
       style={{ background: "transparent", border: "none", cursor: "pointer", position: "relative", width: size, height: size, padding: 0 }}>
+      {proactive && (
+        <div style={{
+          position: "absolute", top: "50%", left: "50%",
+          width: size, height: size, borderRadius: "50%",
+          border: `1.5px solid ${C.gold}`,
+          animation: "reactorRipple 1.1s ease-out",
+          pointerEvents: "none",
+        }} />
+      )}
       <div style={{
         position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
         width: size * 0.3, height: size * 0.3, borderRadius: "50%",
@@ -792,6 +808,17 @@ function Reactor({ state, onClick, size = 150, awake, seqPhase, flash }) {
         opacity: 0.5,
         animation: pulse,
       }} />
+      {reactive && (
+        <div style={{
+          position: "absolute", top: "50%", left: "50%",
+          transform: `translate(-50%, -50%) scale(${1 + liveLevel * 0.9})`,
+          width: size * 0.55, height: size * 0.55, borderRadius: "50%",
+          background: `radial-gradient(circle, ${core} 0%, transparent 68%)`,
+          opacity: 0.25 + liveLevel * 0.5,
+          pointerEvents: "none",
+          transition: "transform 70ms linear, opacity 70ms linear",
+        }} />
+      )}
       <svg viewBox="0 0 200 200" style={{ width: "100%", height: "100%", position: "relative" }}>
         <defs>
           <radialGradient id="wayfinderCore" cx="50%" cy="50%" r="50%">
@@ -808,9 +835,19 @@ function Reactor({ state, onClick, size = 150, awake, seqPhase, flash }) {
           style={{ animation: `spinrev ${ring2Speed} linear infinite`, transformOrigin: "100px 100px" }} />
         <circle cx="100" cy="100" r="68" fill="none" stroke={core} strokeWidth="1" strokeDasharray="3 7" opacity="0.4"
           style={{ animation: `spin ${ring3Speed} linear infinite`, transformOrigin: "100px 100px" }} />
+        {/* thinking gets its own tell: a ticking radar sweep (steps, not smooth spin) so
+            "processing" reads distinctly from every other ambient ring animation here */}
+        {state === "thinking" && (
+          <line x1="100" y1="100" x2="100" y2="16" stroke={core} strokeWidth="1.5" opacity="0.55"
+            style={{ animation: "spin 1s steps(9, end) infinite", transformOrigin: "100px 100px" }} />
+        )}
         {/* north star core */}
         <path d="M100 58 L105 95 L142 100 L105 105 L100 142 L95 105 L58 100 L95 95 Z" fill="url(#wayfinderCore)"
-          style={{ animation: pulse, transformOrigin: "100px 100px", filter: `drop-shadow(0 0 ${size * 0.05}px ${core})` }} />
+          style={{
+            animation: pulse, transformOrigin: "100px 100px",
+            filter: `drop-shadow(0 0 ${size * (0.05 + liveLevel * 0.04)}px ${core})`,
+            transform: reactive ? `scale(${1 + liveLevel * 0.15})` : undefined,
+          }} />
         <circle cx="100" cy="100" r="6" fill="#fff" style={{ animation: pulse, transformOrigin: "100px 100px" }} />
       </svg>
     </button>
@@ -864,6 +901,7 @@ function App() {
 
   // ----- POLARIS state -----
   const [voiceState, setVoiceState] = useState("idle");
+  const [streamingMsgId, setStreamingMsgId] = useState(null); // which chat message id is still actively streaming in, for the transcript's caret
   const [chat, setChat] = useState([]);
   const [draft, setDraft] = useState("");
   const [interim, setInterim] = useState("");
@@ -947,6 +985,22 @@ function App() {
   const ttsInterruptedRef = useRef(false);
   const streamFinishedRef = useRef(true);
 
+  // ---------- live audio level (drives the Reactor's audio-reactive glow) ----------
+  // Three sources depending on what's actually happening, all funneling into the same
+  // 0-1 audioLevelRef/audioLevel: a small extra getUserMedia stream analysed with
+  // Web Audio while listening (SpeechRecognition itself exposes no levels), a real
+  // AnalyserNode on the ElevenLabs <audio> element while it plays, or -- since device
+  // speechSynthesis exposes no waveform at all -- a decaying spike on each word
+  // boundary as a best-effort stand-in. Every path is wrapped in try/catch and just
+  // leaves the level at 0 on failure (mic denied, no AudioContext, etc.); the Reactor
+  // already has a full state-driven fallback animation, so this is additive, never load-bearing.
+  const [audioLevel, setAudioLevel] = useState(0);
+  const audioLevelRef = useRef(0);
+  const levelRafRef = useRef(null);
+  const micStreamRef = useRef(null);
+  const micAudioCtxRef = useRef(null);
+  const ttsAudioCtxRef = useRef(null);
+
   // market + scanner
   const [tdKey, setTdKey] = useState("");
   const [symbol, setSymbol] = useState("QQQ");
@@ -957,6 +1011,8 @@ function App() {
   const [scanEvents, setScanEvents] = useState([]);
   const [seqView, setSeqView] = useState(null);
   const [reactorFlash, setReactorFlash] = useState(false);
+  const [proactiveTell, setProactiveTell] = useState(false);
+  const proactiveTellTimerRef = useRef(null);
   const [mktStatus, setMktStatus] = useState("");
   const [source, setSource] = useState("AUTO");
   const tdKeyRef = useRef(tdKey); tdKeyRef.current = tdKey;
@@ -1746,6 +1802,13 @@ Rules:
     chime(1);
     setChat((prev) => [...prev, { role: "assistant", content: text }]);
     speak(text);
+    // a one-shot ripple on the Reactor -- the visual "tell" that this is Polaris
+    // initiating, not responding to something you said. Distinct from the scanner's
+    // own completed-setup flash (reactorFlash): that's a sustained speed/color change,
+    // this is a single outward pulse timed to the moment speech starts.
+    setProactiveTell(true);
+    if (proactiveTellTimerRef.current) clearTimeout(proactiveTellTimerRef.current);
+    proactiveTellTimerRef.current = setTimeout(() => setProactiveTell(false), 1200);
     return true;
   }
 
@@ -1862,6 +1925,77 @@ Rules:
     return () => clearTimeout(id);
   }, [engine, elKey]);
 
+  function setLevel(v) {
+    audioLevelRef.current = v;
+    setAudioLevel(v);
+  }
+
+  function stopLevelLoop() {
+    if (levelRafRef.current) { cancelAnimationFrame(levelRafRef.current); levelRafRef.current = null; }
+  }
+
+  function stopLevelMeter() {
+    stopLevelLoop();
+    if (micStreamRef.current) { micStreamRef.current.getTracks().forEach((t) => t.stop()); micStreamRef.current = null; }
+    if (micAudioCtxRef.current) { micAudioCtxRef.current.close().catch(() => {}); micAudioCtxRef.current = null; }
+    setLevel(0);
+  }
+
+  function rms(analyser, data, gain) {
+    analyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) { const v = (data[i] - 128) / 128; sum += v * v; }
+    return Math.min(1, Math.sqrt(sum / data.length) * gain);
+  }
+
+  // extra getUserMedia stream purely for visualization -- SpeechRecognition doesn't
+  // expose audio levels, so this is a second, independent capture just to drive the glow.
+  async function startMicLevelMeter() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      micAudioCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const tick = () => { setLevel(rms(analyser, data, 4)); levelRafRef.current = requestAnimationFrame(tick); };
+      tick();
+    } catch (e) {}
+  }
+
+  // real Web Audio analysis of an ElevenLabs <audio> element while it plays -- routed
+  // straight back to ctx.destination so this doesn't change what's actually heard.
+  function startElementLevelMeter(audioEl) {
+    try {
+      if (!ttsAudioCtxRef.current) ttsAudioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = ttsAudioCtxRef.current;
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const source = ctx.createMediaElementSource(audioEl);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      analyser.connect(ctx.destination);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const tick = () => {
+        if (audioEl.paused || audioEl.ended) return;
+        setLevel(rms(analyser, data, 5));
+        levelRafRef.current = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (e) {}
+  }
+
+  // device speechSynthesis exposes no waveform at all -- approximate with a decaying
+  // spike on each word boundary so the Reactor still has something honest to react to,
+  // clearly weaker/less precise than the real analyser-driven paths above.
+  function startDeviceLevelDecay() {
+    const tick = () => { setLevel(Math.max(0, audioLevelRef.current * 0.85)); levelRafRef.current = requestAnimationFrame(tick); };
+    tick();
+  }
+
   function speakDevice(text) {
     if (!window.speechSynthesis) { setVoiceState("idle"); return; }
     try {
@@ -1872,9 +2006,10 @@ Rules:
       if (chosen) u.voice = chosen;
       u.rate = 1.0;
       u.pitch = 1.0;
-      u.onstart = () => setVoiceState("speaking");
-      u.onend = () => setVoiceState("idle");
-      u.onerror = () => setVoiceState("idle");
+      u.onstart = () => { setVoiceState("speaking"); stopLevelLoop(); startDeviceLevelDecay(); };
+      u.onboundary = () => { setLevel(1); };
+      u.onend = () => { setVoiceState("idle"); stopLevelMeter(); };
+      u.onerror = () => { setVoiceState("idle"); stopLevelMeter(); };
       window.speechSynthesis.speak(u);
     } catch (e) { setVoiceState("idle"); }
   }
@@ -1903,9 +2038,10 @@ Rules:
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       audioRef.current = audio;
-      audio.onended = () => { setVoiceState("idle"); URL.revokeObjectURL(url); };
-      audio.onerror = () => { setVoiceState("idle"); URL.revokeObjectURL(url); };
+      audio.onended = () => { setVoiceState("idle"); stopLevelMeter(); URL.revokeObjectURL(url); };
+      audio.onerror = () => { setVoiceState("idle"); stopLevelMeter(); URL.revokeObjectURL(url); };
       await audio.play();
+      startElementLevelMeter(audio);
     } catch (e) {
       setElStatus("ElevenLabs error: " + (e.message || "playback failed") + " — using device voice");
       speakDevice(text);
@@ -1925,6 +2061,7 @@ Rules:
     ttsPlayingRef.current = false;
     try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
     try { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } } catch (e) {}
+    stopLevelMeter();
   }
 
   function stopSpeaking() {
@@ -1985,8 +2122,10 @@ Rules:
         if (chosen) u.voice = chosen;
         u.rate = 1.0;
         u.pitch = 1.0;
-        u.onend = advance;
-        u.onerror = advance;
+        u.onstart = () => { stopLevelLoop(); startDeviceLevelDecay(); };
+        u.onboundary = () => { setLevel(1); };
+        u.onend = () => { stopLevelMeter(); advance(); };
+        u.onerror = () => { stopLevelMeter(); advance(); };
         window.speechSynthesis.speak(u);
       } catch (e) { advance(); }
     } else {
@@ -1994,9 +2133,9 @@ Rules:
         if (ttsInterruptedRef.current) { URL.revokeObjectURL(url); advance(); return; }
         const audio = new Audio(url);
         audioRef.current = audio;
-        audio.onended = () => { URL.revokeObjectURL(url); advance(); };
-        audio.onerror = () => { URL.revokeObjectURL(url); advance(); };
-        audio.play().catch(() => advance());
+        audio.onended = () => { stopLevelMeter(); URL.revokeObjectURL(url); advance(); };
+        audio.onerror = () => { stopLevelMeter(); URL.revokeObjectURL(url); advance(); };
+        audio.play().then(() => startElementLevelMeter(audio)).catch(() => advance());
       }).catch((e) => {
         if (e.name !== "AbortError" && !ttsInterruptedRef.current) {
           setElStatus("ElevenLabs error: " + (e.message || "playback failed") + " — using device voice");
@@ -2050,12 +2189,14 @@ Rules:
       };
       rec.onend = () => {
         setInterim("");
+        stopLevelMeter();
         if (finalText.trim()) sendToPolaris(finalText.trim());
         else setVoiceState("idle");
       };
-      rec.onerror = () => { setInterim(""); setVoiceState("idle"); flash("Mic error — check microphone permission"); };
+      rec.onerror = () => { setInterim(""); setVoiceState("idle"); stopLevelMeter(); flash("Mic error — check microphone permission"); };
       rec.start();
       setVoiceState("listening");
+      startMicLevelMeter();
     } catch (e) { flash("Couldn't start the mic"); setVoiceState("idle"); }
   }
 
@@ -2548,6 +2689,7 @@ Hard rules:
     setVoiceState("thinking");
     const msgId = Date.now();
     setChat([...history, { role: "assistant", content: "", id: msgId }]);
+    setStreamingMsgId(msgId);
     resetTtsPipeline();
     const controller = new AbortController();
     streamAbortRef.current = controller;
@@ -2583,11 +2725,13 @@ Hard rules:
         setMsgContent(reply);
       }
       if (streamAbortRef.current === controller) streamAbortRef.current = null;
+      setStreamingMsgId(null);
       finishStreamSpeech();
       if (!voiceOutRef.current) setVoiceState("idle");
       updateMemory("chat", text, reply);
     } catch (e) {
       if (streamAbortRef.current === controller) streamAbortRef.current = null;
+      setStreamingMsgId(null);
       if (e.name === "AbortError") { finishStreamSpeech(); return; }
       const err = "Mainframe error: " + (e.message || "connection failed") + ". Check the API key in SETUP.";
       setMsgContent(err);
@@ -2701,8 +2845,11 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
       <Backdrop dayPct={dayPct} />
       {/* status bar */}
       <div style={{ borderBottom: `1px solid ${breaches.length ? C.red : C.border}`, background: breaches.length ? "rgba(40,8,12,0.85)" : "rgba(5,14,26,0.85)", padding: "10px 16px", display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", position: "sticky", top: 0, zIndex: 5, backdropFilter: "blur(8px)" }}>
-        <span style={{ fontFamily: disp, fontWeight: 700, fontSize: 19, letterSpacing: "0.22em", color: breaches.length ? C.red : C.cyan, textShadow: breaches.length ? `0 0 14px rgba(255,85,102,0.6)` : `0 0 14px rgba(0,212,255,0.6)` }}>
-          POLARIS
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Reactor state={voiceState} onClick={toggleListening} awake={wakeFlash} seqPhase={scanning && seqView ? seqView.phase : null} flash={reactorFlash} level={audioLevel} proactive={proactiveTell} size={26} />
+          <span style={{ fontFamily: disp, fontWeight: 700, fontSize: 19, letterSpacing: "0.22em", color: breaches.length ? C.red : C.cyan, textShadow: breaches.length ? `0 0 14px rgba(255,85,102,0.6)` : `0 0 14px rgba(0,212,255,0.6)` }}>
+            POLARIS
+          </span>
         </span>
         {earsOn && (
           <span title="Hands-free ears on" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: C.gold, boxShadow: `0 0 6px ${C.gold}`, animation: "pulse 1.6s ease-in-out infinite" }} />
@@ -2783,7 +2930,7 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
         {tab === "POLARIS" && (
           <React.Fragment>
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "14px 0 4px" }}>
-              <Reactor state={voiceState} onClick={toggleListening} awake={wakeFlash} seqPhase={scanning && seqView ? seqView.phase : null} flash={reactorFlash} />
+              <Reactor state={voiceState} onClick={toggleListening} awake={wakeFlash} seqPhase={scanning && seqView ? seqView.phase : null} flash={reactorFlash} level={audioLevel} proactive={proactiveTell} />
               <div style={{ marginTop: 10, fontSize: 11, letterSpacing: "0.18em", color: voiceState === "listening" ? C.gold : C.cyan, textTransform: "uppercase" }}>
                 {statusLine}
               </div>
@@ -2839,21 +2986,32 @@ After your spoken debrief, on a new line, write exactly "TAKEAWAY: " followed by
                   {anthropicKey ? "Ask about your stats, review a trade, or talk through the plan for the session." : "Add your Anthropic API key in the SETUP tab so I can think."}
                 </div>
               )}
-              {chat.map((m, i) => (
-                <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "88%" }}>
-                  <div style={{ fontSize: 9, letterSpacing: "0.14em", color: m.role === "user" ? C.gold : C.cyan, marginBottom: 3, textAlign: m.role === "user" ? "right" : "left" }}>
-                    {m.role === "user" ? "LANDEN" : "POLARIS"}
+              {chat.map((m, i) => {
+                const isPolaris = m.role !== "user";
+                const streaming = isPolaris && m.id != null && m.id === streamingMsgId;
+                return (
+                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "88%", animation: "panelIn 0.25s ease-out" }}>
+                    <div style={{ fontSize: 9, letterSpacing: "0.14em", color: m.role === "user" ? C.gold : C.cyan, marginBottom: 3, display: "flex", alignItems: "center", gap: 5, justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
+                      {isPolaris && (
+                        <svg width="9" height="9" viewBox="0 0 200 200" style={{ flexShrink: 0 }} aria-hidden="true">
+                          <path d="M100 58 L105 95 L142 100 L105 105 L100 142 L95 105 L58 100 L95 95 Z" fill={C.cyan} />
+                        </svg>
+                      )}
+                      {m.role === "user" ? "LANDEN" : "POLARIS"}
+                    </div>
+                    <div style={{
+                      fontSize: 13, lineHeight: 1.6, padding: "10px 12px", borderRadius: 8,
+                      background: m.role === "user" ? "rgba(245,200,107,0.08)" : "rgba(0,212,255,0.07)",
+                      border: `1px solid ${m.role === "user" ? "rgba(245,200,107,0.25)" : C.border}`,
+                      borderLeft: isPolaris ? `2px solid ${C.cyan}` : undefined,
+                      whiteSpace: "pre-wrap",
+                    }}>
+                      {m.content}
+                      {streaming && <span style={{ color: C.cyan, animation: "blink 0.9s step-end infinite" }}>▌</span>}
+                    </div>
                   </div>
-                  <div style={{
-                    fontSize: 13, lineHeight: 1.6, padding: "10px 12px", borderRadius: 8,
-                    background: m.role === "user" ? "rgba(245,200,107,0.08)" : "rgba(0,212,255,0.07)",
-                    border: `1px solid ${m.role === "user" ? "rgba(245,200,107,0.25)" : C.border}`,
-                    whiteSpace: "pre-wrap",
-                  }}>
-                    {m.content}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
               {voiceState === "thinking" && (
                 <div style={{ alignSelf: "flex-start", fontSize: 12, color: C.cyan, animation: "pulse 1s ease-in-out infinite" }}>
                   ◈ processing…
