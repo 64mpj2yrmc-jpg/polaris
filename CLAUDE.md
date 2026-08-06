@@ -444,6 +444,34 @@ app can't receive them — hence the exception to "no server logic" above). It d
   `structureBias` *is* the direction reading at that point — showing it twice would just be the
   same value under two labels) and gained an "M1" row alongside the existing "SMT" row.
 
+  **V2 Phase 5** is a bug-fix/audit pass, prompted by a user-reported mismatch between a live alert
+  and the chart's redrawn trade plan (traced to Pine's own behavior — pasting an updated script
+  recalculates ALL chart history under the new rules, so an already-fired alert from an older script
+  version won't necessarily match what the chart redraws for that same historical stretch; not a
+  bug, just something to expect after every paste) plus a direct ask to audit for anything else
+  wrong. Three real fixes landed:
+  1. Stale settings-panel labels: `allowReversal`/`allowContinuation`/`allowBreakout` said "(not yet
+     implemented)" — leftover text from V2 Phase 1, when they genuinely were stubs. They've been
+     real, working detectors since Phase 3; relabeled to explain why they still default off (this
+     author's own ICT interpretation, not ported from the JS model like sweep — not because they
+     don't work).
+  2. `minRiskReward` (new, `grpTrade`, default 1.5, 0 disables): `riskReward` was already computed
+     and reported in the webhook payload, but nothing actually gated on it — a setup could clear
+     both `minTargetAtrMult`/`minTargetPts` on the reward side while still carrying a
+     disproportionately wide stop. Checked via `riskPts`/`rewardPts`/`rrOk` locals at all 4
+     completion sites, ANDed with the existing size checks.
+  3. Liquidity-pool significance: `Swing` gained a `touches` field (how many swings have clustered
+     at that price zone, starting at 1) instead of just a bare `isPool` boolean — prompted by the
+     target on a real alert not looking like an important level. Sweep-eligibility
+     (`detectSweep`/`detectReversal`, still reading `s.isPool`) is unchanged, still fires on the
+     first match. But `findLiquidityTarget()` (the real `TARGET`) now requires `s.touches >=
+     minPoolTouches` (new, `grpEQ`, default 2 — reproduces prior behavior; raise for more
+     established levels only). The TP1/TP2 ladder also stopped being arbitrary 50%/75% splits of
+     the distance to target — new `findLiquidityLevels()` draws the nearest one or two REAL
+     liquidity pools (same `minPoolTouches` filter) actually sitting between entry and target,
+     drawing fewer than two lines rather than fabricating a percentage-based one if that's all that
+     exists in range.
+
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
 with `onSnapshot` (`tvAlerts`/`tvAlertsStatus` state, `firestoreDbRef`), rendering each alert as a
