@@ -265,20 +265,24 @@ useVolumeConfirm = input.bool(true, "Factor volume strength into confidence scor
 volAvgLen = input.int(20, "Volume average length", minval=5, group=grpVolume)
 
 // ---------- V2 groundwork + Phase 2 gates ----------
-// Sweep is the only setup type actually implemented -- reversal/
-// continuation/breakout are stubbed (see the detect*() functions below)
-// and default OFF since firing on them would do nothing anyway. Everything
-// under grpGates/grpMemory/grpSL is now live, checked by shouldFireSetup()
+// All four setup types are real, working implementations now (see the
+// detect*() functions below, filled in during V2 Phase 3) -- reversal/
+// continuation/breakout default OFF not because they're unimplemented, but
+// because they're this author's own interpretation of those ICT concepts
+// rather than something ported from the original JS model the way sweep is
+// (see the header note above), so turning each on is meant to be a
+// deliberate, individually-scrutinized choice. Everything under
+// grpGates/grpMemory/grpSL is now live, checked by shouldFireSetup()
 // (and, for minSeqFvgSizeAtr and the wick-tolerant stop buffer, at the 4
 // completion sites directly) -- all default to values that roughly
 // reproduce Phase 1's behavior (raiseAdxThreshold/useVolFloor default off,
 // minBarRangeAtr/minSeqFvgSizeAtr default low/zero), so this pass doesn't
 // suddenly starve you of signals, but every gate is now real, not cosmetic.
 grpSetups = "Setup Types"
-allowSweep        = input.bool(true, "Allow sweep-based setups (implemented)", group=grpSetups)
-allowReversal     = input.bool(false, "Allow reversal-based setups (not yet implemented)", group=grpSetups)
-allowContinuation = input.bool(false, "Allow continuation-based setups (not yet implemented)", group=grpSetups)
-allowBreakout     = input.bool(false, "Allow breakout-based setups (not yet implemented)", group=grpSetups)
+allowSweep        = input.bool(true, "Allow sweep-based setups", group=grpSetups)
+allowReversal     = input.bool(false, "Allow reversal-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
+allowContinuation = input.bool(false, "Allow continuation-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
+allowBreakout     = input.bool(false, "Allow breakout-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
 
 grpGates = "Signal Quality Gates"
 useVolFloor       = input.bool(false, "Require a minimum volume ratio to fire", group=grpGates)
