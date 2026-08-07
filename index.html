@@ -75,7 +75,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.06-6";
+const BUILD = "2026.08.06-7";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -2405,7 +2405,24 @@ Rules:
         if (finalText.trim()) sendToPolaris(finalText.trim());
         else setVoiceState("idle");
       };
-      rec.onerror = () => { setInterim(""); setVoiceState("idle"); stopLevelMeter(); flash("Mic error — check microphone permission"); };
+      rec.onerror = (e) => {
+        setInterim("");
+        setVoiceState("idle");
+        stopLevelMeter();
+        // was a single blanket "check microphone permission" message regardless of
+        // cause -- the wake-word loop's onerror (below) already discriminates error
+        // types properly, this one didn't, so a no-speech timeout or a transient
+        // network hiccup read exactly the same as an actual denied-permission case.
+        if (e.error === "aborted") return; // user-initiated stop, nothing to report
+        const messages = {
+          "not-allowed": "Mic error — check microphone permission",
+          "service-not-allowed": "Mic error — check microphone permission",
+          "no-speech": "Didn't catch that — try again",
+          "audio-capture": "No microphone found — check your device",
+          "network": "Voice network error — check your connection and try again",
+        };
+        flash(messages[e.error] || "Mic error — try again");
+      };
       rec.start();
       setVoiceState("listening");
       startMicLevelMeter();

@@ -92,7 +92,12 @@ best-effort convenience, not a requirement for the app to function.
    (`wakeBackoffRef`, 300ms→2s) for iOS's frequent session drops; on repeated/`not-allowed` errors it
    disables ears mode and shows a one-time notice. Manual tap-to-talk logic was extracted from
    `toggleListening` into `startListening()` so the wake word's "heard just the wake word, now
-   capture the follow-up" path can reuse it verbatim.
+   capture the follow-up" path can reuse it verbatim. `startListening()`'s own `rec.onerror` used to
+   flash the same "check microphone permission" message for every recognition error regardless of
+   `e.error` — misleading when the real cause was a `no-speech` timeout, a `network` hiccup, or no
+   mic detected (`audio-capture`) rather than an actually denied permission. Now discriminates error
+   codes the same way `startWakeLoop`'s own `onerror` already did, and stays silent on `aborted`
+   (a user-initiated stop, not a real error).
 2. **Streaming voice replies** — `streamAnthropicChat` adds `stream: true` and parses the SSE
    `content_block_delta` events off the fetch body reader (with `AbortController` support).
    `sendToPolaris` renders the reply into the transcript progressively (matched by a stable message
