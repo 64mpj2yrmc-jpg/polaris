@@ -93,9 +93,10 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 //      tracked swing on that side) are real now, tried in that order after
 //      detectSweep() on every bar with no active sequence. Each is
 //      independently gated by allowSweep/allowReversal/allowContinuation/
-//      allowBreakout (all five setup types, including allowHtfFvgReject,
-//      now default ON per direct request -- see the V2 Phase 7 note near
-//      the end of this block for why). Whichever detector actually triggers
+//      allowBreakout (plus allowHtfFvgReject for the fifth trigger below --
+//      all five ran together for a stretch per V2 Phase 7, now back to only
+//      allowSweep on by default as of V2 Phase 9, see the note near the end
+//      of this block for why). Whichever detector actually triggers
 //      is reported as the webhook's setupType via setupTypeForTrigger()
 //      (sweep -> LIQUIDITY_SWEEP_*, reversal -> CHoCH_*, continuation and
 //      breakout -> BOS_*, reusing functions/index.js's existing allow-list).
@@ -172,10 +173,13 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // the original JS model this whole indicator was ported from -- they're
 // this author's own reasonable-but-invented interpretation of those ICT
 // concepts, not something battle-tested against the original model.
-// allowReversal/allowContinuation/allowBreakout/allowHtfFvgReject now
-// default ON (all five setup types on, per direct request -- see V2 Phase
-// 7 below), not because they've since been proven -- watch the scorecard's
-// SCORE/EXP rows to judge each honestly now that they're live together.
+// allowReversal/allowContinuation/allowBreakout/allowHtfFvgReject all ran
+// together for a stretch (V2 Phase 7, all five on at once) specifically to
+// judge each honestly via the scorecard's SCORE/EXP rows rather than
+// leaving them permanently untested -- as of V2 Phase 9 (see near the end
+// of this block) they're back to off by default, having plausibly diluted
+// the aggregate win rate with unproven signal types blended into sweep,
+// the one trigger this indicator was actually built and proven around.
 //
 // Multi-timeframe framework (grpHTF/grpDirection/grpM1): a top-down, four-layer
 // read instead of everything happening on one timeframe.
@@ -294,6 +298,31 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // triggerType, and index.html falls back to inferring what it can from
 // setupType for that older data). See index.html's "Indicator performance
 // tracking" section for how the dashboard actually uses this.
+//
+// V2 Phase 9 -- a deliberate tightening pass, prompted directly by a live MNQ read
+// (25/64, +0.18R) landing after V2 Phase 7 turned every trigger type on at once, and
+// a direct request to prioritize a genuinely higher win rate over raw signal coverage.
+// allowReversal/allowContinuation/allowBreakout/allowHtfFvgReject all flip back to
+// FALSE -- allowSweep is the only trigger left on. Sweep is the one entry trigger
+// ported directly from the original JS model this whole indicator is based on; the
+// other four are this author's own invented extensions, added specifically to fix a
+// coverage-gap problem, not because they'd been shown to carry their own edge. Running
+// all five at once (Phase 7) very plausibly diluted the aggregate win rate with
+// unproven signal types blended into the one proven one -- this reverts to the
+// highest-conviction core, deliberately trading signal frequency for quality, and
+// leaves it to the INDICATOR PERFORMANCE panel on the dashboard (see index.html) to
+// verify with real data whether any of the other four are worth re-enabling later,
+// rather than everything running at once by default again. Three more inputs raise
+// the bar the surviving sweep trigger has to clear: minRiskReward from 1.5 to 2.0 (a
+// setup needs a materially better reward-to-risk to alert at all), minPoolTouches
+// from 2 to 3 (a target has to be a level multiple prior swings have actually
+// clustered at, not just the first bare match), and useSessionFilter flips to true
+// (new setups only start during the four killzones, cutting out low-conviction
+// dead-session chop) alongside raiseAdxThreshold flipping to true (requires
+// raisedAdxThreshold, not just the base Market Regime ADX floor, before a new setup
+// can start). All four of these were already-declared, already-wired inputs from
+// earlier phases -- nothing structurally new here, just turning the existing quality
+// dials up together instead of leaving them at their looser defaults.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -329,7 +358,7 @@ minTargetPts      = input.float(20.0, "Absolute minimum projected move to alert 
 // This is a genuine, unconditional minimum on reward/risk itself, checked
 // alongside them at all 4 completion sites (0 disables, same pattern as the
 // other "0 disables" gates in this file).
-minRiskReward     = input.float(1.5, "Min risk:reward to alert (reward/risk, 0 disables)", minval=0, step=0.1, group=grpTrade)
+minRiskReward     = input.float(2.0, "Min risk:reward to alert (reward/risk, 0 disables)", minval=0, step=0.1, group=grpTrade)
 
 grpHook = "Webhook"
 webhookSecret = input.string("", "Webhook secret (must match WEBHOOK_SECRET)", group=grpHook)
@@ -354,7 +383,7 @@ eqTolPct = input.float(0.01, "Equal tolerance (% of price)", minval=0.01, step=0
 // it still fires on the first match, same as always. This only raises the bar for what
 // counts as a real TARGET/TP: a level barely qualifying on one match isn't necessarily
 // meaningful liquidity, vs. one multiple prior swings have actually clustered at.
-minPoolTouches = input.int(2, "Min touches for a level to count as a real target/TP (2 = first equal-high/low match, same as before; raise for more established levels only)", minval=2, maxval=6, group=grpEQ)
+minPoolTouches = input.int(3, "Min touches for a level to count as a real target/TP (2 = first equal-high/low match; higher = more established levels only)", minval=2, maxval=6, group=grpEQ)
 
 grpPD = "Premium / Discount"
 showPD = input.bool(false, "Shade premium/discount zone", group=grpPD)
@@ -373,7 +402,7 @@ showFib = input.bool(true, "Show Fibonacci retracement ladder + equilibrium + OT
 
 grpKZ = "Killzones (New York time)"
 showKillzones       = input.bool(false, "Shade killzone sessions", group=grpKZ)
-useSessionFilter    = input.bool(false, "Only allow new setups during a killzone session", group=grpKZ)
+useSessionFilter    = input.bool(true, "Only allow new setups during a killzone session", group=grpKZ)
 showSessionVolatility = input.bool(true, "Track average range per session on the HUD", group=grpKZ)
 asiaSession   = input.session("2000-0000", "Asia killzone", group=grpKZ)
 londonSession = input.session("0200-0500", "London killzone", group=grpKZ)
@@ -430,14 +459,14 @@ volAvgLen = input.int(20, "Volume average length", minval=5, group=grpVolume)
 // suddenly starve you of signals, but every gate is now real, not cosmetic.
 grpSetups = "Setup Types"
 allowSweep        = input.bool(true, "Allow sweep-based setups", group=grpSetups)
-allowReversal     = input.bool(true, "Allow reversal-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
-allowContinuation = input.bool(true, "Allow continuation-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
-allowBreakout     = input.bool(true, "Allow breakout-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
+allowReversal     = input.bool(false, "Allow reversal-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
+allowContinuation = input.bool(false, "Allow continuation-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
+allowBreakout     = input.bool(false, "Allow breakout-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
 
 grpGates = "Signal Quality Gates"
 useVolFloor       = input.bool(false, "Require a minimum volume ratio to fire", group=grpGates)
 volFloorMult      = input.float(0.8, "Min volume ratio if the floor above is enabled", minval=0, step=0.1, group=grpGates)
-raiseAdxThreshold = input.bool(false, "Require a stricter ADX minimum than the Market Regime setting", group=grpGates)
+raiseAdxThreshold = input.bool(true, "Require a stricter ADX minimum than the Market Regime setting", group=grpGates)
 raisedAdxThreshold = input.float(30, "Stricter ADX minimum, used only if the toggle above is on", minval=5, maxval=60, group=grpGates)
 minBarRangeAtr    = input.float(0.15, "Min bar range to trust as signal context, x ATR (0 disables)", minval=0, step=0.05, group=grpGates)
 minSeqFvgSizeAtr  = input.float(0.0, "Min size of a sequence's own confirming FVG, x ATR (0 disables)", minval=0, step=0.05, group=grpGates)
@@ -461,7 +490,7 @@ useSmtConfluence = input.bool(true, "Factor SMT divergence into confidence score
 smtSymbol        = input.symbol("CME_MINI:ES1!", "Correlated symbol to compare swing points against", group=grpSMT)
 
 grpHtfFvg = "Higher-Timeframe FVG Reject"
-allowHtfFvgReject = input.bool(true, "Allow higher-timeframe FVG reject setups (author's own extension -- see header note)", group=grpHtfFvg)
+allowHtfFvgReject = input.bool(false, "Allow higher-timeframe FVG reject setups (author's own extension -- see header note)", group=grpHtfFvg)
 htfFvgTimeframe   = input.timeframe("60", "Timeframe to detect fair value gaps on (e.g. 60 = 1H, 240 = 4H)", group=grpHtfFvg)
 minHtfFvgSizeAtr  = input.float(1.0, "Min HTF FVG size to track, x chart ATR(14) (0 disables the floor)", minval=0, step=0.1, group=grpHtfFvg)
 showHtfFvg        = input.bool(true, "Draw the currently tracked HTF FVG zone on the chart", group=grpHtfFvg)

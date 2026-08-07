@@ -654,6 +654,29 @@ app can't receive them — hence the exception to "no server logic" above). It d
   the new field as optional so alerts fired before this change still validate fine with it absent.
   See `index.html`'s "Indicator performance tracking" entry below for how the dashboard uses it.
 
+  **V2 Phase 9** — a deliberate tightening pass, prompted directly by a live MNQ read (25/64,
+  +0.18R) landing right after V2 Phase 7 turned every trigger type on at once, and a direct
+  request to prioritize a genuinely higher win rate over raw signal coverage.
+  `allowReversal`/`allowContinuation`/`allowBreakout`/`allowHtfFvgReject` all flip back to
+  `false` — `allowSweep` is the only trigger left on by default. Sweep is the one entry trigger
+  ported directly from the original JS model this whole indicator is based on; the other four are
+  this author's own invented extensions, added specifically to fix a coverage-gap problem, not
+  because they'd been shown to carry their own edge. Running all five at once (Phase 7) very
+  plausibly diluted the aggregate win rate with unproven signal types blended into the one proven
+  one — this reverts to the highest-conviction core, deliberately trading signal frequency for
+  quality, and leaves it to the INDICATOR PERFORMANCE panel on the dashboard to verify with real
+  data whether any of the other four are worth re-enabling later, rather than everything running
+  at once by default again. Three more inputs raise the bar the surviving sweep trigger has to
+  clear: `minRiskReward` from 1.5 to 2.0 (a setup needs a materially better reward-to-risk to
+  alert at all), `minPoolTouches` from 2 to 3 (a target has to be a level multiple prior swings
+  have actually clustered at, not just the first bare match), and `useSessionFilter` flips to
+  `true` (new setups only start during the four killzones, cutting out low-conviction
+  dead-session chop) alongside `raiseAdxThreshold` flipping to `true` (requires
+  `raisedAdxThreshold`, not just the base Market Regime ADX floor, before a new setup can start).
+  All four of these were already-declared, already-wired inputs from earlier phases — nothing
+  structurally new here, just turning the existing quality dials up together instead of leaving
+  them at their looser defaults.
+
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
 with `onSnapshot` (`tvAlerts`/`tvAlertsStatus` state, `firestoreDbRef`), rendering each alert as a
