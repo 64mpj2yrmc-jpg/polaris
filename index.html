@@ -75,7 +75,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.06-5";
+const BUILD = "2026.08.06-6";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -1420,8 +1420,16 @@ Judge this ONE setup on its own merits — structure quality, risk/reward, wheth
   // already leans on) -- an approximation, not a guarantee, but it's what
   // lets Polaris eventually see whether its own past verdicts predicted
   // anything, instead of judging every alert in a vacuum forever.
+  // Requires activeSource === "NQ": alert stop/target prices are always
+  // NQ/MNQ-point-scale (whatever the Pine chart itself trades in, tens of
+  // thousands), but the QQQ proxy feed's candles are share-price-scale
+  // (hundreds) -- comparing across that gap can never produce a real match,
+  // so this silently never resolved anything while on QQQ rather than
+  // failing loudly. Skipping outright while on QQQ avoids wasting a pass
+  // over every pending alert every tick for a comparison that can't work.
   function resolveAlertOutcomes() {
     if (!firestoreDbRef.current) return;
+    if (activeSourceRef.current !== "NQ") return;
     const cs = candlesRef.current;
     if (!cs || !cs.length) return;
     tvAlertsRef.current.forEach((a) => {

@@ -701,11 +701,15 @@ which resolves each alert's real `outcome` (`"win"`/`"loss"`) against the live m
 candles (`candlesRef`), using the identical conservative tie-break the Pine indicator's own
 scorecard uses (both stop and target touched on the same bar counts as a loss, since intrabar
 order isn't knowable) — first candle after the alert's timestamp that touches either level
-resolves it. This only advances while the MARKET tab's feed is running, and only as accurately as
-that feed's instrument/timeframe approximates the alert's own (the same QQQ/NQ-proxy relationship
-the rest of the app already leans on) — an approximation, not a guarantee, deliberately kept
-separate from the trade journal (no `trades[]` tagging involved at all) so it works purely off
-alert data regardless of whether the trader ever took the trade. Written back via a third
+resolves it. This only advances while the MARKET tab's feed is running, and — since alert stop/
+target prices are always NQ/MNQ-point-scale (tens of thousands) while the QQQ proxy feed's candles
+are share-price-scale (hundreds), a comparison across that gap can never produce a real match —
+only while `activeSource === "NQ"` (the Yahoo `NQ=F` relay, real futures-scale pricing); on the
+QQQ proxy `resolveAlertOutcomes()` returns immediately rather than silently looping over every
+pending alert for a comparison that can't work. Even on `"NQ"` this is only as accurate as that
+feed's instrument/timeframe approximates the alert's own — an approximation, not a guarantee,
+deliberately kept separate from the trade journal (no `trades[]` tagging involved at all) so it
+works purely off alert data regardless of whether the trader ever took the trade. Written back via a third
 client-side `update()` clause in `firestore.rules`, write-once the same way the AI-review clause
 is (`resource.data.get('outcome', null) == null`). `outcomeAttemptedRef` dedupes in-flight writes
 per alert id the same way `aiReviewAttemptedRef` does for reviews. Once alerts carry both
