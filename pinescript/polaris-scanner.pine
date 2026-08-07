@@ -1,5 +1,5 @@
 //@version=6
-indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_lines_count=200, max_boxes_count=150, max_labels_count=250)
+indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_lines_count=200, max_boxes_count=150, max_labels_count=300)
 
 // ============================================================================
 // Polaris Scanner (Pine port) + ICT confluence markup
@@ -349,16 +349,55 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // SCORE/EXP -- confirming maxBarsValid was never the actual bottleneck, no
 // sequence that ever mattered was timing out at 40 bars. Left at 60 (harmless,
 // just inert) and moving on.
-// Step 3 (this change): useSessionFilter back to FALSE -- unlike the last two,
-// this gate blocks new sequences from even STARTING outside the four killzones
-// (Asia/London/NY AM/NY PM), which is a structural kind of loosening again (opens
-// up when a sequence can begin, not what quality bar it has to clear once it does).
-// If genuine sweeps are forming in the gaps between killzones and simply never
-// getting a chance to fire, this should recover real frequency; if it mostly adds
-// low-quality dead-session noise, SCORE/EXP will show that honestly.
-// Step 4 (not yet done, only if step 3 isn't enough): lower minRiskReward back
-// toward 1.5 last -- the one remaining lever with a real, direct cost, since some
-// newly included winners will be smaller.
+// Step 3 (done, mixed/negative result): useSessionFilter tried at FALSE --
+// unlike the last two, this gate blocks new sequences from even STARTING outside
+// the four killzones, a structural loosening of when a sequence can begin rather
+// than what quality bar it clears once it does. Real-data result: only 1 net new
+// trade (9->10) -- essentially no frequency gain -- and win rate still dropped
+// (8 wins->7 wins, 89%->70%, +1.86R->+1.1R). Counterintuitively the win COUNT
+// went down even though relaxing a filter should only ever add trades: because
+// only one sequence is ever tracked as active at a time, letting an earlier
+// out-of-killzone attempt claim that slot can preempt what would have been a
+// different, killzone-only sequence using different candles for its entry -- so
+// this filter isn't purely additive the way the ADX floor was. Reverted back to
+// TRUE.
+// Step 4 (not yet done, only if a future step isn't enough on its own): lower
+// minRiskReward back toward 1.5 -- the one remaining lever with a real, direct
+// cost, since some newly included winners will be smaller.
+//
+// Given steps 1-3 all either hurt quality or did nothing, the next real lever
+// under consideration is reintroducing ONE additional trigger type at a time
+// (starting with reversal, the closest in character to sweep) and judging it by
+// its OWN isolated row in index.html's INDICATOR PERFORMANCE panel -- not the
+// blended aggregate SCORE, which is exactly what let V2 Phase 7's all-five-at-once
+// approach hide a bad trigger's losses inside a good one's wins. Not yet done as
+// of this commit.
+//
+// V2 Phase 11 -- prompted directly by a repeated question that had no real answer:
+// "how far back / how clustered in time were these trades." The trade-plan markup
+// (tpEntryLine/tpStopLine/etc.) only ever tracked the single MOST RECENT setup and
+// cleared itself once resolved -- there was never a persistent record to check
+// against, only inference from where the chart happened to stop loading history.
+// This phase adds a genuine running log instead: resolvedTime/resolvedDir/
+// resolvedOutcome/resolvedR/resolvedTriggerType (parallel arrays, newest unshifted
+// to the front, capped at 200 entries so memory doesn't grow unbounded over years
+// of replay) populated at the exact same point pendingDir/etc. already resolve
+// against price in the scorecard block above -- no new detection logic, just
+// recording what that block already computes. pendingTriggerType is a new array
+// parallel to pendingDir/pendingEntry/pendingStop/pendingTarget, threading
+// seqTriggerType through from fire time to resolution time so the log (and any
+// future per-trigger analysis) can see which detector produced each trade.
+// Two visible surfaces, both new grpLog inputs: showResolutionMarkers (default on)
+// draws a small "W"/"L" label at the exact bar each trade resolved on, capped at
+// the 50 most recent (its own array, deleting the oldest as new ones arrive) so
+// scrolling the chart shows the real temporal distribution of activity at a
+// glance; showTradeLog (default on) drives a second table, bottom-right, separate
+// from the existing top-right HUD, listing the logTableRows (default 10, max 20)
+// most recent resolved trades with date/direction/result/R -- the table is
+// declared with a fixed 21 rows (20 max possible + header) regardless of the
+// current logTableRows value, so a table.cell call can never index past what the
+// table itself was declared with. max_labels_count raised 250->300 for headroom
+// alongside the existing EQH/EQL/order-block/trade-plan label usage.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -438,7 +477,7 @@ showFib = input.bool(true, "Show Fibonacci retracement ladder + equilibrium + OT
 
 grpKZ = "Killzones (New York time)"
 showKillzones       = input.bool(false, "Shade killzone sessions", group=grpKZ)
-useSessionFilter    = input.bool(false, "Only allow new setups during a killzone session", group=grpKZ)
+useSessionFilter    = input.bool(true, "Only allow new setups during a killzone session", group=grpKZ)
 showSessionVolatility = input.bool(true, "Track average range per session on the HUD", group=grpKZ)
 asiaSession   = input.session("2000-0000", "Asia killzone", group=grpKZ)
 londonSession = input.session("0200-0500", "London killzone", group=grpKZ)
@@ -530,6 +569,17 @@ allowHtfFvgReject = input.bool(false, "Allow higher-timeframe FVG reject setups 
 htfFvgTimeframe   = input.timeframe("60", "Timeframe to detect fair value gaps on (e.g. 60 = 1H, 240 = 4H)", group=grpHtfFvg)
 minHtfFvgSizeAtr  = input.float(1.0, "Min HTF FVG size to track, x chart ATR(14) (0 disables the floor)", minval=0, step=0.1, group=grpHtfFvg)
 showHtfFvg        = input.bool(true, "Draw the currently tracked HTF FVG zone on the chart", group=grpHtfFvg)
+
+// Persistent log of every resolved trade (date, direction, outcome, realized R,
+// trigger type) -- unlike the trade-plan markup above (which only ever tracks the
+// single most recent setup and clears itself once resolved), this is a real running
+// history, so "how far back did these trades actually happen, and how clustered in
+// time" has a real answer instead of having to be inferred from where the chart
+// stops loading data.
+grpLog = "Trade Log"
+showTradeLog          = input.bool(true, "Show a table of the most recent resolved trades (date, direction, outcome, R)", group=grpLog)
+logTableRows          = input.int(10, "Trades shown in the log table", minval=1, maxval=20, group=grpLog)
+showResolutionMarkers = input.bool(true, "Mark each resolution on the chart (small W/L label at the bar it resolved on)", group=grpLog)
 
 // ---------- types ----------
 type Swing
@@ -653,13 +703,29 @@ var box   oteBox     = na
 // reward:risk was, not a fixed amount. A 35% win rate at 3R average beats
 // a 65% win rate at 1.2R average. sumR / (wins+losses) is real expectancy
 // in R-multiples -- the number that actually says whether this is working.
-var array<string> pendingDir    = array.new<string>()
-var array<float> pendingEntry   = array.new<float>()
-var array<float> pendingStop    = array.new<float>()
-var array<float> pendingTarget  = array.new<float>()
+var array<string> pendingDir         = array.new<string>()
+var array<float> pendingEntry        = array.new<float>()
+var array<float> pendingStop         = array.new<float>()
+var array<float> pendingTarget       = array.new<float>()
+var array<string> pendingTriggerType = array.new<string>()  // parallel to pendingDir -- which detector fired this pending trade, carried through to the resolved log below
 var int scoreWins   = 0
 var int scoreLosses = 0
 var float sumR      = 0.0
+
+// ---------- persistent state: trade log (every RESOLVED trade, not just the
+// pending ones above) ----------
+// Genuine running history, capped at 200 entries (oldest drops off) so memory
+// doesn't grow unbounded over years of replay -- unlike the single-most-recent
+// trade-plan markup above, this is what actually answers "how far back / how
+// clustered in time were these" instead of leaving it to be inferred from where
+// the chart happens to stop loading data. Newest entries are unshifted to the
+// front, so index 0 is always the most recent resolution.
+var array<int>    resolvedTime        = array.new<int>()
+var array<string> resolvedDir         = array.new<string>()
+var array<string> resolvedOutcome     = array.new<string>()  // "win" | "loss"
+var array<float>  resolvedR           = array.new<float>()
+var array<string> resolvedTriggerType = array.new<string>()
+var array<label>  resolutionMarkerLbls = array.new<label>()  // capped separately (50) -- a chart-visibility budget, not the same cap as the log itself
 
 // ---------- persistent state: per-session volatility ----------
 // running average of each killzone's realized range (high-low across the
@@ -1512,29 +1578,53 @@ if showScorecard and barstate.isconfirmed and array.size(pendingDir) > 0
         float pEntry = array.get(pendingEntry, i)
         float pStop = array.get(pendingStop, i)
         float pTarget = array.get(pendingTarget, i)
+        string pTrig = array.get(pendingTriggerType, i)
         bool hitStop = pDir == "bull" ? low <= pStop : high >= pStop
         bool hitTarget = pDir == "bull" ? high >= pTarget : low <= pTarget
         if hitStop or hitTarget
             // conservative tie-break: if a single wide bar could have
             // touched both, we can't know which came first intrabar, so
             // it counts as a loss rather than assuming the favorable order
-            if hitTarget and not hitStop
+            bool isWin = hitTarget and not hitStop
+            float thisR = -1.0
+            if isWin
                 scoreWins := scoreWins + 1
                 // a win pays out THIS trade's real reward:risk, not a fixed
                 // amount -- risk is what actually happened at entry, so this
                 // is real realized R, not the minRiskReward floor
                 float riskAtEntry = math.abs(pEntry - pStop)
-                if riskAtEntry > 0
-                    sumR := sumR + math.abs(pTarget - pEntry) / riskAtEntry
+                thisR := riskAtEntry > 0 ? math.abs(pTarget - pEntry) / riskAtEntry : 0.0
+                sumR := sumR + thisR
             else
                 scoreLosses := scoreLosses + 1
                 // a loss always costs exactly -1R by definition -- it
                 // resolved at the stop, i.e. the full risked distance
                 sumR := sumR - 1.0
+            // trade log: a real running history, distinct from the single-
+            // most-recent tp* trade-plan markup above -- this is what actually
+            // answers "when did these resolve" instead of leaving it to be
+            // inferred from where the chart stops loading history.
+            array.unshift(resolvedTime, time)
+            array.unshift(resolvedDir, pDir)
+            array.unshift(resolvedOutcome, isWin ? "win" : "loss")
+            array.unshift(resolvedR, thisR)
+            array.unshift(resolvedTriggerType, pTrig)
+            if array.size(resolvedTime) > 200
+                array.pop(resolvedTime)
+                array.pop(resolvedDir)
+                array.pop(resolvedOutcome)
+                array.pop(resolvedR)
+                array.pop(resolvedTriggerType)
+            if showResolutionMarkers
+                label markerLbl = label.new(bar_index, isWin ? pTarget : pStop, isWin ? "W" : "L", style=isWin ? label.style_label_down : label.style_label_up, color=color.new(isWin ? #2FE08A : #FF5566, 20), textcolor=#030710, size=size.tiny)
+                array.unshift(resolutionMarkerLbls, markerLbl)
+                if array.size(resolutionMarkerLbls) > 50
+                    label.delete(array.pop(resolutionMarkerLbls))
             array.remove(pendingDir, i)
             array.remove(pendingEntry, i)
             array.remove(pendingStop, i)
             array.remove(pendingTarget, i)
+            array.remove(pendingTriggerType, i)
 
 // ---------- main scan (mirrors advanceScan), only on confirmed/closed bars ----------
 if barstate.isconfirmed
@@ -1763,11 +1853,13 @@ if barstate.isconfirmed
                                     array.unshift(pendingEntry, entryP)
                                     array.unshift(pendingStop, stopP)
                                     array.unshift(pendingTarget, targetP)
+                                    array.unshift(pendingTriggerType, seqTriggerType)
                                     if array.size(pendingDir) > maxPending
                                         array.pop(pendingDir)
                                         array.pop(pendingEntry)
                                         array.pop(pendingStop)
                                         array.pop(pendingTarget)
+                                        array.pop(pendingTriggerType)
                                 if showTradePlan
                                     clearTradePlanDrawings()
                                     [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
@@ -1811,11 +1903,13 @@ if barstate.isconfirmed
                             array.unshift(pendingEntry, entryP)
                             array.unshift(pendingStop, stopP)
                             array.unshift(pendingTarget, targetP)
+                            array.unshift(pendingTriggerType, seqTriggerType)
                             if array.size(pendingDir) > maxPending
                                 array.pop(pendingDir)
                                 array.pop(pendingEntry)
                                 array.pop(pendingStop)
                                 array.pop(pendingTarget)
+                                array.pop(pendingTriggerType)
                         if showTradePlan
                             clearTradePlanDrawings()
                             [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
@@ -1889,11 +1983,13 @@ if barstate.isconfirmed
                                     array.unshift(pendingEntry, entryP)
                                     array.unshift(pendingStop, stopP)
                                     array.unshift(pendingTarget, targetP)
+                                    array.unshift(pendingTriggerType, seqTriggerType)
                                     if array.size(pendingDir) > maxPending
                                         array.pop(pendingDir)
                                         array.pop(pendingEntry)
                                         array.pop(pendingStop)
                                         array.pop(pendingTarget)
+                                        array.pop(pendingTriggerType)
                                 if showTradePlan
                                     clearTradePlanDrawings()
                                     [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
@@ -1937,11 +2033,13 @@ if barstate.isconfirmed
                             array.unshift(pendingEntry, entryP)
                             array.unshift(pendingStop, stopP)
                             array.unshift(pendingTarget, targetP)
+                            array.unshift(pendingTriggerType, seqTriggerType)
                             if array.size(pendingDir) > maxPending
                                 array.pop(pendingDir)
                                 array.pop(pendingEntry)
                                 array.pop(pendingStop)
                                 array.pop(pendingTarget)
+                                array.pop(pendingTriggerType)
                         if showTradePlan
                             clearTradePlanDrawings()
                             [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
@@ -2027,3 +2125,31 @@ if showHud and barstate.islast
         string expTxt = na(avgR) ? "--" : (avgR >= 0 ? "+" : "") + str.tostring(avgR, "#.##") + "R"
         table.cell(hud, 0, 11, "EXP", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
         table.cell(hud, 1, 11, expTxt, text_color=na(avgR) ? #6E93AD : (avgR >= 0 ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
+
+// ---------- trade log table (bottom-right, separate from the HUD) ----------
+// Real, readable history of the most recent resolved trades -- date, direction,
+// outcome, realized R -- so "how far back / how clustered were these" has a direct
+// answer on the chart instead of needing to be inferred. rows fixed at 21 (20 max
+// possible logTableRows + 1 header) regardless of the current logTableRows value,
+// so a table.cell call can never index past the table's own declared size.
+var table tradeLogTable = table.new(position=position.bottom_right, columns=4, rows=21, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
+
+if showTradeLog and barstate.islast
+    table.cell(tradeLogTable, 0, 0, "DATE", text_color=#F5C86B, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(tradeLogTable, 1, 0, "DIR", text_color=#F5C86B, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(tradeLogTable, 2, 0, "RESULT", text_color=#F5C86B, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(tradeLogTable, 3, 0, "R", text_color=#F5C86B, text_size=size.tiny, text_halign=text.align_right)
+    int rowsToShow = math.min(array.size(resolvedTime), logTableRows)
+    if rowsToShow > 0
+        for i = 0 to rowsToShow - 1
+            string rowDir = array.get(resolvedDir, i)
+            string rowOutcome = array.get(resolvedOutcome, i)
+            float rowR = array.get(resolvedR, i)
+            bool rowWin = rowOutcome == "win"
+            color rowColor = rowWin ? #2FE08A : #FF5566
+            string dateTxt = str.format_time(array.get(resolvedTime, i), "yyyy-MM-dd", syminfo.timezone)
+            string rTxt = (rowR >= 0 ? "+" : "") + str.tostring(rowR, "#.##") + "R"
+            table.cell(tradeLogTable, 0, i + 1, dateTxt, text_color=#DDF3FF, text_size=size.tiny, text_halign=text.align_left)
+            table.cell(tradeLogTable, 1, i + 1, rowDir == "bull" ? "▲" : "▼", text_color=rowDir == "bull" ? #2FE08A : #FF5566, text_size=size.tiny, text_halign=text.align_center)
+            table.cell(tradeLogTable, 2, i + 1, rowWin ? "WIN" : "LOSS", text_color=rowColor, text_size=size.tiny, text_halign=text.align_center)
+            table.cell(tradeLogTable, 3, i + 1, rTxt, text_color=rowColor, text_size=size.tiny, text_halign=text.align_right)

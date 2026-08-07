@@ -697,12 +697,45 @@ app can't receive them — hence the exception to "no server logic" above). It d
   to complete the CISD + fresh FVG + retrace + rejection pipeline before expiring. Real-data
   result: zero change in SCORE/EXP — `maxBarsValid` was never the actual bottleneck, no
   sequence that ever mattered was timing out at 40 bars. Left at 60 (harmless, just inert).
-  Step 3 (done): `useSessionFilter` back to `false` — unlike the last two, this gate blocks new
+  Step 3 (done): `useSessionFilter` tried at `false` — unlike the last two, this gate blocks new
   sequences from even *starting* outside the four killzones (Asia/London/NY AM/NY PM), a
   structural loosening of when a sequence can begin rather than what quality bar it clears once
-  it does. Step 4 (not yet done, only if step 3 isn't enough): lower `minRiskReward` back toward
-  1.5 last — the one remaining lever with a real, direct cost, since some newly included winners
-  will be smaller.
+  it does. Real-data result: only 1 net new trade (9→10), essentially no frequency gain, and win
+  rate still dropped (8 wins→7 wins, 89%→70%, +1.86R→+1.1R). Counterintuitively the win *count*
+  dropped even though relaxing a filter should only ever add trades — because only one sequence
+  is ever tracked as active at a time, letting an earlier out-of-killzone attempt claim that slot
+  can preempt what would have been a different, killzone-only sequence using different candles
+  for its entry, so this filter isn't purely additive the way the ADX floor was. Reverted back to
+  `true`. Step 4 (not yet done, only if a future step isn't enough on its own): lower
+  `minRiskReward` back toward 1.5 — the one remaining lever with a real, direct cost, since some
+  newly included winners will be smaller. Given steps 1–3 all either hurt quality or did nothing,
+  the next lever under consideration is reintroducing one additional trigger type at a time
+  (starting with reversal, closest in character to sweep) and judging it by its own isolated row
+  in the INDICATOR PERFORMANCE panel below — not the blended aggregate SCORE, which is exactly
+  what let V2 Phase 7's all-five-at-once approach hide a bad trigger's losses inside a good one's
+  wins. Not yet done.
+
+  **V2 Phase 11** — prompted by a repeated question with no real answer: "how far back / how
+  clustered in time were these trades?" The trade-plan markup (`tpEntryLine`/`tpStopLine`/etc.)
+  only ever tracked the single *most recent* setup and cleared itself once resolved — there was
+  never a persistent record to check, only inference from where the chart happened to stop
+  loading history. This phase adds a genuine running log instead: `resolvedTime`/`resolvedDir`/
+  `resolvedOutcome`/`resolvedR`/`resolvedTriggerType` (parallel arrays, newest unshifted to the
+  front, capped at 200 entries so memory doesn't grow unbounded over years of replay), populated
+  at the exact same point `pendingDir`/etc. already resolve against price in the scorecard block
+  — no new detection logic, just recording what that block already computes. A new
+  `pendingTriggerType` array parallel to `pendingDir`/`pendingEntry`/`pendingStop`/`pendingTarget`
+  threads `seqTriggerType` through from fire time to resolution time so the log (and any future
+  per-trigger analysis) can see which detector produced each trade. Two visible surfaces, both
+  new `grpLog` inputs: `showResolutionMarkers` (default on) draws a small "W"/"L" label at the
+  exact bar each trade resolved on, capped at the 50 most recent (own array, deleting the oldest
+  as new ones arrive) so scrolling the chart shows the real temporal distribution of activity at
+  a glance; `showTradeLog` (default on) drives a second table, bottom-right, separate from the
+  existing top-right HUD, listing the `logTableRows` (default 10, max 20) most recent resolved
+  trades with date/direction/result/R — the table is declared with a fixed 21 rows (20 max
+  possible + header) regardless of the current `logTableRows` value, so a `table.cell` call can
+  never index past what the table itself was declared with. `max_labels_count` raised 250→300 for
+  headroom alongside the existing EQH/EQL/order-block/trade-plan label usage.
 
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
