@@ -677,6 +677,25 @@ app can't receive them — hence the exception to "no server logic" above). It d
   structurally new here, just turning the existing quality dials up together instead of leaving
   them at their looser defaults.
 
+  **V2 Phase 10** — prompted by a real read after Phase 9: sweep-only + the tightened gates
+  produced a genuinely strong result (8/9, +1.86R) but only 9 setups across a full month, too
+  infrequent to actually trade regularly. Rather than reopening the other four trigger types
+  (the exact move that diluted the win rate in Phase 7), this phase walks back Phase 9's four
+  added quality dials **one at a time**, cheapest (least likely to cost win rate) first,
+  re-measuring on the INDICATOR tab after each before touching the next — so any change in
+  SCORE/EXP can be attributed to a specific lever instead of guessing which of several
+  simultaneous changes mattered. Step 1 (done): `raiseAdxThreshold` back to `false` — drops the
+  stricter `raisedAdxThreshold(30)` floor Phase 9 added on top of the base Market Regime filter
+  (`adxThreshold`, still 20, still active via `useRegimeFilter`). Sweep is a liquidity-grab/
+  mean-reversion pattern, not inherently a strong-trend pattern, so requiring an unusually
+  strong trend on top of "not chopping" was the least justified of Phase 9's four additions —
+  the first one to walk back. Steps 2–4 (not yet done, planned in order): raise `maxBarsValid`
+  so sequences have more time to complete instead of expiring mid-formation; turn
+  `useSessionFilter` back off (killzone-only is a large frequency tax with no proven quality
+  link for sweep specifically); lower `minRiskReward` back toward 1.5 only if the first three
+  steps still aren't enough (the one lever with a real, direct cost — some newly included
+  winners will be smaller).
+
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
 with `onSnapshot` (`tvAlerts`/`tvAlertsStatus` state, `firestoreDbRef`), rendering each alert as a
