@@ -75,6 +75,16 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // One doc per resolved backtest trade (Cloud Function .add()s these as
+    // the Pine script's own scorecard resolves each pending setup) — the
+    // dashboard's trade-history log. Read-only, same shape as /alerts: no
+    // client write path exists or is needed, since nothing on the dashboard
+    // ever needs to mark a resolution as anything.
+    match /resolutions/{resolutionId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
     // Deny everything else by default — add new collections' rules
     // explicitly above as Polaris grows rather than opening this up.
     match /{document=**} {

@@ -513,6 +513,7 @@ adxThreshold    = input.float(20, "Min ADX to allow new setups", minval=5, maxva
 grpScore = "Scorecard"
 showScorecard = input.bool(true, "Track win rate on the HUD", group=grpScore)
 maxPending    = input.int(50, "Max pending signals tracked at once", minval=5, maxval=200, group=grpScore)
+sendResolutionWebhook = input.bool(true, "Send a webhook when a tracked setup resolves (win/loss)", group=grpScore, tooltip="Mirrors this backtest's win/loss resolutions into the dashboard as they happen. Only fires going forward from when this is enabled -- Pine can't retroactively fire alert() for bars that already resolved before an alert existed, so history from before you enable this stays chart-only.")
 
 grpVolume = "Volume"
 useVolumeConfirm = input.bool(true, "Factor volume strength into confidence score (never blocks a signal)", group=grpVolume)
@@ -708,6 +709,7 @@ var array<float> pendingEntry        = array.new<float>()
 var array<float> pendingStop         = array.new<float>()
 var array<float> pendingTarget       = array.new<float>()
 var array<string> pendingTriggerType = array.new<string>()  // parallel to pendingDir -- which detector fired this pending trade, carried through to the resolved log below
+var array<bool>  pendingTargetSource = array.new<bool>()  // true = real liquidity pool, false = R-multiple fallback -- parallel to pendingDir, carried through to the resolution webhook so the dashboard can explain the target the same way buildAlertMessage's targetSource already lets it explain a live setup
 var int scoreWins   = 0
 var int scoreLosses = 0
 var float sumR      = 0.0
@@ -1256,6 +1258,22 @@ buildAlertMessage(string setupType, float entryPrice, float stopPrice, float tar
      ',"targetSource":"' + (targetIsPool ? "pool" : "fallback") + '"' +
      ',"symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
 
+// fired from the resolution loop below, once per pending trade that actually
+// resolves against price -- lets the dashboard mirror this script's own
+// backtest (SCORE/EXP on the HUD) as a real, growing trade-history log
+// instead of only ever seeing whatever alerts happened to reach it. Reuses
+// setupTypeForTrigger() so the dashboard's setupTypeLabel()/explainTradePlan()
+// (which key off setupType/targetSource, same as a live "setup" alert) work
+// identically here with no dashboard-side special-casing.
+buildResolutionMessage(string dir, float entryPrice, float stopPrice, float targetPrice, string outcome, float r, string triggerType, bool targetIsPool) =>
+    string setupType = setupTypeForTrigger(triggerType, dir)
+    '{"secret":"' + webhookSecret + '","kind":"resolution","dir":"' + dir + '","setupType":"' + setupType +
+     '","triggerType":"' + triggerType + '","entryPrice":' + str.tostring(entryPrice) +
+     ',"stopPrice":' + str.tostring(stopPrice) + ',"targetPrice":' + str.tostring(targetPrice) +
+     ',"outcome":"' + outcome + '","r":' + str.tostring(r) +
+     ',"targetSource":"' + (targetIsPool ? "pool" : "fallback") + '"' +
+     ',"symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
+
 // wins/losses ride along on every status ping (not just alert completion) so
 // the dashboard's win-rate readout stays current even mid-sequence, not just
 // the instant a setup fires -- cheap to include, they're already tracked.
@@ -1579,6 +1597,7 @@ if showScorecard and barstate.isconfirmed and array.size(pendingDir) > 0
         float pStop = array.get(pendingStop, i)
         float pTarget = array.get(pendingTarget, i)
         string pTrig = array.get(pendingTriggerType, i)
+        bool pTargetSource = array.get(pendingTargetSource, i)
         bool hitStop = pDir == "bull" ? low <= pStop : high >= pStop
         bool hitTarget = pDir == "bull" ? high >= pTarget : low <= pTarget
         if hitStop or hitTarget
@@ -1600,6 +1619,8 @@ if showScorecard and barstate.isconfirmed and array.size(pendingDir) > 0
                 // a loss always costs exactly -1R by definition -- it
                 // resolved at the stop, i.e. the full risked distance
                 sumR := sumR - 1.0
+            if sendResolutionWebhook
+                alert(buildResolutionMessage(pDir, pEntry, pStop, pTarget, isWin ? "win" : "loss", thisR, pTrig, pTargetSource), alert.freq_all)
             // trade log: a real running history, distinct from the single-
             // most-recent tp* trade-plan markup above -- this is what actually
             // answers "when did these resolve" instead of leaving it to be
@@ -1625,6 +1646,7 @@ if showScorecard and barstate.isconfirmed and array.size(pendingDir) > 0
             array.remove(pendingStop, i)
             array.remove(pendingTarget, i)
             array.remove(pendingTriggerType, i)
+            array.remove(pendingTargetSource, i)
 
 // ---------- main scan (mirrors advanceScan), only on confirmed/closed bars ----------
 if barstate.isconfirmed
@@ -1854,12 +1876,14 @@ if barstate.isconfirmed
                                     array.unshift(pendingStop, stopP)
                                     array.unshift(pendingTarget, targetP)
                                     array.unshift(pendingTriggerType, seqTriggerType)
+                                    array.unshift(pendingTargetSource, targetIsPool)
                                     if array.size(pendingDir) > maxPending
                                         array.pop(pendingDir)
                                         array.pop(pendingEntry)
                                         array.pop(pendingStop)
                                         array.pop(pendingTarget)
                                         array.pop(pendingTriggerType)
+                                        array.pop(pendingTargetSource)
                                 if showTradePlan
                                     clearTradePlanDrawings()
                                     [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
@@ -1904,12 +1928,14 @@ if barstate.isconfirmed
                             array.unshift(pendingStop, stopP)
                             array.unshift(pendingTarget, targetP)
                             array.unshift(pendingTriggerType, seqTriggerType)
+                            array.unshift(pendingTargetSource, targetIsPool)
                             if array.size(pendingDir) > maxPending
                                 array.pop(pendingDir)
                                 array.pop(pendingEntry)
                                 array.pop(pendingStop)
                                 array.pop(pendingTarget)
                                 array.pop(pendingTriggerType)
+                                array.pop(pendingTargetSource)
                         if showTradePlan
                             clearTradePlanDrawings()
                             [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
@@ -1984,12 +2010,14 @@ if barstate.isconfirmed
                                     array.unshift(pendingStop, stopP)
                                     array.unshift(pendingTarget, targetP)
                                     array.unshift(pendingTriggerType, seqTriggerType)
+                                    array.unshift(pendingTargetSource, targetIsPool)
                                     if array.size(pendingDir) > maxPending
                                         array.pop(pendingDir)
                                         array.pop(pendingEntry)
                                         array.pop(pendingStop)
                                         array.pop(pendingTarget)
                                         array.pop(pendingTriggerType)
+                                        array.pop(pendingTargetSource)
                                 if showTradePlan
                                     clearTradePlanDrawings()
                                     [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
@@ -2034,12 +2062,14 @@ if barstate.isconfirmed
                             array.unshift(pendingStop, stopP)
                             array.unshift(pendingTarget, targetP)
                             array.unshift(pendingTriggerType, seqTriggerType)
+                            array.unshift(pendingTargetSource, targetIsPool)
                             if array.size(pendingDir) > maxPending
                                 array.pop(pendingDir)
                                 array.pop(pendingEntry)
                                 array.pop(pendingStop)
                                 array.pop(pendingTarget)
                                 array.pop(pendingTriggerType)
+                                array.pop(pendingTargetSource)
                         if showTradePlan
                             clearTradePlanDrawings()
                             [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)

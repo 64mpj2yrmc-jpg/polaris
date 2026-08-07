@@ -880,6 +880,52 @@ status doesn't re-announce it). This goes through the same shared 10-minute proa
 every other proactive event, not a bypass, since it's informational rather than a rule warning —
 so it can be genuinely mid-sequence rather than only ever speaking once a setup is already done.
 
+**Backtest trade history (mirroring the Pine scorecard's own resolutions).** Prompted directly by
+Landen catching a real gap: the Pine script's own on-chart backtest (`pendingDir`/`pendingEntry`/
+`pendingStop`/`pendingTarget`/`pendingTriggerType`, resolved into `scoreWins`/`scoreLosses`/`sumR`
+and the `resolvedTime`/etc. trade log — see V2 Phase 11 above) is a genuine replay of the whole
+chart under the *current* script version every time it loads, but that replay never leaves
+TradingView — `alert()` is the only way anything exits the Pine sandbox, and TradingView does not
+fire `alert()` retroactively for bars that resolved before a given alert existed (the exact
+mechanism behind a real stale-alert bug Landen hit this session — an alert running since before
+the scorecard even existed, silently using a since-fixed stop/target formula). So there was no way
+to see, off-chart, exactly when and why each HUD-tracked trade actually resolved.
+
+Fix is forward-only by necessity (no way to backfill what already happened before this shipped):
+`pinescript/polaris-scanner.pine` gained a new `sendResolutionWebhook` toggle (`grpScore`, default
+on) and a new `pendingTargetSource` array (bool, parallel to `pendingDir` — `true` = real liquidity
+pool, `false` = R-multiple fallback, mirroring how `pendingTriggerType` was threaded through in
+Phase 11) pushed/popped/removed at all 4 completion sites alongside the existing parallel arrays.
+The moment a pending trade resolves in the scorecard's own resolution loop, `buildResolutionMessage()`
+fires a third webhook `kind` — `"resolution"` — carrying `dir`/`setupType` (recomputed via the
+existing `setupTypeForTrigger()`, so the dashboard's `setupTypeLabel()`/`explainTradePlan()` work on
+it identically to a live "setup" alert, no special-casing needed) /`triggerType`/entry/stop/target/
+`outcome`/`r`/`targetSource`. Uses `alert.freq_all` rather than the setup/status webhooks'
+`alert.freq_once_per_bar_close`, since the resolution loop can resolve more than one pending trade
+on the same bar close and each one needs its own webhook call, not just the last.
+
+`functions/index.js` adds `validateResolutionPayload()` (strict, mirrors `validateAlertPayload()`'s
+rules exactly — same `VALID_SETUP_TYPES`/`VALID_TRIGGER_TYPES`, plus new `VALID_DIRS`/
+`VALID_OUTCOMES`) and a `kind === "resolution"` branch that `.add()`s one doc per resolution to a
+new `resolutions` collection — deliberately `.add()` (append), not `.set()` like `scannerStatus`,
+since this is meant to accumulate into a real history, not a single live snapshot. No
+`sendSmsAlert`/`sendVoiceCall` — resolutions are bookkeeping, not something worth a phone buzz.
+`firestore.rules` gates `/resolutions` read-only for signed-in clients, same shape as `/alerts` and
+`/scannerStatus`, no client write path (nothing on the dashboard ever needs to mutate a resolution).
+
+`index.html` subscribes to `/resolutions` (ordered by `timestamp` desc, capped at 200 — matching
+the cap Pine's own `resolvedTime` array already uses) in the same Firebase `useEffect` block as
+`/alerts`/`scannerStatus`, into new `resolutions` state. Rendered as a new "◆ BACKTEST TRADE
+HISTORY" panel on the INDICATOR tab (scrollable, `maxHeight: 420`, same pattern as the scanner feed
+panel on MARKET) — each row shows a WON/LOST badge, `setupTypeLabel()`, realized R, a real
+timestamp, and `explainTradePlan()`'s mechanical reasoning, reusing that function as-is since a
+resolution doc carries the same `setupType`/`targetSource` shape an alert doc does. This is
+deliberately a separate data source from the existing self-calibration `outcome` field on `/alerts`
+docs (`resolveAlertOutcomes()`, which approximates a win/loss by comparing against the dashboard's
+own live market feed candles) — `/resolutions` is the indicator's own exact backtest resolution,
+not an approximation against a proxy feed, and only exists for alerts that were actually being
+tracked in the Pine scorecard, whether or not the dashboard ever saw a live "setup" alert for them.
+
 ## Git
 
 Primary branch: `main`. This session's work landed on `claude/polaris-living-system-ahe5fl`

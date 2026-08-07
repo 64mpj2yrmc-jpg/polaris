@@ -75,7 +75,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.06-8";
+const BUILD = "2026.08.07-1";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -1199,6 +1199,14 @@ function App() {
   const aiReviewAttemptedRef = useRef(new Set()); // session-only dedupe so a snapshot re-fire doesn't re-trigger a review already in flight
   const outcomeAttemptedRef = useRef(new Set()); // per-alert-id dedupe so resolveAlertOutcomes doesn't refire the same write repeatedly
 
+  // ----- Indicator's own backtest trade history (Firestore /resolutions) -----
+  // Distinct from tvAlerts/outcome above: that's the dashboard's own
+  // approximate self-calibration against a live market feed proxy; this is
+  // the Pine script's own scorecard telling the dashboard, in real time,
+  // exactly when and why each setup it tracked actually resolved — see
+  // pinescript/polaris-scanner.pine's sendResolutionWebhook.
+  const [resolutions, setResolutions] = useState([]);
+
   // ----- Live scanner status (single overwritten Firestore doc) -----
   const [scannerStatus, setScannerStatus] = useState(null);
   const scannerStatusRef = useRef(null); scannerStatusRef.current = scannerStatus;
@@ -1313,6 +1321,7 @@ function App() {
     }
     let unsubscribe = () => {};
     let unsubscribeStatus = () => {};
+    let unsubscribeResolutions = () => {};
     try {
       const app = firebase.apps.length ? firebase.apps[0] : firebase.initializeApp(cfg);
       const db = app.firestore();
@@ -1332,11 +1341,18 @@ function App() {
             (doc) => setScannerStatus(doc.exists ? doc.data() : null),
             (err) => { /* silent — the live status strip just stays hidden on error, the alerts list is the primary feature */ }
           );
+        // 200, matching the cap Pine's own resolvedTime/etc. arrays use — no
+        // reason for the dashboard to keep less history than the indicator does.
+        unsubscribeResolutions = db.collection("resolutions").orderBy("timestamp", "desc").limit(200)
+          .onSnapshot(
+            (snap) => setResolutions(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+            (err) => { /* silent — same reasoning as the scannerStatus listener above, this is a secondary panel, not the primary feature */ }
+          );
       }).catch((err) => setTvAlertsStatus("Sign-in failed: " + (err.message || "check Firebase Auth is enabled")));
     } catch (err) {
       setTvAlertsStatus("Firebase init failed: " + (err.message || "check firebaseConfig.js"));
     }
-    return () => { unsubscribe(); unsubscribeStatus(); };
+    return () => { unsubscribe(); unsubscribeStatus(); unsubscribeResolutions(); };
   }, []);
 
   async function setAlertStatus(id, status) {
@@ -4051,7 +4067,42 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
               </Panel>
             )}
 
-            {!scannerStatus && (verdictAccuracy.favorable.w + verdictAccuracy.favorable.l + verdictAccuracy.caution.w + verdictAccuracy.caution.l + verdictAccuracy.avoid.w + verdictAccuracy.avoid.l) === 0 && Object.keys(performanceByTrigger).length === 0 && Object.keys(performanceByConfidence).length === 0 && (
+            {resolutions.length > 0 && (
+              <Panel style={{ maxHeight: 420, overflowY: "auto" }}>
+                <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold, marginBottom: 4 }}>◆ BACKTEST TRADE HISTORY</div>
+                <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
+                  Every setup the indicator's own scorecard has actually resolved (win or loss) since this was turned on, with the exact timestamp and mechanical reasoning behind entry/stop/target — this is what's really behind the SCORE/EXP on the Pine chart's HUD, not just whatever happened to reach a live alert. Only covers resolutions from when the Pine script's "Send a webhook when a tracked setup resolves" option was enabled onward — Pine can't retroactively report history from before that.
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {resolutions.map((r) => {
+                    const ts = r.timestamp && r.timestamp.toDate ? r.timestamp.toDate() : null;
+                    const isWin = r.outcome === "win";
+                    return (
+                      <div key={r.id} style={{ borderBottom: `1px solid ${C.border}`, paddingBottom: 12 }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                            <span style={{
+                              fontSize: 10, letterSpacing: "0.08em", fontWeight: 700, padding: "3px 8px", borderRadius: 4,
+                              color: isWin ? C.green : C.red,
+                              border: `1px solid ${isWin ? C.green : C.red}`,
+                              background: isWin ? "rgba(47,224,138,0.08)" : "rgba(255,85,102,0.08)",
+                            }}>
+                              {isWin ? "WON" : "LOST"}
+                            </span>
+                            <span style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{setupTypeLabel(r.setupType)}</span>
+                            <span style={{ fontSize: 11, color: isWin ? C.green : C.red }}>{r.r != null ? `${r.r >= 0 ? "+" : ""}${r.r.toFixed(2)}R` : ""}</span>
+                          </div>
+                          <span style={{ fontSize: 10, color: C.faint }}>{ts ? ts.toLocaleString() : "—"}</span>
+                        </div>
+                        <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.6 }}>{explainTradePlan(r)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </Panel>
+            )}
+
+            {!scannerStatus && (verdictAccuracy.favorable.w + verdictAccuracy.favorable.l + verdictAccuracy.caution.w + verdictAccuracy.caution.l + verdictAccuracy.avoid.w + verdictAccuracy.avoid.l) === 0 && Object.keys(performanceByTrigger).length === 0 && Object.keys(performanceByConfidence).length === 0 && resolutions.length === 0 && (
               <Panel>
                 <div style={{ textAlign: "center", padding: "30px 10px", color: C.faint, fontSize: 13 }}>
                   No indicator data yet — waiting on TradingView.

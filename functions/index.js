@@ -7,7 +7,7 @@
 // service -> Edit & deploy new revision -> Container(s) -> Variables &
 // Secrets -> Secrets -> Reference a secret -> WEBHOOK_SECRET.
 //
-// Two payload shapes come in, discriminated by "kind" (defaults to "setup"
+// Three payload shapes come in, discriminated by "kind" (defaults to "setup"
 // if absent, for backward compatibility with alerts fired before this field
 // existed):
 //   kind:"setup"  (default) -- a fully completed setup. Expected body:
@@ -26,6 +26,17 @@
 //     current" doc -- no history kept, no SMS -- so the dashboard/Polaris
 //     always knows what the indicator is currently tracking (including its
 //     live scorecard) between full setups.
+//   kind:"resolution" -- fired from the Pine script's own scorecard the
+//     moment a previously-pending tracked setup actually resolves (win or
+//     loss) against price on the chart. Expected body: secret, dir
+//     ("bull"|"bear"), setupType, outcome ("win"|"loss"), entryPrice,
+//     stopPrice, targetPrice, r required; triggerType, targetSource,
+//     symbol, timeframe, sourceTimestamp optional. Appended to the
+//     "resolutions" collection, one doc per resolution -- this is what lets
+//     the dashboard mirror the indicator's own backtest (the SCORE/EXP HUD)
+//     as a real, growing history instead of only ever seeing alerts that
+//     happened to reach a live webhook. No SMS/call -- this is bookkeeping,
+//     not something worth waking up for.
 //
 // Also fires a best-effort SMS AND a best-effort voice call via Twilio's
 // REST API once a "setup" alert is stored (see sendSmsAlert/sendVoiceCall
@@ -92,6 +103,9 @@ const VALID_SETUP_TYPES = new Set([
 // fine with it absent.
 const VALID_TRIGGER_TYPES = new Set(["sweep", "reversal", "continuation", "breakout", "htf_fvg"]);
 
+const VALID_DIRS = new Set(["bull", "bear"]);
+const VALID_OUTCOMES = new Set(["win", "loss"]);
+
 // Generous for this payload shape (a handful of numbers + short strings) —
 // tight enough to reject anything that looks like abuse rather than a
 // genuine alert.
@@ -156,6 +170,60 @@ function validateAlertPayload(body) {
       targetPrice: nums.targetPrice,
       confidence,
       riskReward,
+      targetSource,
+      symbol: typeof body.symbol === "string" ? body.symbol.slice(0, 32) : null,
+      timeframe: typeof body.timeframe === "string" ? body.timeframe.slice(0, 16) : null,
+      sourceTimestamp: typeof body.sourceTimestamp === "string" ? body.sourceTimestamp.slice(0, 64) : null,
+    },
+  };
+}
+
+// Validates a "resolution" ping -- strict like validateAlertPayload (this
+// feeds the dashboard's real trade-history log and performance stats, not
+// just a display value), sharing its setupType/targetSource/triggerType
+// rules exactly.
+function validateResolutionPayload(body) {
+  const errors = [];
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, errors: ["Request body must be a JSON object"] };
+  }
+
+  const dir = typeof body.dir === "string" ? body.dir.trim() : "";
+  if (!VALID_DIRS.has(dir)) errors.push("dir must be one of: bull, bear");
+
+  const outcome = typeof body.outcome === "string" ? body.outcome.trim() : "";
+  if (!VALID_OUTCOMES.has(outcome)) errors.push("outcome must be one of: win, loss");
+
+  const setupType = typeof body.setupType === "string" ? body.setupType.trim() : "";
+  if (!setupType) {
+    errors.push("setupType is required");
+  } else if (!VALID_SETUP_TYPES.has(setupType)) {
+    errors.push(`setupType must be one of: ${[...VALID_SETUP_TYPES].join(", ")}`);
+  }
+
+  const nums = {};
+  for (const field of ["entryPrice", "stopPrice", "targetPrice", "r"]) {
+    const n = Number(body[field]);
+    if (!Number.isFinite(n)) errors.push(`${field} must be a finite number`);
+    else nums[field] = n;
+  }
+
+  if (errors.length) return { ok: false, errors };
+
+  const targetSource = body.targetSource === "pool" || body.targetSource === "fallback" ? body.targetSource : null;
+  const triggerType = typeof body.triggerType === "string" && VALID_TRIGGER_TYPES.has(body.triggerType) ? body.triggerType : null;
+
+  return {
+    ok: true,
+    data: {
+      dir,
+      outcome,
+      setupType,
+      triggerType,
+      entryPrice: nums.entryPrice,
+      stopPrice: nums.stopPrice,
+      targetPrice: nums.targetPrice,
+      r: nums.r,
       targetSource,
       symbol: typeof body.symbol === "string" ? body.symbol.slice(0, 32) : null,
       timeframe: typeof body.timeframe === "string" ? body.timeframe.slice(0, 16) : null,
@@ -322,7 +390,28 @@ functions.http("receiveAlert", async (req, res) => {
     return;
   }
 
-  const kind = req.body && req.body.kind === "status" ? "status" : "setup";
+  const kind = req.body && req.body.kind === "status" ? "status" : req.body && req.body.kind === "resolution" ? "resolution" : "setup";
+
+  if (kind === "resolution") {
+    const result = validateResolutionPayload(req.body);
+    if (!result.ok) {
+      console.warn("receiveAlert: resolution validation failed", result.errors);
+      res.status(400).json({ ok: false, error: "Invalid payload", details: result.errors });
+      return;
+    }
+    try {
+      const docRef = await db.collection("resolutions").add({
+        ...result.data,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      console.log("receiveAlert: stored resolution", docRef.id, result.data.setupType, result.data.outcome);
+      res.status(201).json({ ok: true, id: docRef.id });
+    } catch (err) {
+      console.error("receiveAlert: resolutions write failed", err);
+      res.status(500).json({ ok: false, error: "Internal error — could not store resolution" });
+    }
+    return;
+  }
 
   if (kind === "status") {
     const result = validateStatusPayload(req.body);
