@@ -326,30 +326,39 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 //
 // V2 Phase 10 -- prompted by a real read after Phase 9: sweep-only + the tightened
 // gates produced a genuinely strong result (8/9, +1.86R) but only 9 setups across a
-// full month, which is too infrequent to actually trade. Rather than reopening the
+// full month, too infrequent to actually trade regularly. Rather than reopening the
 // other four trigger types (the exact move that diluted the win rate in Phase 7),
 // this phase walks back Phase 9's four added quality dials ONE AT A TIME, cheapest
-// (least likely to cost win rate) first, re-measuring after each before touching the
-// next -- so any change in SCORE/EXP can actually be attributed to a specific lever
-// instead of guessing which of several simultaneous changes mattered.
-// Step 1 (this change): raiseAdxThreshold back to FALSE -- drops the stricter
-// raisedAdxThreshold(30) floor Phase 9 added on top of the base Market Regime
-// filter (adxThreshold, still 20, still active via useRegimeFilter). Sweep is a
-// liquidity-grab/mean-reversion pattern, not inherently a strong-trend pattern, so
-// requiring an unusually strong trend on top of "not chopping" was the least
-// justified of Phase 9's four additions -- the first one to walk back.
-// Steps 2-4 (not yet done, planned in order): raise maxBarsValid so sequences have
-// more time to complete instead of expiring mid-formation; turn useSessionFilter
-// back off (killzone-only is a large frequency tax with no proven quality link for
-// sweep specifically); lower minRiskReward back toward 1.5 only if the first three
-// steps still aren't enough (this is the one with a real, direct cost -- some newly
-// included winners will be smaller).
+// (least likely to cost win rate) first, re-measuring on the INDICATOR tab after
+// each before touching the next -- so any change in SCORE/EXP can be attributed to
+// a specific lever instead of guessing which of several simultaneous changes
+// mattered.
+// Step 1 (done, reverted): raiseAdxThreshold tried at FALSE -- dropping the
+// stricter raisedAdxThreshold(30) floor on top of the base Market Regime filter
+// looked like the least-justified of Phase 9's four additions going in (sweep is a
+// liquidity-grab/mean-reversion pattern, not inherently a strong-trend one), but the
+// real data said otherwise: 36 total setups but win rate collapsed to 19/36 (53%,
+// +0.58R), and isolating just the newly-unlocked ADX 20-30 band specifically showed
+// an 11/27 (41%) win rate -- a real, large quality drop, not sample noise. The
+// strong-trend requirement was carrying more genuine signal than expected.
+// raiseAdxThreshold reverts back to TRUE here; the stricter ADX floor stays.
+// Step 2 (this change): maxBarsValid raised from 40 to 60 -- unlike the ADX floor,
+// this doesn't change which setups are allowed to START, only gives ones that
+// already passed every other gate more time to actually complete the CISD + fresh
+// FVG + retrace + rejection pipeline before expiring. A structurally safer kind of
+// loosening than relaxing an entry filter, worth testing on its own before touching
+// anything else.
+// Steps 3-4 (not yet done, planned in order, only if step 2 isn't enough): turn
+// useSessionFilter back off (killzone-only is a large frequency tax with no proven
+// quality link for sweep specifically); lower minRiskReward back toward 1.5 last
+// (the one lever with a real, direct cost -- some newly included winners will be
+// smaller).
 // ============================================================================
 
 // ---------- inputs ----------
 grpScan = "Scanner"
 swingStrength = input.int(3, "Swing strength (bars each side)", minval=1, maxval=10, group=grpScan)
-maxBarsValid  = input.int(40, "Max bars before a sequence expires", minval=5, group=grpScan)
+maxBarsValid  = input.int(60, "Max bars before a sequence expires", minval=5, group=grpScan)
 maxSwings     = input.int(20, "Max recent swings tracked per side", minval=5, maxval=50, group=grpScan)
 showVisuals   = input.bool(true, "Show sweep/CISD/trade-plan markup", group=grpScan)
 showHud       = input.bool(true, "Show status panel (top-right)", group=grpScan)
@@ -487,7 +496,7 @@ allowBreakout     = input.bool(false, "Allow breakout-based setups (author's own
 grpGates = "Signal Quality Gates"
 useVolFloor       = input.bool(false, "Require a minimum volume ratio to fire", group=grpGates)
 volFloorMult      = input.float(0.8, "Min volume ratio if the floor above is enabled", minval=0, step=0.1, group=grpGates)
-raiseAdxThreshold = input.bool(false, "Require a stricter ADX minimum than the Market Regime setting", group=grpGates)
+raiseAdxThreshold = input.bool(true, "Require a stricter ADX minimum than the Market Regime setting", group=grpGates)
 raisedAdxThreshold = input.float(30, "Stricter ADX minimum, used only if the toggle above is on", minval=5, maxval=60, group=grpGates)
 minBarRangeAtr    = input.float(0.15, "Min bar range to trust as signal context, x ATR (0 disables)", minval=0, step=0.05, group=grpGates)
 minSeqFvgSizeAtr  = input.float(0.0, "Min size of a sequence's own confirming FVG, x ATR (0 disables)", minval=0, step=0.05, group=grpGates)

@@ -684,17 +684,22 @@ app can't receive them — hence the exception to "no server logic" above). It d
   added quality dials **one at a time**, cheapest (least likely to cost win rate) first,
   re-measuring on the INDICATOR tab after each before touching the next — so any change in
   SCORE/EXP can be attributed to a specific lever instead of guessing which of several
-  simultaneous changes mattered. Step 1 (done): `raiseAdxThreshold` back to `false` — drops the
-  stricter `raisedAdxThreshold(30)` floor Phase 9 added on top of the base Market Regime filter
-  (`adxThreshold`, still 20, still active via `useRegimeFilter`). Sweep is a liquidity-grab/
-  mean-reversion pattern, not inherently a strong-trend pattern, so requiring an unusually
-  strong trend on top of "not chopping" was the least justified of Phase 9's four additions —
-  the first one to walk back. Steps 2–4 (not yet done, planned in order): raise `maxBarsValid`
-  so sequences have more time to complete instead of expiring mid-formation; turn
-  `useSessionFilter` back off (killzone-only is a large frequency tax with no proven quality
-  link for sweep specifically); lower `minRiskReward` back toward 1.5 only if the first three
-  steps still aren't enough (the one lever with a real, direct cost — some newly included
-  winners will be smaller).
+  simultaneous changes mattered. Step 1 (done, reverted): `raiseAdxThreshold` tried at `false` —
+  dropping the stricter `raisedAdxThreshold(30)` floor on top of the base Market Regime filter
+  looked like the least-justified of Phase 9's four additions going in (sweep is a
+  liquidity-grab/mean-reversion pattern, not inherently a strong-trend one), but the real data
+  said otherwise: 36 total setups but win rate collapsed to 19/36 (53%, +0.58R), and isolating
+  just the newly-unlocked ADX 20-30 band specifically showed an 11/27 (41%) win rate — a real,
+  large quality drop, not sample noise. The strong-trend requirement was carrying more genuine
+  signal than expected, so `raiseAdxThreshold` reverts back to `true`. Step 2 (done): `maxBarsValid`
+  raised from 40 to 60 — unlike the ADX floor, this doesn't change which setups are allowed to
+  *start*, only gives ones that already passed every other gate more time to actually complete
+  the CISD + fresh FVG + retrace + rejection pipeline before expiring — a structurally safer
+  kind of loosening than relaxing an entry filter. Steps 3–4 (not yet done, planned in order,
+  only if step 2 isn't enough): turn `useSessionFilter` back off (killzone-only is a large
+  frequency tax with no proven quality link for sweep specifically); lower `minRiskReward` back
+  toward 1.5 last (the one lever with a real, direct cost — some newly included winners will be
+  smaller).
 
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
