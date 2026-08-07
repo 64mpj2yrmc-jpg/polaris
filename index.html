@@ -75,7 +75,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.06-7";
+const BUILD = "2026.08.06-8";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -2403,7 +2403,14 @@ Rules:
         setInterim("");
         stopLevelMeter();
         if (finalText.trim()) sendToPolaris(finalText.trim());
-        else setVoiceState("idle");
+        else {
+          // ended cleanly with nothing captured -- no onerror fires for this case at
+          // all in some browsers (notably Safari), so without this the UI just went
+          // silently back to idle with zero feedback, indistinguishable from a tap
+          // that did nothing. Flash so it's at least clear the mic heard nothing.
+          setVoiceState("idle");
+          flash("Didn't catch anything — try again");
+        }
       };
       rec.onerror = (e) => {
         setInterim("");
