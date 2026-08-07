@@ -342,17 +342,23 @@ indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_line
 // an 11/27 (41%) win rate -- a real, large quality drop, not sample noise. The
 // strong-trend requirement was carrying more genuine signal than expected.
 // raiseAdxThreshold reverts back to TRUE here; the stricter ADX floor stays.
-// Step 2 (this change): maxBarsValid raised from 40 to 60 -- unlike the ADX floor,
-// this doesn't change which setups are allowed to START, only gives ones that
-// already passed every other gate more time to actually complete the CISD + fresh
-// FVG + retrace + rejection pipeline before expiring. A structurally safer kind of
-// loosening than relaxing an entry filter, worth testing on its own before touching
-// anything else.
-// Steps 3-4 (not yet done, planned in order, only if step 2 isn't enough): turn
-// useSessionFilter back off (killzone-only is a large frequency tax with no proven
-// quality link for sweep specifically); lower minRiskReward back toward 1.5 last
-// (the one lever with a real, direct cost -- some newly included winners will be
-// smaller).
+// Step 2 (done, null result): maxBarsValid raised from 40 to 60 -- unlike the ADX
+// floor, this doesn't change which setups are allowed to START, only gives ones
+// that already passed every other gate more time to complete the CISD + fresh FVG +
+// retrace + rejection pipeline before expiring. Real-data result: zero change in
+// SCORE/EXP -- confirming maxBarsValid was never the actual bottleneck, no
+// sequence that ever mattered was timing out at 40 bars. Left at 60 (harmless,
+// just inert) and moving on.
+// Step 3 (this change): useSessionFilter back to FALSE -- unlike the last two,
+// this gate blocks new sequences from even STARTING outside the four killzones
+// (Asia/London/NY AM/NY PM), which is a structural kind of loosening again (opens
+// up when a sequence can begin, not what quality bar it has to clear once it does).
+// If genuine sweeps are forming in the gaps between killzones and simply never
+// getting a chance to fire, this should recover real frequency; if it mostly adds
+// low-quality dead-session noise, SCORE/EXP will show that honestly.
+// Step 4 (not yet done, only if step 3 isn't enough): lower minRiskReward back
+// toward 1.5 last -- the one remaining lever with a real, direct cost, since some
+// newly included winners will be smaller.
 // ============================================================================
 
 // ---------- inputs ----------
@@ -432,7 +438,7 @@ showFib = input.bool(true, "Show Fibonacci retracement ladder + equilibrium + OT
 
 grpKZ = "Killzones (New York time)"
 showKillzones       = input.bool(false, "Shade killzone sessions", group=grpKZ)
-useSessionFilter    = input.bool(true, "Only allow new setups during a killzone session", group=grpKZ)
+useSessionFilter    = input.bool(false, "Only allow new setups during a killzone session", group=grpKZ)
 showSessionVolatility = input.bool(true, "Track average range per session on the HUD", group=grpKZ)
 asiaSession   = input.session("2000-0000", "Asia killzone", group=grpKZ)
 londonSession = input.session("0200-0500", "London killzone", group=grpKZ)

@@ -691,15 +691,18 @@ app can't receive them — hence the exception to "no server logic" above). It d
   said otherwise: 36 total setups but win rate collapsed to 19/36 (53%, +0.58R), and isolating
   just the newly-unlocked ADX 20-30 band specifically showed an 11/27 (41%) win rate — a real,
   large quality drop, not sample noise. The strong-trend requirement was carrying more genuine
-  signal than expected, so `raiseAdxThreshold` reverts back to `true`. Step 2 (done): `maxBarsValid`
-  raised from 40 to 60 — unlike the ADX floor, this doesn't change which setups are allowed to
-  *start*, only gives ones that already passed every other gate more time to actually complete
-  the CISD + fresh FVG + retrace + rejection pipeline before expiring — a structurally safer
-  kind of loosening than relaxing an entry filter. Steps 3–4 (not yet done, planned in order,
-  only if step 2 isn't enough): turn `useSessionFilter` back off (killzone-only is a large
-  frequency tax with no proven quality link for sweep specifically); lower `minRiskReward` back
-  toward 1.5 last (the one lever with a real, direct cost — some newly included winners will be
-  smaller).
+  signal than expected, so `raiseAdxThreshold` reverts back to `true`. Step 2 (done, null
+  result): `maxBarsValid` raised from 40 to 60 — unlike the ADX floor, this doesn't change which
+  setups are allowed to *start*, only gives ones that already passed every other gate more time
+  to complete the CISD + fresh FVG + retrace + rejection pipeline before expiring. Real-data
+  result: zero change in SCORE/EXP — `maxBarsValid` was never the actual bottleneck, no
+  sequence that ever mattered was timing out at 40 bars. Left at 60 (harmless, just inert).
+  Step 3 (done): `useSessionFilter` back to `false` — unlike the last two, this gate blocks new
+  sequences from even *starting* outside the four killzones (Asia/London/NY AM/NY PM), a
+  structural loosening of when a sequence can begin rather than what quality bar it clears once
+  it does. Step 4 (not yet done, only if step 3 isn't enough): lower `minRiskReward` back toward
+  1.5 last — the one remaining lever with a real, direct cost, since some newly included winners
+  will be smaller.
 
 Phase 2 (dashboard integration) is now wired into `index.html`: the ALERTS tab (added to `tabs`)
 signs in anonymously via Firebase Auth on mount and subscribes to the Firestore `alerts` collection
