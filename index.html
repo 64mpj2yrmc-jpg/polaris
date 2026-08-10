@@ -16,13 +16,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-<!-- compat build (not the modular v9+ SDK) so it exposes a plain `firebase`
-     global usable from the classic (non-module) Babel script below, same
-     pattern as React/ReactDOM above -->
-<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
-<script src="firebaseConfig.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Orbitron:wght@500;700&display=swap');
   html, body { margin: 0; padding: 0; background: #030710; }
@@ -75,7 +68,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.07-1";
+const BUILD = "2026.08.10-1";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -271,87 +264,6 @@ function computeStats(trades) {
   return { net, winRate, avgWin, avgLoss, pf, expectancy, streak, count: trades.length, avgR };
 }
 
-// Plain-English label for a TradingView alert's setupType. The Pine scanner
-// currently only ever fires CHoCH_UP/CHoCH_DOWN (every completed sequence is
-// a liquidity-sweep reversal, whatever future setup types V2 adds); this
-// maps forward to those too so the ALERTS tab doesn't need updating when
-// they ship.
-function setupTypeLabel(setupType) {
-  const labels = {
-    CHoCH_UP: "Bullish liquidity sweep reversal",
-    CHoCH_DOWN: "Bearish liquidity sweep reversal",
-    BOS_UP: "Bullish break of structure (continuation)",
-    BOS_DOWN: "Bearish break of structure (continuation)",
-    LIQUIDITY_SWEEP_BUY: "Bullish liquidity sweep",
-    LIQUIDITY_SWEEP_SELL: "Bearish liquidity sweep",
-    FVG_RETEST_BULL: "Bullish fair value gap retest",
-    FVG_RETEST_BEAR: "Bearish fair value gap retest",
-  };
-  return labels[setupType] || setupType || "Setup";
-}
-
-// Which of the Pine scanner's five real entry triggers produced an alert.
-// Prefers the alert's own triggerType field (added alongside setupType
-// specifically because setupType alone can't tell continuation and breakout
-// apart — both report BOS_*, see pinescript/polaris-scanner.pine's
-// setupTypeForTrigger()). Alerts fired before triggerType existed fall back
-// to inferring what setupType alone can distinguish — sweep/reversal/htf_fvg
-// map cleanly, BOS_* lands in a combined "structure" bucket since there's no
-// way to split it further after the fact.
-const TRIGGER_BUCKET_LABELS = {
-  sweep: "Sweep",
-  reversal: "Reversal",
-  continuation: "Continuation",
-  breakout: "Breakout",
-  htf_fvg: "HTF FVG reject",
-  structure: "Structure break (continuation + breakout, older alerts)",
-};
-function alertTriggerBucket(a) {
-  if (a.triggerType && TRIGGER_BUCKET_LABELS[a.triggerType]) return a.triggerType;
-  const st = a.setupType || "";
-  if (st.startsWith("LIQUIDITY_SWEEP")) return "sweep";
-  if (st.startsWith("CHoCH")) return "reversal";
-  if (st.startsWith("FVG_RETEST")) return "htf_fvg";
-  if (st.startsWith("BOS")) return "structure";
-  return null;
-}
-
-// Confidence tier an alert's setupConfidence() score falls into (0-100 scale).
-function confidenceTier(conf) {
-  if (typeof conf !== "number") return null;
-  if (conf >= 75) return "high";
-  if (conf >= 50) return "mid";
-  return "low";
-}
-const CONFIDENCE_TIER_LABELS = { high: "High (75-100)", mid: "Mid (50-74)", low: "Low (<50)" };
-
-// Realized R for one resolved alert — losses always resolve at the stop
-// (-1R, same convention the Pine scanner's own scorecard uses), wins pay out
-// that alert's own real riskReward rather than a fixed amount, falling back
-// to 1R only in the rare case riskReward wasn't computable at fire time.
-function alertRealizedR(a) {
-  if (a.outcome === "win") return typeof a.riskReward === "number" && a.riskReward > 0 ? a.riskReward : 1;
-  if (a.outcome === "loss") return -1;
-  return null;
-}
-
-// Deterministic explanation of why an alert's entry/stop/target sit where
-// they do — this is the indicator's actual mechanical rule (see
-// pinescript/polaris-scanner.pine), not an LLM guess, so it's always
-// accurate even when Polaris's own AI review is unavailable or still
-// pending.
-function explainTradePlan(a) {
-  const dir = (a.setupType || "").includes("DOWN") || (a.setupType || "").includes("SELL") || (a.setupType || "").includes("BEAR") ? "down" : "up";
-  const entryLine = "Entry confirmed once price closed back through the fair value gap left by the reversal.";
-  const stopLine = `Stop sits just beyond the sweep's actual wick${dir === "down" ? " (above it)" : " (below it)"} — the level that has to hold for this read to stay valid, not just the older level it swept.`;
-  const targetLine = a.targetSource === "pool"
-    ? "Target is the nearest untested liquidity pool in this direction — a real draw of liquidity, not an arbitrary distance."
-    : a.targetSource === "fallback"
-    ? "Target is a projected multiple of the risk, used because no liquidity pool sat beyond entry yet at fire time."
-    : "";
-  return [entryLine, stopLine, targetLine].filter(Boolean).join(" ");
-}
-
 // ---------- Polaris tool-use (real Anthropic `tools` — see streamAnthropicChat/sendToPolaris) ----------
 // shared validation/coercion for a trade the model wants logged -- used by both the
 // log_trade tool (executeTool) and parseTradeBlock's <trade> tag fallback, so there's
@@ -380,10 +292,12 @@ function coerceTradeInput(raw) {
 }
 
 // tools Polaris can call mid-reply instead of reasoning off one fixed context dump --
-// 5 read-only lookups plus 2 write actions (log_trade / mark_alert_status), both of
-// which mirror something the app already lets Landen do by hand (see executeTool).
-// Deliberately excludes anything that would let it loosen its own guardian rules or
-// drive UI navigation on its own.
+// 3 read-only lookups plus 1 write action (log_trade), which mirrors something the
+// app already lets Landen do by hand (see executeTool). Deliberately excludes
+// anything that would let it loosen its own guardian rules or drive UI navigation
+// on its own. The TradingView alert/scanner-status tools that used to live here
+// were removed along with the rest of the Firebase-backed alerts pipeline -- see
+// CLAUDE.md's "Discretionary pivot" note.
 const POLARIS_TOOLS = [
   {
     name: "get_journal_stats",
@@ -409,23 +323,6 @@ const POLARIS_TOOLS = [
     },
   },
   {
-    name: "get_scanner_status",
-    description: "Get the live scanner's current activity -- whether it's running, recent scan events, and the TradingView Pine indicator's current bias/regime/phase/scorecard. Use this when he asks what the scanner or indicator is currently seeing.",
-    input_schema: { type: "object", properties: {}, additionalProperties: false },
-  },
-  {
-    name: "get_alerts",
-    description: "Get TradingView alerts received from the Pine scanner indicator, including your own past AI review verdicts. Use this when he asks about pending or past alerts, or wants your read on a setup that already fired.",
-    input_schema: {
-      type: "object",
-      properties: {
-        status: { type: "string", enum: ["pending", "traded", "missed", "all"], description: "Filter by status. Default 'pending'." },
-        limit: { type: "integer", minimum: 1, maximum: 20, description: "Max alerts to return, most recent first. Default 10." },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
     name: "log_trade",
     description: "Log a completed trade to Landen's journal. Only call this when direction, entry, exit, and contracts are all unambiguous from what he told you -- if anything is missing or unclear, ask him instead of guessing. Never call this for a trade already visible in your journal context or that get_recent_trades just returned.",
     input_schema: {
@@ -446,26 +343,12 @@ const POLARIS_TOOLS = [
       additionalProperties: false,
     },
   },
-  {
-    name: "mark_alert_status",
-    description: "Mark a pending TradingView alert as traded or missed. Only call this when Landen explicitly tells you he took or skipped a specific alert -- never guess which one; use get_alerts first if it's ambiguous.",
-    input_schema: {
-      type: "object",
-      properties: {
-        alert_id: { type: "string", description: "The alert's id, from get_alerts." },
-        status: { type: "string", enum: ["traded", "missed"] },
-      },
-      required: ["alert_id", "status"],
-      additionalProperties: false,
-    },
-  },
 ];
 
 // post-execution confirmation toast, write tools only -- read tools are near-instant
 // local ref reads and fire too often to toast every one without it just flickering.
 const TOOL_RESULT_FLASH = {
   log_trade: (r) => (r && r.error ? "Trade log failed — " + r.error : "Trade logged — " + (r && r.summary)),
-  mark_alert_status: (r) => (r && r.error ? "Couldn't update alert — " + r.error : `Alert marked ${r && r.status}`),
 };
 
 function computeBadges(trades, stats) {
@@ -1191,27 +1074,6 @@ function App() {
   const activeSource = useMemo(() => (source === "AUTO" ? (isRegularUSHours(new Date(now)) ? "QQQ" : "NQ") : source), [source, now]);
   const activeSourceRef = useRef(activeSource); activeSourceRef.current = activeSource;
 
-  // ----- TradingView alerts (Firestore, Phase 2) -----
-  const [tvAlerts, setTvAlerts] = useState([]);
-  const tvAlertsRef = useRef([]); tvAlertsRef.current = tvAlerts;
-  const [tvAlertsStatus, setTvAlertsStatus] = useState("");
-  const firestoreDbRef = useRef(null);
-  const aiReviewAttemptedRef = useRef(new Set()); // session-only dedupe so a snapshot re-fire doesn't re-trigger a review already in flight
-  const outcomeAttemptedRef = useRef(new Set()); // per-alert-id dedupe so resolveAlertOutcomes doesn't refire the same write repeatedly
-
-  // ----- Indicator's own backtest trade history (Firestore /resolutions) -----
-  // Distinct from tvAlerts/outcome above: that's the dashboard's own
-  // approximate self-calibration against a live market feed proxy; this is
-  // the Pine script's own scorecard telling the dashboard, in real time,
-  // exactly when and why each setup it tracked actually resolved — see
-  // pinescript/polaris-scanner.pine's sendResolutionWebhook.
-  const [resolutions, setResolutions] = useState([]);
-
-  // ----- Live scanner status (single overwritten Firestore doc) -----
-  const [scannerStatus, setScannerStatus] = useState(null);
-  const scannerStatusRef = useRef(null); scannerStatusRef.current = scannerStatus;
-  const lastAnnouncedScanPhaseRef = useRef(null); // dedupes proactive phase announcements
-
   function rankVoices(vs) {
     const score = (v) =>
       (/premium/i.test(v.name) ? 10 : 0) +
@@ -1306,235 +1168,6 @@ function App() {
       } catch (e) { /* offline, local file://, or no deployed copy to compare against — skip silently */ }
     })();
   }, []);
-
-  // TradingView alerts: sign in anonymously and subscribe to /alerts live.
-  // No-ops entirely if firebaseConfig.js still has its placeholder values.
-  useEffect(() => {
-    const cfg = window.POLARIS_FIREBASE_CONFIG;
-    if (!cfg || !cfg.apiKey || cfg.apiKey === "REPLACE_ME") {
-      setTvAlertsStatus("Not configured — fill in firebaseConfig.js to enable TradingView alerts");
-      return;
-    }
-    if (typeof firebase === "undefined") {
-      setTvAlertsStatus("Firebase SDK failed to load — check your connection and reload");
-      return;
-    }
-    let unsubscribe = () => {};
-    let unsubscribeStatus = () => {};
-    let unsubscribeResolutions = () => {};
-    try {
-      const app = firebase.apps.length ? firebase.apps[0] : firebase.initializeApp(cfg);
-      const db = app.firestore();
-      firestoreDbRef.current = db;
-      setTvAlertsStatus("Connecting…");
-      firebase.auth().signInAnonymously().then(() => {
-        unsubscribe = db.collection("alerts").orderBy("timestamp", "desc").limit(50)
-          .onSnapshot(
-            (snap) => {
-              setTvAlerts(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-              setTvAlertsStatus("");
-            },
-            (err) => setTvAlertsStatus("Live connection error: " + (err.message || "check Firestore rules"))
-          );
-        unsubscribeStatus = db.collection("scannerStatus").doc("current")
-          .onSnapshot(
-            (doc) => setScannerStatus(doc.exists ? doc.data() : null),
-            (err) => { /* silent — the live status strip just stays hidden on error, the alerts list is the primary feature */ }
-          );
-        // 200, matching the cap Pine's own resolvedTime/etc. arrays use — no
-        // reason for the dashboard to keep less history than the indicator does.
-        unsubscribeResolutions = db.collection("resolutions").orderBy("timestamp", "desc").limit(200)
-          .onSnapshot(
-            (snap) => setResolutions(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
-            (err) => { /* silent — same reasoning as the scannerStatus listener above, this is a secondary panel, not the primary feature */ }
-          );
-      }).catch((err) => setTvAlertsStatus("Sign-in failed: " + (err.message || "check Firebase Auth is enabled")));
-    } catch (err) {
-      setTvAlertsStatus("Firebase init failed: " + (err.message || "check firebaseConfig.js"));
-    }
-    return () => { unsubscribe(); unsubscribeStatus(); unsubscribeResolutions(); };
-  }, []);
-
-  async function setAlertStatus(id, status) {
-    if (!firestoreDbRef.current) return;
-    try {
-      await firestoreDbRef.current.collection("alerts").doc(id).update({ status });
-    } catch (e) {
-      flash("Couldn't update alert — " + (e.message || "check your connection"));
-    }
-  }
-
-  // Polaris's own read on a TradingView alert, run silently once per alert
-  // (never spoken, never appended to the chat transcript) using whatever
-  // context is already on hand — journal stats, live market feed, scanner
-  // state, memory. This is the one place real LLM judgment can attach to
-  // the sweep/CISD/FVG pipeline, since the Pine indicator itself has no way
-  // to call an API in real time (see pinescript/polaris-scanner.pine).
-  function buildAlertReviewPrompt(a) {
-    const s = computeStats(tradesRef.current);
-    const lastCandle = candlesRef.current.length ? candlesRef.current[candlesRef.current.length - 1] : null;
-    const dayPct = lastCandle && dayInfoRef.current ? (((lastCandle.c - dayInfoRef.current.prevClose) / dayInfoRef.current.prevClose) * 100).toFixed(2) + "%" : "n/a";
-    return `You are POLARIS, an AI trading copilot, silently reviewing a setup a TradingView indicator just fired — before Landen sees it. You are not talking to him; you are annotating the alert with your own read. This is analysis, not a signal or advice — never phrase the note as an instruction to act.
-
-ALERT:
-${JSON.stringify({ setupType: a.setupType, setupLabel: setupTypeLabel(a.setupType), symbol: a.symbol, timeframe: a.timeframe, entryPrice: a.entryPrice, stopPrice: a.stopPrice, targetPrice: a.targetPrice, targetSource: a.targetSource, riskReward: a.riskReward, confidence: a.confidence })}
-Why the levels sit where they do (mechanical, not a judgment call): ${explainTradePlan(a)}
-
-CONTEXT:
-Journal: ${s ? `${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, current streak ${s.streak}.` : "No trades logged yet."}
-Market: ${lastCandle ? `last ${lastCandle.c}, day ${dayPct}.` : "no live feed."}
-Scanner: ${scanningRef.current ? "active" : "off"}. Recent events: ${scanEventsRef.current.length ? scanEventsRef.current.slice(0, 4).map((e) => e.msg).join(" | ") : "none"}.
-Indicator status (from the TradingView Pine scanner, live): ${scannerStatusRef.current ? `standing bias ${scannerStatusRef.current.structureBias || "none"}, HTF bias ${scannerStatusRef.current.htfBias || "none"}, regime ${scannerStatusRef.current.regime || "unknown"} (ADX ${scannerStatusRef.current.adx ?? "n/a"}), phase ${scannerStatusRef.current.phase || "idle"}${scannerStatusRef.current.wins != null && scannerStatusRef.current.losses != null && (scannerStatusRef.current.wins + scannerStatusRef.current.losses) > 0 ? `, live scorecard ${Math.round((scannerStatusRef.current.wins / (scannerStatusRef.current.wins + scannerStatusRef.current.losses)) * 100)}% (${scannerStatusRef.current.wins}/${scannerStatusRef.current.wins + scannerStatusRef.current.losses})` : ""}.` : "no status received yet."}
-Your own past calibration (verdict vs. actual outcome, resolved alerts only — small samples, weight accordingly): ${calibrationSummary() || "not enough resolved alerts yet"}.
-Memory: ${memoryRef.current || "none recorded"}.
-
-Judge this ONE setup on its own merits — structure quality, risk/reward, whether it fits the current market read. Respond with ONLY a single JSON object, nothing else, no markdown fences, no prose before or after:
-{"verdict":"favorable"|"caution"|"avoid","confidence":0-100,"note":"one short sentence, under 25 words, plain text"}`;
-  }
-
-  async function reviewAlertWithPolaris(a) {
-    const key = anthropicKeyRef.current.trim();
-    if (!key || !firestoreDbRef.current) return;
-    try {
-      const raw = await callAnthropic(key, buildAlertReviewPrompt(a), [{ role: "user", content: "Review this alert now." }], 200);
-      const m = raw.match(/\{[\s\S]*\}/);
-      if (!m) return;
-      const parsed = JSON.parse(m[0]);
-      const verdict = ["favorable", "caution", "avoid"].includes(parsed.verdict) ? parsed.verdict : null;
-      const confidence = Number(parsed.confidence);
-      const note = typeof parsed.note === "string" ? parsed.note.slice(0, 300) : "";
-      if (!verdict || !Number.isFinite(confidence) || confidence < 0 || confidence > 100 || !note) return;
-      await firestoreDbRef.current.collection("alerts").doc(a.id).update({
-        aiReviewed: true, aiVerdict: verdict, aiConfidence: Math.round(confidence), aiNote: note,
-      });
-      // The review itself stays silent/tab-only except for this one case: an
-      // "avoid" verdict is worth a proactive heads-up even if he's not on the
-      // ALERTS tab. Bypasses the shared cooldown like rule pre-warnings do —
-      // aiReviewAttemptedRef already caps this to once per alert, so there's
-      // no separate dedupe needed here.
-      if (verdict === "avoid") {
-        speakProactive(`Sir, I'd pass on this one — ${a.symbol || "the model"} ${a.setupType || "setup"}. ${note}`, { bypassCap: true });
-      }
-    } catch (e) { /* silent — a failed review just leaves the alert unreviewed; the trader still sees the raw setup */ }
-  }
-
-  useEffect(() => {
-    tvAlerts.forEach((a) => {
-      if (a.status !== "pending" || a.aiReviewed || aiReviewAttemptedRef.current.has(a.id)) return;
-      aiReviewAttemptedRef.current.add(a.id);
-      reviewAlertWithPolaris(a);
-    });
-  }, [tvAlerts]);
-
-  // Self-calibration: resolves each alert's real outcome (win/loss) against
-  // the live market feed's candles, using the same conservative tie-break
-  // the Pine indicator's own scorecard uses (both stop and target touched
-  // on the same bar counts as a loss, since intrabar order isn't knowable).
-  // This only advances while the MARKET tab's feed is running, and only as
-  // accurately as that feed's instrument/timeframe approximates the
-  // alert's own (the same QQQ/NQ-proxy relationship the rest of the app
-  // already leans on) -- an approximation, not a guarantee, but it's what
-  // lets Polaris eventually see whether its own past verdicts predicted
-  // anything, instead of judging every alert in a vacuum forever.
-  // Requires activeSource === "NQ": alert stop/target prices are always
-  // NQ/MNQ-point-scale (whatever the Pine chart itself trades in, tens of
-  // thousands), but the QQQ proxy feed's candles are share-price-scale
-  // (hundreds) -- comparing across that gap can never produce a real match,
-  // so this silently never resolved anything while on QQQ rather than
-  // failing loudly. Skipping outright while on QQQ avoids wasting a pass
-  // over every pending alert every tick for a comparison that can't work.
-  function resolveAlertOutcomes() {
-    if (!firestoreDbRef.current) return;
-    if (activeSourceRef.current !== "NQ") return;
-    const cs = candlesRef.current;
-    if (!cs || !cs.length) return;
-    tvAlertsRef.current.forEach((a) => {
-      if (a.outcome || outcomeAttemptedRef.current.has(a.id)) return;
-      if (a.entryPrice == null || a.stopPrice == null || a.targetPrice == null) return;
-      const ts = a.timestamp && a.timestamp.toDate ? a.timestamp.toDate().getTime() : null;
-      if (ts == null) return;
-      const isUp = (a.setupType || "").includes("UP") || (a.setupType || "").includes("BUY") || (a.setupType || "").includes("BULL");
-      for (const c of cs) {
-        const ct = new Date(c.t).getTime();
-        if (isNaN(ct) || ct <= ts) continue;
-        const hitStop = isUp ? c.l <= a.stopPrice : c.h >= a.stopPrice;
-        const hitTarget = isUp ? c.h >= a.targetPrice : c.l <= a.targetPrice;
-        if (hitStop || hitTarget) {
-          const outcome = hitTarget && !hitStop ? "win" : "loss";
-          outcomeAttemptedRef.current.add(a.id);
-          firestoreDbRef.current.collection("alerts").doc(a.id).update({ outcome }).catch(() => {});
-          break;
-        }
-      }
-    });
-  }
-
-  useEffect(() => {
-    resolveAlertOutcomes();
-  }, [candles, tvAlerts]);
-
-  // Per-verdict win rate: does an "avoid" call actually lose more than a
-  // "favorable" one? Only counts alerts that are both AI-reviewed and
-  // outcome-resolved, so it's silent (n=0, hidden) until real data exists.
-  const verdictAccuracy = useMemo(() => {
-    const buckets = { favorable: { w: 0, l: 0 }, caution: { w: 0, l: 0 }, avoid: { w: 0, l: 0 } };
-    tvAlerts.forEach((a) => {
-      if (a.aiReviewed && a.aiVerdict && a.outcome && buckets[a.aiVerdict]) {
-        buckets[a.aiVerdict][a.outcome === "win" ? "w" : "l"]++;
-      }
-    });
-    return buckets;
-  }, [tvAlerts]);
-
-  // Short summary string for prompts/UI, e.g. "favorable 71% (5/7), avoid 25% (1/4)" -- omits any bucket with n=0.
-  function calibrationSummary() {
-    const parts = [];
-    ["favorable", "caution", "avoid"].forEach((v) => {
-      const b = verdictAccuracy[v];
-      const n = b.w + b.l;
-      if (n > 0) parts.push(`${v} ${Math.round((b.w / n) * 100)}% (${b.w}/${n})`);
-    });
-    return parts.join(", ");
-  }
-
-  // Indicator performance tracking — breaks the aggregate scorecard win
-  // rate/EXP the Pine indicator already shows apart by which of its five
-  // real entry triggers (or confidence tier) actually produced each
-  // resolved alert, so a single blended number can't hide one trigger type
-  // quietly dragging the edge down while another carries it. Same win/loss →
-  // R convention as the Pine scorecard's own EXP (sumR / n): a loss is
-  // always -1R, a win pays its own real riskReward. Only resolved alerts
-  // (outcome set by resolveAlertOutcomes) count — n=0 buckets are hidden in
-  // the UI rather than shown as a misleading 0%.
-  const performanceByTrigger = useMemo(() => {
-    const buckets = {};
-    tvAlerts.forEach((a) => {
-      const r = alertRealizedR(a);
-      if (r == null) return;
-      const key = alertTriggerBucket(a);
-      if (!key) return;
-      if (!buckets[key]) buckets[key] = { n: 0, w: 0, sumR: 0 };
-      buckets[key].n++;
-      if (a.outcome === "win") buckets[key].w++;
-      buckets[key].sumR += r;
-    });
-    return buckets;
-  }, [tvAlerts]);
-
-  const performanceByConfidence = useMemo(() => {
-    const buckets = {};
-    tvAlerts.forEach((a) => {
-      const r = alertRealizedR(a);
-      if (r == null) return;
-      const tier = confidenceTier(a.confidence);
-      if (!tier) return;
-      if (!buckets[tier]) buckets[tier] = { n: 0, w: 0, sumR: 0 };
-      buckets[tier].n++;
-      if (a.outcome === "win") buckets[tier].w++;
-      buckets[tier].sumR += r;
-    });
-    return buckets;
-  }, [tvAlerts]);
 
   useEffect(() => {
     if (syncReadyRef.current) return;
@@ -1839,33 +1472,6 @@ Judge this ONE setup on its own merits — structure quality, risk/reward, wheth
     setScanMessage(`Scanned — review before logging · ${c.confidence.toUpperCase()} CONFIDENCE${c.notes ? " · " + c.notes : ""}`);
   }
 
-  // Pre-fills the order ticket from a live TradingView alert and jumps to
-  // LOG so "MARK TRADED" gets the trade most of the way into the journal —
-  // everything except exit, which isn't known until the trade actually
-  // closes (addTrade already refuses to save without one).
-  function applyAlertToJournal(a) {
-    const isUp = (a.setupType || "").includes("UP") || (a.setupType || "").includes("BUY") || (a.setupType || "").includes("BULL");
-    const instrument = (a.symbol || "").toUpperCase().includes("MNQ") ? "MNQ" : "NQ";
-    const noteParts = [`Live alert: ${setupTypeLabel(a.setupType)} · ${a.symbol || "—"} ${a.timeframe || ""}`.trim()];
-    if (a.confidence != null) noteParts.push(`indicator ${a.confidence}%`);
-    if (a.aiReviewed) noteParts.push(`Polaris ${a.aiVerdict || ""}${a.aiConfidence != null ? " " + a.aiConfidence + "%" : ""}${a.aiNote ? " — " + a.aiNote : ""}`);
-    setForm({
-      date: new Date().toISOString().slice(0, 10),
-      instrument,
-      direction: isUp ? "LONG" : "SHORT",
-      contracts: 1,
-      entry: a.entryPrice != null ? a.entryPrice : "",
-      exit: "",
-      stop: a.stopPrice != null ? a.stopPrice : "",
-      tp: a.targetPrice != null ? a.targetPrice : "",
-      setup: "Reversal",
-      notes: noteParts.join(" · "),
-    });
-    setScanMissingFields(new Set(["exit"]));
-    setScanMessage("Alert applied to the order ticket — add your exit once the trade closes, then Log Trade.");
-    setTab("LOG");
-  }
-
   function dismissScan() {
     setScanMessage("");
     setScanResults(null);
@@ -2082,27 +1688,6 @@ Rules:
     const fired = speakProactive("Still watching, sir — nothing's printed on the model yet.");
     if (fired) lastScanEventAtRef.current = Date.now();
   }, [now, scanning]);
-
-  // Live scanner status pings (Pine indicator's phase transitions, see
-  // pinescript/polaris-scanner.pine's buildStatusMessage). Speaks up mid-
-  // sequence instead of only ever hearing about a setup once it's complete
-  // — same shared proactive cooldown as the other events above, not a
-  // bypass, since this is informational rather than a rule warning.
-  useEffect(() => {
-    if (!scannerStatus || !scannerStatus.phase || scannerStatus.phase === "idle") return;
-    const key = `${scannerStatus.symbol || ""}:${scannerStatus.phase}:${scannerStatus.dir || ""}`;
-    if (lastAnnouncedScanPhaseRef.current === key) return;
-    lastAnnouncedScanPhaseRef.current = key;
-    const dirWord = scannerStatus.dir === "bull" ? "bullish" : scannerStatus.dir === "bear" ? "bearish" : "a";
-    const sym = scannerStatus.symbol || "the model";
-    const lines = {
-      sweep: `Sir, ${dirWord} sweep just printed on ${sym}. Watching for confirmation.`,
-      cisd: `Sir, that sweep on ${sym} just confirmed — watching the retrace now.`,
-      retrace: `Sir, ${sym} is retracing into the gap. This one's close.`,
-    };
-    const line = lines[scannerStatus.phase];
-    if (line) speakProactive(line);
-  }, [scannerStatus]);
 
   useEffect(() => {
     const threshold = Math.abs(pnlMilestoneRef.current);
@@ -2925,12 +2510,11 @@ ${memoryRef.current || "None recorded yet."}
 QUICK SNAPSHOT (for trivial questions — use your tools below for anything needing more detail than this):
 ${s ? `All-time: ${s.count} trades, net ${fmt$(s.net)}, win rate ${s.winRate.toFixed(1)}%, streak ${s.streak}. Today: ${todayTrades.length} trade(s), net ${fmt$(todayNet)}.` : "No trades logged yet."}
 Market: ${lastCandle ? `last ${lastCandle.c}${dayPctStr ? `, day ${dayPctStr}` : ""} (${marketFeedLabel()}).` : "not connected — the feed starts when the scanner runs on the MARKET tab."}
-Scanner: ${scanningRef.current ? "active" : "off"}${scannerStatusRef.current && scannerStatusRef.current.phase ? `, indicator phase "${scannerStatusRef.current.phase}"` : ""}.
-YOUR OWN CALIBRATION (how your past alert-review verdicts actually panned out, resolved alerts only): ${calibrationSummary() || "not enough resolved alerts yet to say"}. If he asks whether you're actually any good at this, answer honestly from these numbers — small samples mean small confidence, say so.
+Scanner: ${scanningRef.current ? "active" : "off"}.
 
 Contract reference: NQ = $20/point, MNQ = $2/point, tick 0.25.
 
-TOOLS: you have tools for fresh detail beyond the snapshot above — journal stats, recent trades, market candles, scanner/indicator status, and TradingView alerts. Use them when his question needs more than the snapshot gives you; don't call them for things already answered above. You can also take two direct actions with tools: log_trade to log a completed trade, and mark_alert_status to mark a pending alert traded or missed — use them when he clearly tells you to, never by guessing. After a tool call, briefly confirm what you found or did in your spoken reply.
+TOOLS: you have tools for fresh detail beyond the snapshot above — journal stats, recent trades, and market candles. Use them when his question needs more than the snapshot gives you; don't call them for things already answered above. You can also take one direct action with tools: log_trade to log a completed trade — use it when he clearly tells you to, never by guessing. After a tool call, briefly confirm what you found or did in your spoken reply.
 
 Hard rules:
 - Never predict price direction, give trade signals, or tell him to enter/exit a position. Analyze HIS data and process; frame market talk as education.
@@ -2955,8 +2539,8 @@ Hard rules:
 
   // dispatches a single tool_use call from POLARIS_TOOLS -- every branch is defensive
   // (coerce/clamp inputs, never throw) and returns {error:"..."} on failure instead so
-  // the model can adapt, matching the validation style parseTradeBlock/
-  // reviewAlertWithPolaris already use elsewhere in this file.
+  // the model can adapt, matching the validation style parseTradeBlock uses elsewhere
+  // in this file.
   async function executeTool(name, input) {
     input = input && typeof input === "object" ? input : {};
     try {
@@ -2991,33 +2575,6 @@ Hard rules:
             candles: cs.slice(-n).map((c) => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c })),
           };
         }
-        case "get_scanner_status": {
-          const ss = scannerStatusRef.current;
-          return {
-            scanning: scanningRef.current,
-            recentEvents: scanEventsRef.current.slice(0, 6).map((e) => ({ time: e.time, msg: e.msg })),
-            indicator: ss ? {
-              structureBias: ss.structureBias || null, htfBias: ss.htfBias || null, regime: ss.regime || null,
-              adx: ss.adx ?? null, phase: ss.phase || null, dir: ss.dir || null, symbol: ss.symbol || null,
-              wins: ss.wins ?? null, losses: ss.losses ?? null,
-            } : null,
-          };
-        }
-        case "get_alerts": {
-          const status = ["pending", "traded", "missed", "all"].includes(input.status) ? input.status : "pending";
-          const limit = Math.min(20, Math.max(1, Number.isFinite(Number(input.limit)) ? Number(input.limit) : 10));
-          const filtered = tvAlertsRef.current.filter((a) => status === "all" || a.status === status).slice(0, limit);
-          return {
-            alerts: filtered.map((a) => ({
-              id: a.id, status: a.status, setupType: a.setupType, setupLabel: setupTypeLabel(a.setupType),
-              symbol: a.symbol, timeframe: a.timeframe, entryPrice: a.entryPrice, stopPrice: a.stopPrice,
-              targetPrice: a.targetPrice, targetSource: a.targetSource, riskReward: a.riskReward,
-              confidence: a.confidence, aiReviewed: !!a.aiReviewed, aiVerdict: a.aiVerdict || null,
-              aiConfidence: a.aiConfidence ?? null, aiNote: a.aiNote || null, outcome: a.outcome || null,
-            })),
-            count: filtered.length,
-          };
-        }
         case "log_trade": {
           const { trade, valid } = coerceTradeInput(input);
           if (!valid) return { error: "Trade input incomplete or invalid — need instrument (NQ/MNQ), direction (LONG/SHORT), positive contracts, and numeric entry/exit at minimum." };
@@ -3028,21 +2585,6 @@ Hard rules:
           tradesRef.current = next;
           await persist(next);
           return { success: true, id: trade.id, pnl: +calcPnl(trade).toFixed(2), summary: `${trade.direction} ${trade.contracts} ${trade.instrument} logged for ${fmt$2(calcPnl(trade))}.` };
-        }
-        case "mark_alert_status": {
-          const id = typeof input.alert_id === "string" ? input.alert_id : "";
-          const status = input.status === "traded" || input.status === "missed" ? input.status : null;
-          if (!id || !status) return { error: "alert_id and a valid status ('traded' or 'missed') are required." };
-          const alert = tvAlertsRef.current.find((a) => a.id === id);
-          if (!alert) return { error: `No alert found with id ${id}. Call get_alerts to see current alert ids.` };
-          if (alert.status !== "pending") return { error: `Alert ${id} is already marked ${alert.status}.` };
-          if (!firestoreDbRef.current) return { error: "Alerts backend not connected." };
-          // writes Firestore directly here rather than calling the existing
-          // setAlertStatus(id,status) helper -- that helper swallows its own errors
-          // (flash()es and resolves undefined either way), which would make it
-          // impossible to report success/failure back to the model accurately.
-          await firestoreDbRef.current.collection("alerts").doc(id).update({ status });
-          return { success: true, id, status };
         }
         default:
           return { error: `Unknown tool: ${name}` };
@@ -3275,7 +2817,7 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
     speaking: "SPEAKING — TAP TO INTERRUPT",
   }[voiceState];
 
-  const tabs = ["POLARIS", "MARKET", "ALERTS", "INDICATOR", "DESK", "LOG", "JOURNAL", "RISK", "SETUP"];
+  const tabs = ["POLARIS", "MARKET", "DESK", "LOG", "JOURNAL", "RISK", "SETUP"];
 
   return (
     <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 700px at 50% -10%, #06182B 0%, ${C.bg} 55%)`, color: C.text, fontFamily: mono }}>
@@ -3853,262 +3395,6 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
             <div style={{ fontSize: 10, color: C.faint, lineHeight: 1.7 }}>
               The scanner detects when your conditions print — it is not a signal service and doesn't judge whether the trade is worth taking. Confirm on your own charts; QQQ levels won't match NQ prices, only the structure.
             </div>
-          </React.Fragment>
-        )}
-
-        {/* ================= ALERTS ================= */}
-        {tab === "ALERTS" && (
-          <React.Fragment>
-            <Panel>
-              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
-                <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan }}>TRADINGVIEW ALERTS</div>
-                <div style={{ fontSize: 10, color: C.faint, letterSpacing: "0.08em" }}>{tvAlerts.length} SHOWN</div>
-              </div>
-              <div style={{ color: C.muted, fontSize: 12, marginBottom: 4, lineHeight: 1.6 }}>
-                Setups fired by the Pine Script scanner on TradingView, received via the receiveAlert webhook and stored in Firestore. Not a signal service — review every one before acting.
-              </div>
-              {tvAlertsStatus && (
-                <div style={{ fontSize: 11, marginTop: 8, color: tvAlertsStatus.toLowerCase().includes("fail") || tvAlertsStatus.toLowerCase().includes("error") ? C.red : C.gold }}>
-                  {tvAlertsStatus}
-                </div>
-              )}
-            </Panel>
-
-            {!tvAlertsStatus && tvAlerts.length === 0 && (
-              <Panel>
-                <div style={{ textAlign: "center", padding: "30px 10px", color: C.faint, fontSize: 13 }}>
-                  No alerts yet — waiting on TradingView.
-                </div>
-              </Panel>
-            )}
-
-            {tvAlerts.map((a) => {
-              const isUp = (a.setupType || "").includes("UP") || (a.setupType || "").includes("BUY") || (a.setupType || "").includes("BULL");
-              const dirColor = isUp ? C.green : C.red;
-              const ts = a.timestamp && a.timestamp.toDate ? a.timestamp.toDate() : null;
-              return (
-                <Panel key={a.id} style={{ padding: "14px 16px" }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                      <span style={{ fontFamily: disp, fontSize: 14, fontWeight: 700, letterSpacing: "0.06em", color: dirColor }}>{setupTypeLabel(a.setupType)}</span>
-                      <span style={{ fontSize: 12, color: C.muted }}>{a.symbol || "—"} · {a.timeframe || "—"}</span>
-                      {ts && <span style={{ fontSize: 10, color: C.faint }}>{ts.toLocaleString()}</span>}
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      {a.outcome ? (
-                        <div style={{
-                          fontSize: 10, letterSpacing: "0.08em", fontWeight: 700, padding: "4px 10px", borderRadius: 4,
-                          color: a.outcome === "win" ? C.green : C.red,
-                          border: `1px solid ${a.outcome === "win" ? C.green : C.red}`,
-                          background: a.outcome === "win" ? "rgba(47,224,138,0.08)" : "rgba(255,85,102,0.08)",
-                        }}>
-                          {a.outcome === "win" ? "WON" : "LOST"}
-                        </div>
-                      ) : (
-                        a.entryPrice != null && a.stopPrice != null && a.targetPrice != null && (
-                          <div title="Still tracking — resolves once price trades through the stop or target on the live feed" style={{
-                            fontSize: 10, letterSpacing: "0.08em", fontWeight: 700, padding: "4px 10px", borderRadius: 4,
-                            color: C.faint, border: `1px solid ${C.border}`, background: "transparent",
-                          }}>
-                            OPEN
-                          </div>
-                        )
-                      )}
-                      <div style={{
-                        fontSize: 10, letterSpacing: "0.08em", fontWeight: 700, padding: "4px 10px", borderRadius: 4,
-                        color: a.status === "traded" ? C.green : a.status === "missed" ? C.faint : C.gold,
-                        border: `1px solid ${a.status === "traded" ? C.green : a.status === "missed" ? C.border : "rgba(245,200,107,0.5)"}`,
-                        background: a.status === "traded" ? "rgba(47,224,138,0.08)" : a.status === "missed" ? "transparent" : "rgba(245,200,107,0.08)",
-                      }}>
-                        {(a.status || "pending").toUpperCase()}
-                      </div>
-                    </div>
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 10, fontSize: 12 }}>
-                    <div><Label>Entry</Label><div style={{ color: C.text }}>{a.entryPrice != null ? a.entryPrice.toFixed(2) : "—"}</div></div>
-                    <div><Label>Stop</Label><div style={{ color: C.red }}>{a.stopPrice != null ? a.stopPrice.toFixed(2) : "—"}</div></div>
-                    <div><Label>Target</Label><div style={{ color: C.green }}>{a.targetPrice != null ? a.targetPrice.toFixed(2) : "—"}</div></div>
-                    <div><Label>R:R</Label><div style={{ color: C.text }}>{a.riskReward != null ? a.riskReward.toFixed(2) : "—"}</div></div>
-                    <div><Label>Confidence</Label><div style={{ color: C.text }}>{a.confidence != null ? a.confidence + "%" : "—"}</div></div>
-                  </div>
-                  <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.6, marginTop: 10 }}>{explainTradePlan(a)}</div>
-                  {a.aiReviewed ? (
-                    <div style={{
-                      display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12, padding: "8px 10px", borderRadius: 4,
-                      background: "rgba(0,212,255,0.06)", border: `1px solid ${C.border}`,
-                    }}>
-                      <span style={{
-                        flexShrink: 0, fontFamily: disp, fontSize: 9, fontWeight: 700, letterSpacing: "0.06em", padding: "3px 7px", borderRadius: 3,
-                        color: a.aiVerdict === "favorable" ? C.green : a.aiVerdict === "avoid" ? C.red : C.gold,
-                        border: `1px solid ${a.aiVerdict === "favorable" ? C.green : a.aiVerdict === "avoid" ? C.red : "rgba(245,200,107,0.5)"}`,
-                      }}>
-                        {(a.aiVerdict || "").toUpperCase()} {a.aiConfidence != null ? a.aiConfidence + "%" : ""}
-                      </span>
-                      <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5 }}>{a.aiNote}</div>
-                    </div>
-                  ) : a.status === "pending" && anthropicKey.trim() && (
-                    <div style={{ fontSize: 11, color: C.faint, marginTop: 12, fontStyle: "italic" }}>Polaris is reviewing this one…</div>
-                  )}
-                  {a.status === "pending" && (
-                    <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                      <button onClick={() => { applyAlertToJournal(a); setAlertStatus(a.id, "traded"); }}
-                        style={{ background: "rgba(47,224,138,0.14)", color: C.green, border: `1px solid rgba(47,224,138,0.4)`, borderRadius: 4, padding: "8px 14px", fontFamily: mono, fontWeight: 600, fontSize: 11, letterSpacing: "0.06em", cursor: "pointer" }}>
-                        MARK TRADED
-                      </button>
-                      <button onClick={() => setAlertStatus(a.id, "missed")}
-                        style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, padding: "8px 14px", fontFamily: mono, fontWeight: 600, fontSize: 11, letterSpacing: "0.06em", cursor: "pointer" }}>
-                        MARK MISSED
-                      </button>
-                    </div>
-                  )}
-                </Panel>
-              );
-            })}
-          </React.Fragment>
-        )}
-
-        {/* ================= INDICATOR ================= */}
-        {tab === "INDICATOR" && (
-          <React.Fragment>
-            <Panel>
-              <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>INDICATOR STATS</div>
-              <div style={{ color: C.muted, fontSize: 12, lineHeight: 1.6 }}>
-                What the Pine Script scanner is currently tracking, how well its past AI-reviewed verdicts have panned out, and win rate/expectancy broken out by what actually triggered each alert. The ALERTS tab is the raw feed and actions — this tab is the numbers behind it.
-              </div>
-            </Panel>
-
-            {scannerStatus && (
-              <Panel>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
-                  <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold }}>◆ LIVE INDICATOR STATUS</div>
-                  <div style={{ fontSize: 10, color: C.faint }}>{scannerStatus.symbol || ""} {scannerStatus.timeframe || ""}</div>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))", gap: 10, fontSize: 12 }}>
-                  <div><Label>Bias</Label><div style={{ color: scannerStatus.structureBias === "bull" ? C.green : scannerStatus.structureBias === "bear" ? C.red : C.faint }}>{scannerStatus.structureBias ? scannerStatus.structureBias.toUpperCase() : "—"}</div></div>
-                  <div><Label>HTF</Label><div style={{ color: scannerStatus.htfBias === "bull" ? C.green : scannerStatus.htfBias === "bear" ? C.red : C.faint }}>{scannerStatus.htfBias ? scannerStatus.htfBias.toUpperCase() : "—"}</div></div>
-                  <div><Label>Regime</Label><div style={{ color: scannerStatus.regime === "trend" ? C.text : C.faint }}>{scannerStatus.regime ? scannerStatus.regime.toUpperCase() : "—"}{scannerStatus.adx != null ? ` (${scannerStatus.adx.toFixed(1)})` : ""}</div></div>
-                  <div><Label>Phase</Label><div style={{ color: scannerStatus.phase && scannerStatus.phase !== "idle" ? C.gold : C.faint }}>{scannerStatus.phase ? scannerStatus.phase.toUpperCase() : "IDLE"}</div></div>
-                  {scannerStatus.wins != null && scannerStatus.losses != null && (scannerStatus.wins + scannerStatus.losses) > 0 && (
-                    <div><Label>Score</Label><div style={{ color: (scannerStatus.wins / (scannerStatus.wins + scannerStatus.losses)) >= 0.5 ? C.green : C.text }}>{Math.round((scannerStatus.wins / (scannerStatus.wins + scannerStatus.losses)) * 100)}% ({scannerStatus.wins}/{scannerStatus.wins + scannerStatus.losses})</div></div>
-                  )}
-                </div>
-              </Panel>
-            )}
-
-            {(verdictAccuracy.favorable.w + verdictAccuracy.favorable.l + verdictAccuracy.caution.w + verdictAccuracy.caution.l + verdictAccuracy.avoid.w + verdictAccuracy.avoid.l) > 0 && (
-              <Panel>
-                <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold, marginBottom: 8 }}>◆ POLARIS CALIBRATION</div>
-                <div style={{ fontSize: 11, color: C.faint, marginBottom: 8, lineHeight: 1.5 }}>
-                  How its own verdicts have actually panned out, resolved alerts only — small samples, weight accordingly.
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))", gap: 10, fontSize: 12 }}>
-                  {["favorable", "caution", "avoid"].map((v) => {
-                    const b = verdictAccuracy[v];
-                    const n = b.w + b.l;
-                    if (n === 0) return null;
-                    const pct = Math.round((b.w / n) * 100);
-                    return (
-                      <div key={v}>
-                        <Label>{v.charAt(0).toUpperCase() + v.slice(1)}</Label>
-                        <div style={{ color: v === "avoid" ? (pct < 50 ? C.green : C.red) : (pct >= 50 ? C.green : C.red) }}>{pct}% ({b.w}/{n})</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </Panel>
-            )}
-
-            {(Object.keys(performanceByTrigger).length > 0 || Object.keys(performanceByConfidence).length > 0) && (
-              <Panel>
-                <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold, marginBottom: 8 }}>◆ INDICATOR PERFORMANCE</div>
-                <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
-                  Win rate and EXP (average realized R) by what actually triggered each resolved alert, and by how confident the indicator was — resolved alerts only, small buckets mean small confidence.
-                </div>
-                {Object.keys(performanceByTrigger).length > 0 && (
-                  <React.Fragment>
-                    <Label>By trigger type</Label>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, fontSize: 12, marginTop: 4, marginBottom: 12 }}>
-                      {["sweep", "reversal", "continuation", "breakout", "htf_fvg", "structure"].map((key) => {
-                        const b = performanceByTrigger[key];
-                        if (!b || b.n === 0) return null;
-                        const pct = Math.round((b.w / b.n) * 100);
-                        const exp = b.sumR / b.n;
-                        return (
-                          <div key={key}>
-                            <Label>{TRIGGER_BUCKET_LABELS[key]}</Label>
-                            <div style={{ color: pct >= 50 ? C.green : C.red }}>{pct}% ({b.w}/{b.n})</div>
-                            <div style={{ fontSize: 11, color: exp >= 0 ? C.green : C.red }}>{exp >= 0 ? "+" : ""}{exp.toFixed(2)}R</div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </React.Fragment>
-                )}
-                {Object.keys(performanceByConfidence).length > 0 && (
-                  <React.Fragment>
-                    <Label>By confidence</Label>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, fontSize: 12, marginTop: 4 }}>
-                      {["high", "mid", "low"].map((key) => {
-                        const b = performanceByConfidence[key];
-                        if (!b || b.n === 0) return null;
-                        const pct = Math.round((b.w / b.n) * 100);
-                        const exp = b.sumR / b.n;
-                        return (
-                          <div key={key}>
-                            <Label>{CONFIDENCE_TIER_LABELS[key]}</Label>
-                            <div style={{ color: pct >= 50 ? C.green : C.red }}>{pct}% ({b.w}/{b.n})</div>
-                            <div style={{ fontSize: 11, color: exp >= 0 ? C.green : C.red }}>{exp >= 0 ? "+" : ""}{exp.toFixed(2)}R</div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </React.Fragment>
-                )}
-              </Panel>
-            )}
-
-            {resolutions.length > 0 && (
-              <Panel style={{ maxHeight: 420, overflowY: "auto" }}>
-                <div style={{ fontFamily: disp, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.gold, marginBottom: 4 }}>◆ BACKTEST TRADE HISTORY</div>
-                <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
-                  Every setup the indicator's own scorecard has actually resolved (win or loss) since this was turned on, with the exact timestamp and mechanical reasoning behind entry/stop/target — this is what's really behind the SCORE/EXP on the Pine chart's HUD, not just whatever happened to reach a live alert. Only covers resolutions from when the Pine script's "Send a webhook when a tracked setup resolves" option was enabled onward — Pine can't retroactively report history from before that.
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                  {resolutions.map((r) => {
-                    const ts = r.timestamp && r.timestamp.toDate ? r.timestamp.toDate() : null;
-                    const isWin = r.outcome === "win";
-                    return (
-                      <div key={r.id} style={{ borderBottom: `1px solid ${C.border}`, paddingBottom: 12 }}>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                            <span style={{
-                              fontSize: 10, letterSpacing: "0.08em", fontWeight: 700, padding: "3px 8px", borderRadius: 4,
-                              color: isWin ? C.green : C.red,
-                              border: `1px solid ${isWin ? C.green : C.red}`,
-                              background: isWin ? "rgba(47,224,138,0.08)" : "rgba(255,85,102,0.08)",
-                            }}>
-                              {isWin ? "WON" : "LOST"}
-                            </span>
-                            <span style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{setupTypeLabel(r.setupType)}</span>
-                            <span style={{ fontSize: 11, color: isWin ? C.green : C.red }}>{r.r != null ? `${r.r >= 0 ? "+" : ""}${r.r.toFixed(2)}R` : ""}</span>
-                          </div>
-                          <span style={{ fontSize: 10, color: C.faint }}>{ts ? ts.toLocaleString() : "—"}</span>
-                        </div>
-                        <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.6 }}>{explainTradePlan(r)}</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </Panel>
-            )}
-
-            {!scannerStatus && (verdictAccuracy.favorable.w + verdictAccuracy.favorable.l + verdictAccuracy.caution.w + verdictAccuracy.caution.l + verdictAccuracy.avoid.w + verdictAccuracy.avoid.l) === 0 && Object.keys(performanceByTrigger).length === 0 && Object.keys(performanceByConfidence).length === 0 && resolutions.length === 0 && (
-              <Panel>
-                <div style={{ textAlign: "center", padding: "30px 10px", color: C.faint, fontSize: 13 }}>
-                  No indicator data yet — waiting on TradingView.
-                </div>
-              </Panel>
-            )}
           </React.Fragment>
         )}
 

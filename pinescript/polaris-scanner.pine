@@ -1,442 +1,55 @@
 //@version=6
-indicator("Polaris Scanner — Sweep / CISD / FVG / ICT", overlay=true, max_lines_count=200, max_boxes_count=150, max_labels_count=300)
+indicator("Polaris Scanner — Liquidity & Structure Map", overlay=true, max_lines_count=200, max_boxes_count=150, max_labels_count=250)
 
 // ============================================================================
-// Polaris Scanner (Pine port) + ICT confluence markup
-// Core model matches Polaris's JS scanner (advanceScan/findSwings/fvgAt in
-// index.html): liquidity sweep -> change in state of delivery (CISD) ->
-// retrace into the resulting fair value gap -> rejection. On a completed
-// setup, fires a webhook alert shaped for the Polaris receiveAlert Cloud
-// Function (see functions/index.js). That core logic is unchanged below.
+// Polaris Scanner — a confluence map, not a signal generator
+// ============================================================================
+// This indicator used to run a sweep -> CISD -> FVG-retrace -> rejection
+// state machine that fired webhook alerts with computed entry/stop/target,
+// tracked a win-rate scorecard, and mirrored every fire/resolution into the
+// Polaris dashboard (functions/index.js, index.html's old ALERTS/INDICATOR
+// tabs, Twilio SMS/voice calls). All of that is gone as of this rewrite.
+// After trading off those alerts for a while, the conclusion was that
+// discretion beats acting on auto-fired signals -- so this goes back to
+// doing what the original JS scanner in index.html was actually good at:
+// marking liquidity, structure, and confluence, and leaving the entry
+// decision to the trader. Nothing in this file calls alert() or talks to
+// any webhook/backend anymore -- it is purely visual/informational.
 //
-// Everything else on the chart is confluence markup, independent of the
-// alert-firing state machine: order blocks, every significant fair value gap
-// (flipped to iFVG styling once violated, deleted once reclaimed), equal
-// highs/lows (liquidity pools -- the ONLY swings the scanner will treat as
-// sweepable; lone/unmatched swings are ignored as noise), a premium/discount
-// zone around the active swing range, and killzone session shading. Each has
-// its own show/hide toggle. Colors match Polaris's own dark cyan/gold
-// command-center theme:
-//   cyan   #00D4FF  -- structure / tracking (level line, entry line, HUD)
-//   gold   #F5C86B  -- attention (sweeps, liquidity pools, iFVG flips)
+// What's still here, each independently toggleable:
+//   - Standing structure bias (higher-high/higher-low vs lower-high/
+//     lower-low), optionally re-sourced from a dedicated "direction"
+//     timeframe instead of the chart's own swings.
+//   - Higher-timeframe bias (HTF close vs its own EMA).
+//   - Market regime (ADX) -- trend vs. chop, informational only, no gate.
+//   - Volume strength vs. its own recent average.
+//   - SMT divergence against a correlated symbol (default ES).
+//   - A 1-minute rejection-candle read.
+//   - Equal highs/lows (liquidity pools).
+//   - Order blocks (last opposing candle before a displacement move).
+//   - Every significant fair value gap, flipped to iFVG styling once
+//     violated, deleted once reclaimed.
+//   - A higher-timeframe FVG zone (the single most recent untested one per
+//     direction) -- stays visible while price trades into it instead of
+//     vanishing the instant it's tapped, since there's no trigger left to
+//     "consume" it.
+//   - Premium/discount zone + Fibonacci retracement/equilibrium/OTE band
+//     around the active swing range.
+//   - Killzone session shading (Asia/London/NY AM/NY PM) + a running
+//     average realized range per session.
+// All of it feeds a single top-right status HUD. Colors match Polaris's
+// dark cyan/gold command-center theme:
+//   cyan   #00D4FF  -- structure / tracking
+//   gold   #F5C86B  -- attention (liquidity pools, iFVG flips)
 //   green  #2FE08A  -- bullish / long bias
 //   red    #FF5566  -- bearish / short bias
-//
-// Entry/stop/target/confidence are NOT part of the original JS scanner
-// model (it only annotates structure, no trade parameters) -- these are
-// invented here specifically for the webhook payload:
-//   stop       = the sweep's actual extreme (the protected level -- not just
-//                the old swing price it swept) +/- an optional buffer
-//   target     = the nearest untested liquidity pool in the trade's
-//                direction (a real draw of liquidity, findLiquidityTarget)
-//                -- falls back to entry +/- risk * rMultiple only when no
-//                pool exists yet. A setup only actually alerts if that
-//                projected move clears BOTH minTargetAtrMult x ATR(14) AND
-//                minTargetPts (a flat, ATR-independent point floor -- a
-//                quiet-market ATR compression can satisfy the ATR-relative
-//                check on a handful of points alone, which is how a real
-//                4-point NQ alert got through; the two gates are ANDed so
-//                neither one alone can let a too-small move fire);
-//                smaller draws still resolve the sequence, they just don't
-//                fire a webhook.
-//   confidence = FVG size relative to ATR(14) blended with volume strength
-//                relative to its own recent average, a rough heuristic only
-// Adjust the inputs below, or the setupConfidence()/findLiquidityTarget()
-// formulas, to taste.
-//
-// Three more filters gate whether a sweep is even allowed to start a
-// sequence: a higher-timeframe bias check (HTF close vs its own EMA, via
-// request.security -- no short setups while the HTF is bullish and vice
-// versa), a market-regime check (ta.dmi's ADX -- no new setups while the
-// market is chopping, below the ADX threshold), and an optional session
-// filter (useSessionFilter -- no new setups outside the Asia/London/NY AM/
-// NY PM killzones once enabled). Volume is deliberately NOT a gate -- it
-// only ever informs the confidence score (see setupConfidence below), so
-// every setup still fires and you can judge its volume strength yourself.
-// Pine has no access to real bid/ask or DOM data -- the volume figure used
-// there is bar volume vs its own recent average, not true order flow, but
-// it's the closest proxy available. Pine indicators also cannot call an
-// LLM/API in real time (no such capability exists in the sandbox --
-// alert() is a one-way webhook fire, nothing reads a response back into
-// the script), so these are the ways this indicator can be genuinely
-// "market aware" on its own. Deeper judgment from Polaris's actual Claude
-// brain happens downstream instead, in index.html, once an alert reaches
-// the dashboard.
-//
-// Two kinds of webhook payloads go out, discriminated by a "kind" field the
-// Cloud Function branches on: "setup" (buildAlertMessage) fires once, on a
-// fully completed setup, and gets AI-reviewed on the dashboard. "status"
-// (buildStatusMessage) fires on every phase advance (sweep detected -> CISD
-// confirmed -> retracing) with the indicator's current bias/HTF/regime/phase
-// -- a lightweight, constantly-overwritten "what am I watching right now"
-// ping, not stored history, so Polaris can speak up mid-sequence instead of
-// only ever hearing about a setup once it's already done.
-//
-// A built-in scorecard tracks every fired setup until price actually trades
-// through its stop or target, tallying wins/losses on the HUD ("SCORE").
-// Since Pine replays the whole script over all available chart history on
-// every load, this isn't just forward-tracking -- it's a real backtest of
-// the current rule set the moment you paste this in, not something you
-// have to wait days to accumulate.
-//
-// V2 rework: all five original problems are now addressed, though not all
-// equally battle-tested -- see the note at the very end of this block.
-//   1. Signal contradiction -- useContradictionFilter/minBarsAfterSetup
-//      block a new setup within minBarsAfterSetup of the last one that
-//      actually fired in the opposite direction (lastSetupDir/
-//      lastSetupBar), checked in shouldFireSetup(). Only
-//      useContradictionFilter=false disables it.
-//   2. Coverage gaps -- detectReversal() (any swing break, not just a
-//      pool-eligible one), detectContinuation() (a with-trend pullback on
-//      a fresh displacement candle while structureBias already agrees),
-//      and detectBreakout() (a displacement close beyond the widest
-//      tracked swing on that side) are real now, tried in that order after
-//      detectSweep() on every bar with no active sequence. Each is
-//      independently gated by allowSweep/allowReversal/allowContinuation/
-//      allowBreakout (plus allowHtfFvgReject for the fifth trigger below --
-//      all five ran together for a stretch per V2 Phase 7, now back to only
-//      allowSweep on by default as of V2 Phase 9, see the note near the end
-//      of this block for why). Whichever detector actually triggers
-//      is reported as the webhook's setupType via setupTypeForTrigger()
-//      (sweep -> LIQUIDITY_SWEEP_*, reversal -> CHoCH_*, continuation and
-//      breakout -> BOS_*, reusing functions/index.js's existing allow-list).
-//   3. Fragile stop -- useWickTolerance/wickToleranceAtr widen the stop
-//      beyond the sweep's actual wick by an ATR-scaled buffer, at all 4
-//      completion sites. This widens where the stop SITS; it does not
-//      pretend a real touched stop wouldn't fill -- that would misrepresent
-//      real broker/order-fill behavior, so there's no "grace period" logic.
-//   4. Generic TP fallback -- unchanged from the earlier liquidity-pool
-//      targeting pass (computeTarget()/findLiquidityTarget()); still
-//      reports targetSource so the dashboard can explain which it used.
-//   5. No visual guidance -- solved in an earlier pass (buildTradePlanDrawings);
-//      showTradePlan now independently controls it (used to just mirror
-//      showVisuals, which still separately controls the sweep/CISD-in-
-//      progress markup), and showTpLadder optionally adds TP1/TP2 lines at
-//      50%/75% of the distance to the final target -- purely visual, the
-//      webhook payload/scorecard/target still resolve against the one real
-//      target regardless.
-// Plus two general signal-quality floors, also live: raiseAdxThreshold/
-// raisedAdxThreshold (stricter ADX minimum), useVolFloor/volFloorMult (min
-// volume ratio), minBarRangeAtr (reject a dead/illiquid confirmation bar),
-// and minSeqFvgSizeAtr (reject a too-small confirming FVG) -- all checked
-// in shouldFireSetup() except minSeqFvgSizeAtr, which depends on that
-// specific sequence's FVG and is checked at the 4 completion sites instead.
-// Every new gate defaults to a value that roughly reproduces prior
-// behavior (raiseAdxThreshold/useVolFloor off, minBarRangeAtr/
-// minSeqFvgSizeAtr low/zero) so this pass doesn't quietly starve you of
-// signals -- turn them up deliberately to actually tighten things.
-//
-// Two more real gates, prompted directly by a live 4-point NQ alert and its
-// follow-up review: minTargetPts (grpTrade) is an unconditional floor on the
-// projected move in raw instrument points, ANDed with the existing
-// minTargetAtrMult check -- a quiet-market ATR compression could satisfy "3x
-// ATR" on a handful of points alone, which is exactly how that alert got
-// through; now both gates must pass. minRiskReward (grpTrade) is a genuine
-// floor on reward/risk itself, checked at all 4 completion sites -- riskReward
-// was already computed and reported in the webhook payload, but nothing
-// actually gated on it, so a setup could clear both size floors while still
-// carrying a disproportionately wide stop.
-//
-// Liquidity-pool significance (grpEQ): Swing now tracks touches (how many
-// swings have clustered at that price zone, starting at 1), not just a bare
-// isPool boolean. Sweep-eligibility (detectSweep/detectReversal) is
-// unchanged -- still fires on the first match (touches=2). But
-// findLiquidityTarget() (the real TARGET) and the new findLiquidityLevels()
-// (TP1/TP2) now require touches >= minPoolTouches, so "target" doesn't
-// default to meaning "the nearest level that barely qualified once." The
-// TP1/TP2 ladder itself is also no longer arbitrary 50%/75% splits of the
-// distance to target -- it now draws the nearest one or two REAL liquidity
-// pools actually sitting between entry and target, drawing fewer than two
-// lines rather than fabricating a percentage-based one if that's all that
-// exists in range.
-//
-// SMT divergence (grpSMT): pulls pivot highs/lows from a correlated symbol
-// (smtSymbol, default the E-mini S&P) at the identical pivot cadence, so a
-// confirmed pivot here lines up bar-for-bar with one there -- no separate
-// swing-tracking state needed for the other symbol. Bearish divergence =
-// we make a higher high the correlated symbol doesn't confirm; bullish is
-// the mirror at lows. Captured once, at sweep/reversal/continuation/
-// breakout trigger time (seqSmtAligned), and blended into setupConfidence()
-// alongside FVG size and volume -- informational only, like volume, never a
-// gate.
-//
-// Dashboard integration additions: buildAlertMessage() also reports
-// "targetSource" ("pool" if computeTarget() found a real untested liquidity
-// pool, "fallback" if it fell back to the R-multiple projection instead) --
-// this is what lets Polaris explain, not just display, why a given target
-// sits where it does. buildStatusMessage() also carries the live
-// scoreWins/scoreLosses tally on every ping, so the dashboard's win-rate
-// reading stays current without waiting for the next full setup to fire.
-//
-// A note on the new entry triggers: reversal/continuation/breakout are
-// real, working implementations, but -- unlike detectSweep(), which mirrors
-// the original JS model this whole indicator was ported from -- they're
-// this author's own reasonable-but-invented interpretation of those ICT
-// concepts, not something battle-tested against the original model.
-// allowReversal/allowContinuation/allowBreakout/allowHtfFvgReject all ran
-// together for a stretch (V2 Phase 7, all five on at once) specifically to
-// judge each honestly via the scorecard's SCORE/EXP rows rather than
-// leaving them permanently untested -- as of V2 Phase 9 (see near the end
-// of this block) they're back to off by default, having plausibly diluted
-// the aggregate win rate with unproven signal types blended into sweep,
-// the one trigger this indicator was actually built and proven around.
-//
-// Multi-timeframe framework (grpHTF/grpDirection/grpM1): a top-down, four-layer
-// read instead of everything happening on one timeframe.
-//   1H  BIAS      -- useHtfBias/htfTimeframe (existing, unchanged): HTF close vs
-//                    its own EMA, gates counter-bias setups.
-//   15m DIRECTION -- useMtfDirection/directionTimeframe (new): structureBias
-//                    itself gets re-sourced from a dedicated timeframe's pivots
-//                    (dirPh/dirPl via request.security, compared against
-//                    dirPrevHigh/dirPrevLow the same way SMT compares its own
-//                    pivot pair) instead of the chart's own swings. Off ->
-//                    structureBias reverts to exactly the old chart-native
-//                    behavior. This is a GATE, same as bias always was --
-//                    shouldFireSetup()'s biasOk check is unchanged, it just now
-//                    reads a structureBias sourced from 15m instead of 5m.
-//   5m  STATE     -- unchanged: the sweep/CISD/retrace sequence tracker below
-//                    still runs on whatever timeframe the chart itself is on.
-//   1m  ENTRIES   -- useM1Confirmation (new): the most recently confirmed
-//                    1-minute candle's OHLC (m1o/m1h/m1l/m1c via
-//                    request.security), reduced to a simple long-wick rejection
-//                    read (m1RejectionBear/m1RejectionBull) and folded into
-//                    setupConfidence() as one more sub-score. Deliberately
-//                    informational only, never a gate -- stacking a fourth
-//                    mandatory confluence layer on top of bias/direction/state
-//                    risked strangling an already-infrequent signal further.
-// All three request.security pulls (HTF, direction, 1m) run unconditionally
-// every bar regardless of their toggles, same CW10003 reasoning as the
-// pre-existing htfClose/htfEma/SMT pulls.
-//
-// V2 Phase 6 -- a fifth entry trigger, prompted directly by a real missed
-// setup: a clean sweep + BOS + 1-minute entry that never fired, traced back
-// to the 1H/4H chart showing price tap into a real fair value gap and
-// reverse from it. The core sweep/CISD/retrace engine only ever looks at
-// FVGs on the chart's own native timeframe -- the existing HTF pulls
-// (grpHTF/grpDirection) inform bias/direction, but nothing before this
-// looked at higher-timeframe FVG structure itself, so a setup built around
-// tapping one was structurally invisible no matter how clean the lower-
-// timeframe confirmation was. detectHtfFvgReject(dir) (grpHtfFvg,
-// allowHtfFvgReject -- defaulted off here at first, now on by default as of
-// V2 Phase 7 below, same as the other invented triggers) tracks
-// the single most recent untested fair value gap on a dedicated higher
-// timeframe (htfFvgTimeframe, default 60 = 1H) by reusing fvgAtBull/
-// fvgAtBear as-is inside a request.security call -- the exact same
-// technique smtPh/smtPl and dirPh/dirPl already use to evaluate a pure
-// bar-series function in another context, no new gap-detection logic
-// needed. The moment price on the CHART's own timeframe wicks into that
-// tracked zone and closes back out the far side, it starts a sequence --
-// which still has to clear the same CISD + fresh lower-timeframe-FVG +
-// retrace + rejection pipeline every other trigger does before it actually
-// fires a webhook, so this adds a new way IN without loosening what counts
-// as a real completed setup. Maps to the already-reserved
-// FVG_RETEST_BULL/FVG_RETEST_BEAR webhook setupType codes (functions/
-// index.js's VALID_SETUP_TYPES has carried these since before this trigger
-// existed) -- no backend change needed. minHtfFvgSizeAtr floors how big
-// that HTF gap has to be (x the chart's own ATR(14), the same yardstick
-// every other size filter in this file already uses) before it's even
-// tracked, and a tracked-but-never-tapped gap gets dropped if price later
-// closes decisively through it the wrong way, so a long-stale, already-
-// invalidated zone can't fire out of context months later. showHtfFvg
-// draws whichever zone is currently tracked so this is visible on the
-// chart, not just a silent internal state.
-//
-// V2 Phase 7 -- prompted by a live session where a strong one-directional
-// grind produced a wall of overlapping ⚡ SWEEP labels (each a real but
-// invalidated attempt -- sweep is a mean-reversion trigger and there was no
-// reversal to catch) and a direct request to run every trigger type live
-// rather than opting them in one at a time. Two changes:
-//   1. allowSweep/allowReversal/allowContinuation/allowBreakout/
-//      allowHtfFvgReject all now default TRUE. This does not relax any
-//      individual trigger's own logic -- it just means all five compete for
-//      whichever sequence starts first, each still independently gated by
-//      shouldFireSetup() (bias/HTF/regime/session/contradiction) same as
-//      always.
-//   2. showTriggerLabels (grpScan, default FALSE, separate from
-//      showVisuals): with five trigger types live, a choppy session can
-//      draw a "⚡ TYPE" label on every attempt, most of which invalidate
-//      before completing -- exactly the wall-of-labels situation that
-//      prompted this. showVisuals still controls the tracked-level line
-//      while a sequence is active and the completed trade-plan markup;
-//      showTriggerLabels now separately controls only the per-attempt
-//      start label, off by default so the chart only shows what actually
-//      resolves. Turn it on to watch attempts live if you want the detail.
-// Also tightened eqTolPct's default from 0.05 to 0.01 (its own minval) --
-// fewer marginal swings now qualify as "equal," which should mean fewer
-// low-conviction pool matches feeding into sweep/reversal in the first
-// place, on top of the label-visibility fix above.
-//
-// Fibonacci / equilibrium / OTE (grpFib, showFib, default true): a third,
-// purely visual/informational overlay on the same active swing range
-// premium/discount already uses -- draws the standard retracement ladder
-// (23.6/38.2/50/61.8/78.6%), labels the 50% level "EQ 50" (the same price
-// premium/discount's own eq splits on), and shades the 61.8-78.6% band as
-// the OTE (optimal trade entry) zone. Unlike a fixed top-of-range/bottom-
-// of-range Fib draw, the ladder is oriented by structureBias -- measured
-// from the high down for a bull bias, from the low up for a bear bias --
-// so the OTE band always lands on the actual pullback-into-continuation
-// side of the range, not just a fixed convention that might point the
-// wrong way. Defaults to low->high (0%=low) when there's no bias yet, the
-// same bias-agnostic fallback premium/discount already uses. Never a gate
-// or a confidence input -- purely a visual reference, same as premium/
-// discount and the killzone shading.
-//
-// V2 Phase 8 -- prompted by a real MNQ scorecard reading (win rate/EXP) that
-// covers all five trigger types blended into one number, with no way to see
-// which trigger is actually earning that edge and which might be dragging it
-// down. buildAlertMessage() now includes a "triggerType" field carrying the
-// raw seqTriggerType value ("sweep"/"reversal"/"continuation"/"breakout"/
-// "htf_fvg") alongside the existing setupType -- setupType alone can't
-// distinguish continuation from breakout (both report BOS_UP/BOS_DOWN, see
-// setupTypeForTrigger() above, since functions/index.js's VALID_SETUP_TYPES
-// has no separate breakout slot), so this is a second, untranslated field
-// specifically so the dashboard can break performance out by all five real
-// trigger types instead of four. Purely additive to the webhook payload --
-// setupType, riskReward, targetSource, everything else is unchanged, and
-// functions/index.js accepts the new field as optional so alerts fired
-// before this change still validate fine (they just come through with no
-// triggerType, and index.html falls back to inferring what it can from
-// setupType for that older data). See index.html's "Indicator performance
-// tracking" section for how the dashboard actually uses this.
-//
-// V2 Phase 9 -- a deliberate tightening pass, prompted directly by a live MNQ read
-// (25/64, +0.18R) landing after V2 Phase 7 turned every trigger type on at once, and
-// a direct request to prioritize a genuinely higher win rate over raw signal coverage.
-// allowReversal/allowContinuation/allowBreakout/allowHtfFvgReject all flip back to
-// FALSE -- allowSweep is the only trigger left on. Sweep is the one entry trigger
-// ported directly from the original JS model this whole indicator is based on; the
-// other four are this author's own invented extensions, added specifically to fix a
-// coverage-gap problem, not because they'd been shown to carry their own edge. Running
-// all five at once (Phase 7) very plausibly diluted the aggregate win rate with
-// unproven signal types blended into the one proven one -- this reverts to the
-// highest-conviction core, deliberately trading signal frequency for quality, and
-// leaves it to the INDICATOR PERFORMANCE panel on the dashboard (see index.html) to
-// verify with real data whether any of the other four are worth re-enabling later,
-// rather than everything running at once by default again. Three more inputs raise
-// the bar the surviving sweep trigger has to clear: minRiskReward from 1.5 to 2.0 (a
-// setup needs a materially better reward-to-risk to alert at all), minPoolTouches
-// from 2 to 3 (a target has to be a level multiple prior swings have actually
-// clustered at, not just the first bare match), and useSessionFilter flips to true
-// (new setups only start during the four killzones, cutting out low-conviction
-// dead-session chop) alongside raiseAdxThreshold flipping to true (requires
-// raisedAdxThreshold, not just the base Market Regime ADX floor, before a new setup
-// can start). All four of these were already-declared, already-wired inputs from
-// earlier phases -- nothing structurally new here, just turning the existing quality
-// dials up together instead of leaving them at their looser defaults.
-//
-// V2 Phase 10 -- prompted by a real read after Phase 9: sweep-only + the tightened
-// gates produced a genuinely strong result (8/9, +1.86R) but only 9 setups across a
-// full month, too infrequent to actually trade regularly. Rather than reopening the
-// other four trigger types (the exact move that diluted the win rate in Phase 7),
-// this phase walks back Phase 9's four added quality dials ONE AT A TIME, cheapest
-// (least likely to cost win rate) first, re-measuring on the INDICATOR tab after
-// each before touching the next -- so any change in SCORE/EXP can be attributed to
-// a specific lever instead of guessing which of several simultaneous changes
-// mattered.
-// Step 1 (done, reverted): raiseAdxThreshold tried at FALSE -- dropping the
-// stricter raisedAdxThreshold(30) floor on top of the base Market Regime filter
-// looked like the least-justified of Phase 9's four additions going in (sweep is a
-// liquidity-grab/mean-reversion pattern, not inherently a strong-trend one), but the
-// real data said otherwise: 36 total setups but win rate collapsed to 19/36 (53%,
-// +0.58R), and isolating just the newly-unlocked ADX 20-30 band specifically showed
-// an 11/27 (41%) win rate -- a real, large quality drop, not sample noise. The
-// strong-trend requirement was carrying more genuine signal than expected.
-// raiseAdxThreshold reverts back to TRUE here; the stricter ADX floor stays.
-// Step 2 (done, null result): maxBarsValid raised from 40 to 60 -- unlike the ADX
-// floor, this doesn't change which setups are allowed to START, only gives ones
-// that already passed every other gate more time to complete the CISD + fresh FVG +
-// retrace + rejection pipeline before expiring. Real-data result: zero change in
-// SCORE/EXP -- confirming maxBarsValid was never the actual bottleneck, no
-// sequence that ever mattered was timing out at 40 bars. Left at 60 (harmless,
-// just inert) and moving on.
-// Step 3 (done, mixed/negative result): useSessionFilter tried at FALSE --
-// unlike the last two, this gate blocks new sequences from even STARTING outside
-// the four killzones, a structural loosening of when a sequence can begin rather
-// than what quality bar it clears once it does. Real-data result: only 1 net new
-// trade (9->10) -- essentially no frequency gain -- and win rate still dropped
-// (8 wins->7 wins, 89%->70%, +1.86R->+1.1R). Counterintuitively the win COUNT
-// went down even though relaxing a filter should only ever add trades: because
-// only one sequence is ever tracked as active at a time, letting an earlier
-// out-of-killzone attempt claim that slot can preempt what would have been a
-// different, killzone-only sequence using different candles for its entry -- so
-// this filter isn't purely additive the way the ADX floor was. Reverted back to
-// TRUE.
-// Step 4 (not yet done, only if a future step isn't enough on its own): lower
-// minRiskReward back toward 1.5 -- the one remaining lever with a real, direct
-// cost, since some newly included winners will be smaller.
-//
-// Given steps 1-3 all either hurt quality or did nothing, the next real lever
-// under consideration is reintroducing ONE additional trigger type at a time
-// (starting with reversal, the closest in character to sweep) and judging it by
-// its OWN isolated row in index.html's INDICATOR PERFORMANCE panel -- not the
-// blended aggregate SCORE, which is exactly what let V2 Phase 7's all-five-at-once
-// approach hide a bad trigger's losses inside a good one's wins. Not yet done as
-// of this commit.
-//
-// V2 Phase 11 -- prompted directly by a repeated question that had no real answer:
-// "how far back / how clustered in time were these trades." The trade-plan markup
-// (tpEntryLine/tpStopLine/etc.) only ever tracked the single MOST RECENT setup and
-// cleared itself once resolved -- there was never a persistent record to check
-// against, only inference from where the chart happened to stop loading history.
-// This phase adds a genuine running log instead: resolvedTime/resolvedDir/
-// resolvedOutcome/resolvedR/resolvedTriggerType (parallel arrays, newest unshifted
-// to the front, capped at 200 entries so memory doesn't grow unbounded over years
-// of replay) populated at the exact same point pendingDir/etc. already resolve
-// against price in the scorecard block above -- no new detection logic, just
-// recording what that block already computes. pendingTriggerType is a new array
-// parallel to pendingDir/pendingEntry/pendingStop/pendingTarget, threading
-// seqTriggerType through from fire time to resolution time so the log (and any
-// future per-trigger analysis) can see which detector produced each trade.
-// Two visible surfaces, both new grpLog inputs: showResolutionMarkers (default on)
-// draws a small "W"/"L" label at the exact bar each trade resolved on, capped at
-// the 50 most recent (its own array, deleting the oldest as new ones arrive) so
-// scrolling the chart shows the real temporal distribution of activity at a
-// glance; showTradeLog (default on) drives a second table, bottom-right, separate
-// from the existing top-right HUD, listing the logTableRows (default 10, max 20)
-// most recent resolved trades with date/direction/result/R -- the table is
-// declared with a fixed 21 rows (20 max possible + header) regardless of the
-// current logTableRows value, so a table.cell call can never index past what the
-// table itself was declared with. max_labels_count raised 250->300 for headroom
-// alongside the existing EQH/EQL/order-block/trade-plan label usage.
 // ============================================================================
 
 // ---------- inputs ----------
 grpScan = "Scanner"
 swingStrength = input.int(3, "Swing strength (bars each side)", minval=1, maxval=10, group=grpScan)
-maxBarsValid  = input.int(60, "Max bars before a sequence expires", minval=5, group=grpScan)
 maxSwings     = input.int(20, "Max recent swings tracked per side", minval=5, maxval=50, group=grpScan)
-showVisuals   = input.bool(true, "Show sweep/CISD/trade-plan markup", group=grpScan)
 showHud       = input.bool(true, "Show status panel (top-right)", group=grpScan)
-// Separate from showVisuals -- showVisuals still controls the tracked-level
-// line while a sequence is in progress and the completed trade-plan markup;
-// this controls only the per-attempt "⚡ SWEEP/REVERSAL/CONTINUATION/
-// BREAKOUT/HTF FVG" label that fires the instant a sequence STARTS. With all
-// 5 trigger types on, most starts never complete (a real signal, not a bug --
-// see shouldFireSetup), so this defaults off to avoid a chart full of labels
-// for attempts that immediately invalidate. Turn on to watch attempts live.
-showTriggerLabels = input.bool(false, "Show a label every time a new sequence starts (can get noisy with multiple setup types on)", group=grpScan)
-
-grpTrade = "Trade parameters (for the webhook payload only)"
-stopBufferPts     = input.float(0.0, "Stop buffer beyond the sweep extreme (points)", minval=0, group=grpTrade)
-rMultiple         = input.float(2.0, "Fallback target R-multiple (only used if no liquidity pool sits in the trade's direction)", minval=0.1, group=grpTrade)
-minTargetAtrMult  = input.float(3.0, "Min projected move to actually alert (x ATR) -- smaller draws complete the sequence but don't fire", minval=0, step=0.5, group=grpTrade)
-// ATR-relative alone isn't enough -- a genuinely quiet stretch (thin holiday session,
-// low-liquidity overnight hours) can compress ATR far enough that "3x ATR" is satisfied
-// by a handful of points, which is how a real 4-point NQ alert got through on the 5m
-// chart. This is a second, unconditional floor in raw instrument points -- both gates
-// must pass, so a quiet market can no longer talk its way around the ATR check.
-minTargetPts      = input.float(20.0, "Absolute minimum projected move to alert (points, instrument-native -- independent of ATR)", minval=0, step=1, group=grpTrade)
-// riskReward is already computed and reported in the webhook payload, but nothing
-// actually gated on it -- a setup could clear both size floors above while still
-// carrying a disproportionately wide stop (e.g. a 25pt reward on an 80pt risk),
-// which is arguably a worse trade than the tiny-reward problem those floors fix.
-// This is a genuine, unconditional minimum on reward/risk itself, checked
-// alongside them at all 4 completion sites (0 disables, same pattern as the
-// other "0 disables" gates in this file).
-minRiskReward     = input.float(2.0, "Min risk:reward to alert (reward/risk, 0 disables)", minval=0, step=0.1, group=grpTrade)
-
-grpHook = "Webhook"
-webhookSecret = input.string("", "Webhook secret (must match WEBHOOK_SECRET)", group=grpHook)
 
 grpFVG = "Fair Value Gaps"
 showAllFvg    = input.bool(true, "Mark every significant FVG on the chart", group=grpFVG)
@@ -454,30 +67,24 @@ maxOB        = input.int(12, "Max order blocks shown", minval=1, maxval=40, grou
 grpEQ = "Equal Highs / Lows"
 showEQ   = input.bool(true, "Mark equal highs/lows (liquidity pools)", group=grpEQ)
 eqTolPct = input.float(0.01, "Equal tolerance (% of price)", minval=0.01, step=0.01, group=grpEQ)
-// sweep-eligibility (isPool, used by detectSweep/detectReversal) is untouched by this --
-// it still fires on the first match, same as always. This only raises the bar for what
-// counts as a real TARGET/TP: a level barely qualifying on one match isn't necessarily
-// meaningful liquidity, vs. one multiple prior swings have actually clustered at.
-minPoolTouches = input.int(3, "Min touches for a level to count as a real target/TP (2 = first equal-high/low match; higher = more established levels only)", minval=2, maxval=6, group=grpEQ)
 
 grpPD = "Premium / Discount"
 showPD = input.bool(false, "Shade premium/discount zone", group=grpPD)
 
 grpFib = "Fibonacci / Equilibrium / OTE"
 // Same active swing range as premium/discount above (hiS/loS from the most
-// recent tracked swing high/low) -- purely visual/informational, same as
-// SMT/M1/premium-discount, never a gate. Draws the standard retracement
-// ladder (23.6/38.2/61.8/78.6%), calls out 50% specifically as equilibrium
-// (same price premium/discount's own eq already splits on), and shades the
-// 61.8-78.6% band as the OTE (optimal trade entry) zone -- oriented off
-// structureBias so it sits on the actual pullback-into-continuation side of
-// the range (measured from the high down for a bull bias, from the low up
-// for a bear bias), not just a fixed top-of-range/bottom-of-range choice.
+// recent tracked swing high/low) -- purely visual/informational. Draws the
+// standard retracement ladder (23.6/38.2/61.8/78.6%), calls out 50%
+// specifically as equilibrium (same price premium/discount's own eq
+// already splits on), and shades the 61.8-78.6% band as the OTE (optimal
+// trade entry) zone -- oriented off structureBias so it sits on the actual
+// pullback-into-continuation side of the range (measured from the high
+// down for a bull bias, from the low up for a bear bias), not just a fixed
+// top-of-range/bottom-of-range choice.
 showFib = input.bool(true, "Show Fibonacci retracement ladder + equilibrium + OTE zone on the active swing range", group=grpFib)
 
 grpKZ = "Killzones (New York time)"
-showKillzones       = input.bool(false, "Shade killzone sessions", group=grpKZ)
-useSessionFilter    = input.bool(true, "Only allow new setups during a killzone session", group=grpKZ)
+showKillzones         = input.bool(false, "Shade killzone sessions", group=grpKZ)
 showSessionVolatility = input.bool(true, "Track average range per session on the HUD", group=grpKZ)
 asiaSession   = input.session("2000-0000", "Asia killzone", group=grpKZ)
 londonSession = input.session("0200-0500", "London killzone", group=grpKZ)
@@ -485,161 +92,71 @@ nyAmSession   = input.session("0930-1100", "NY AM killzone", group=grpKZ)
 nyPmSession   = input.session("1330-1600", "NY PM killzone", group=grpKZ)
 
 grpHTF = "Higher Timeframe Bias"
-useHtfBias   = input.bool(true, "Require higher-timeframe agreement", group=grpHTF)
+showHtfBias  = input.bool(true, "Show higher-timeframe bias on the HUD", group=grpHTF)
 htfTimeframe = input.timeframe("60", "Higher timeframe", group=grpHTF)
 htfEmaLen    = input.int(50, "HTF EMA length", minval=5, group=grpHTF)
 
-// ---------- multi-timeframe framework ----------
-// Four layers, top-down: 1H bias (grpHTF above), 15m direction (this group --
-// structureBias itself, normally sourced from whatever timeframe the chart is
-// on, gets re-sourced from a dedicated higher timeframe instead), 5m current
-// state (the sweep/CISD/retrace sequence tracker below -- unchanged, still
-// runs on whatever timeframe the chart is actually on), and 1m entries (next
-// group -- a finer-grained rejection-candle read folded into confidence only,
-// never a gate, so it can't choke signal frequency on top of the other three
-// layers).
 grpDirection = "Direction (structure-bias timeframe)"
 useMtfDirection    = input.bool(true, "Source structure bias/direction from a dedicated timeframe instead of the chart's own swings", group=grpDirection)
 directionTimeframe = input.timeframe("15", "Direction timeframe", group=grpDirection)
 
-grpM1 = "1-Minute Entry Confirmation"
-useM1Confirmation = input.bool(true, "Factor a 1-minute rejection-candle read into confidence score (never blocks a signal)", group=grpM1)
-
 grpRegime = "Market Regime"
-useRegimeFilter = input.bool(true, "Only scan when the market is trending (ADX filter)", group=grpRegime)
-adxLen          = input.int(14, "ADX length", minval=2, group=grpRegime)
-adxThreshold    = input.float(20, "Min ADX to allow new setups", minval=5, maxval=50, group=grpRegime)
-
-grpScore = "Scorecard"
-showScorecard = input.bool(true, "Track win rate on the HUD", group=grpScore)
-maxPending    = input.int(50, "Max pending signals tracked at once", minval=5, maxval=200, group=grpScore)
-sendResolutionWebhook = input.bool(true, "Send a webhook when a tracked setup resolves (win/loss)", group=grpScore, tooltip="Mirrors this backtest's win/loss resolutions into the dashboard as they happen. Only fires going forward from when this is enabled -- Pine can't retroactively fire alert() for bars that already resolved before an alert existed, so history from before you enable this stays chart-only.")
+showRegime   = input.bool(true, "Show trend/chop (ADX) on the HUD", group=grpRegime)
+adxLen       = input.int(14, "ADX length", minval=2, group=grpRegime)
+adxThreshold = input.float(20, "ADX level considered \"trending\"", minval=5, maxval=50, group=grpRegime)
 
 grpVolume = "Volume"
-useVolumeConfirm = input.bool(true, "Factor volume strength into confidence score (never blocks a signal)", group=grpVolume)
-volAvgLen = input.int(20, "Volume average length", minval=5, group=grpVolume)
-
-// ---------- V2 groundwork + Phase 2 gates ----------
-// All four setup types are real, working implementations now (see the
-// detect*() functions below, filled in during V2 Phase 3) -- reversal/
-// continuation/breakout default OFF not because they're unimplemented, but
-// because they're this author's own interpretation of those ICT concepts
-// rather than something ported from the original JS model the way sweep is
-// (see the header note above), so turning each on is meant to be a
-// deliberate, individually-scrutinized choice. Everything under
-// grpGates/grpMemory/grpSL is now live, checked by shouldFireSetup()
-// (and, for minSeqFvgSizeAtr and the wick-tolerant stop buffer, at the 4
-// completion sites directly) -- all default to values that roughly
-// reproduce Phase 1's behavior (raiseAdxThreshold/useVolFloor default off,
-// minBarRangeAtr/minSeqFvgSizeAtr default low/zero), so this pass doesn't
-// suddenly starve you of signals, but every gate is now real, not cosmetic.
-grpSetups = "Setup Types"
-allowSweep        = input.bool(true, "Allow sweep-based setups", group=grpSetups)
-allowReversal     = input.bool(false, "Allow reversal-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
-allowContinuation = input.bool(false, "Allow continuation-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
-allowBreakout     = input.bool(false, "Allow breakout-based setups (author's own ICT interpretation -- see header note)", group=grpSetups)
-
-grpGates = "Signal Quality Gates"
-useVolFloor       = input.bool(false, "Require a minimum volume ratio to fire", group=grpGates)
-volFloorMult      = input.float(0.8, "Min volume ratio if the floor above is enabled", minval=0, step=0.1, group=grpGates)
-raiseAdxThreshold = input.bool(true, "Require a stricter ADX minimum than the Market Regime setting", group=grpGates)
-raisedAdxThreshold = input.float(30, "Stricter ADX minimum, used only if the toggle above is on", minval=5, maxval=60, group=grpGates)
-minBarRangeAtr    = input.float(0.15, "Min bar range to trust as signal context, x ATR (0 disables)", minval=0, step=0.05, group=grpGates)
-minSeqFvgSizeAtr  = input.float(0.0, "Min size of a sequence's own confirming FVG, x ATR (0 disables)", minval=0, step=0.05, group=grpGates)
-
-grpMemory = "Contradiction Memory"
-useContradictionFilter = input.bool(true, "Block a new setup that directly contradicts one just fired", group=grpMemory)
-minBarsAfterSetup      = input.int(10, "Min bars after a completed setup before the opposite direction can fire", minval=0, group=grpMemory)
-
-grpSL = "Wick-Tolerant Stops"
-useWickTolerance  = input.bool(true, "Widen the stop beyond the sweep wick so a single spike can't take it out", group=grpSL)
-wickToleranceAtr  = input.float(0.25, "Extra stop buffer beyond the sweep's wick, x ATR", minval=0, step=0.05, group=grpSL)
-
-grpVisualsV2 = "Trade Plan Visuals"
-showTradePlan  = input.bool(true, "Show entry/stop/target trade-plan markup (independent of the sweep/CISD markup toggle above)", group=grpVisualsV2)
-lineExtension  = input.int(15, "Trade-plan line length (bars)", minval=1, maxval=60, group=grpVisualsV2)
-showTpLadder   = input.bool(false, "Also draw TP1/TP2 lines at 50%/75% of the distance to the final target", group=grpVisualsV2)
-showConfidence = input.bool(true, "Show the confidence % on the setup label", group=grpVisualsV2)
+showVolume = input.bool(true, "Show volume strength vs. its own average on the HUD", group=grpVolume)
+volAvgLen  = input.int(20, "Volume average length", minval=5, group=grpVolume)
 
 grpSMT = "SMT Divergence"
-useSmtConfluence = input.bool(true, "Factor SMT divergence into confidence score (never blocks a signal)", group=grpSMT)
-smtSymbol        = input.symbol("CME_MINI:ES1!", "Correlated symbol to compare swing points against", group=grpSMT)
+showSmt   = input.bool(true, "Show SMT divergence against a correlated symbol on the HUD", group=grpSMT)
+smtSymbol = input.symbol("CME_MINI:ES1!", "Correlated symbol to compare swing points against", group=grpSMT)
 
-grpHtfFvg = "Higher-Timeframe FVG Reject"
-allowHtfFvgReject = input.bool(false, "Allow higher-timeframe FVG reject setups (author's own extension -- see header note)", group=grpHtfFvg)
-htfFvgTimeframe   = input.timeframe("60", "Timeframe to detect fair value gaps on (e.g. 60 = 1H, 240 = 4H)", group=grpHtfFvg)
-minHtfFvgSizeAtr  = input.float(1.0, "Min HTF FVG size to track, x chart ATR(14) (0 disables the floor)", minval=0, step=0.1, group=grpHtfFvg)
-showHtfFvg        = input.bool(true, "Draw the currently tracked HTF FVG zone on the chart", group=grpHtfFvg)
+grpM1 = "1-Minute Read"
+showM1 = input.bool(true, "Show a 1-minute rejection-candle read on the HUD", group=grpM1)
 
-// Persistent log of every resolved trade (date, direction, outcome, realized R,
-// trigger type) -- unlike the trade-plan markup above (which only ever tracks the
-// single most recent setup and clears itself once resolved), this is a real running
-// history, so "how far back did these trades actually happen, and how clustered in
-// time" has a real answer instead of having to be inferred from where the chart
-// stops loading data.
-grpLog = "Trade Log"
-showTradeLog          = input.bool(true, "Show a table of the most recent resolved trades (date, direction, outcome, R)", group=grpLog)
-logTableRows          = input.int(10, "Trades shown in the log table", minval=1, maxval=20, group=grpLog)
-showResolutionMarkers = input.bool(true, "Mark each resolution on the chart (small W/L label at the bar it resolved on)", group=grpLog)
+grpHtfFvg = "Higher-Timeframe FVG"
+showHtfFvg       = input.bool(true, "Draw + show the currently tracked HTF FVG zone", group=grpHtfFvg)
+htfFvgTimeframe  = input.timeframe("60", "Timeframe to detect fair value gaps on (e.g. 60 = 1H, 240 = 4H)", group=grpHtfFvg)
+minHtfFvgSizeAtr = input.float(1.0, "Min HTF FVG size to track, x chart ATR(14) (0 disables the floor)", minval=0, step=0.1, group=grpHtfFvg)
 
 // ---------- types ----------
 type Swing
     int   idx
     float price
-    bool  isPool  // true once this swing clusters with another (an equal high/low) -- only pool swings are sweep-eligible
-    int   touches // how many swings (including this one) have clustered at this price zone -- starts at 1, rises with each further match. Sweep-eligibility (isPool) still fires on the first match (touches=2) unchanged; target/TP selection can require a stricter minPoolTouches so "target" doesn't mean "the nearest barely-qualifying level"
+    bool  isPool  // true once this swing clusters with another (an equal high/low)
 
-// ---------- persistent state: core scanner ----------
+// ---------- persistent state ----------
 var array<Swing> swingHighs = array.new<Swing>()
 var array<Swing> swingLows  = array.new<Swing>()
 
-// standing directional filter, independent of the sweep/CISD scanner --
-// a higher high / higher low sets it bullish, a lower high / lower low sets
-// it bearish. The scanner only starts sequences that agree with it, so a
-// bull bias won't fire short setups until structure actually breaks bearish.
+// standing directional filter -- a higher high / higher low sets it
+// bullish, a lower high / lower low sets it bearish. Purely informational
+// now (the HUD's BIAS/DIR row) -- nothing gates on it anymore.
 var string structureBias = na   // "bull" | "bear"
-
-var string seqDir        = na   // "bull" | "bear"
-var string seqPhase      = na   // "sweep" | "cisd" | "retrace"
-var float  seqLevel      = na
-var float  seqCisdTarget = na
-var int    seqSweepBar   = na
-var bool   seqHasFvg     = false
-var float  seqFvgLo      = na
-var float  seqFvgHi      = na
-var float  seqSweepExtreme = na  // actual high/low the sweep candle reached -- the real "protected" level, stop lives beyond this, not just beyond the old swing price
-var bool   seqSmtAligned = false  // SMT reading captured at sweep time, not re-read later -- see setupConfidence()
-var string seqTriggerType = na    // "sweep" | "reversal" | "continuation" | "breakout" -- which detector actually started this sequence, mapped to a webhook setupType at completion
-
-// last setup that actually fired a webhook (not just completed the
-// sequence) -- what useContradictionFilter checks against, so a quiet
-// completion (below minTargetAtrMult/minSeqFvgSizeAtr) never blocks a
-// future opposite-direction signal.
-var string lastSetupDir = na   // "bull" | "bear"
-var int    lastSetupBar = na
 
 // SMT divergence tracking -- smtPrevHigh/smtPrevLow remember the correlated
 // symbol's own last confirmed pivot so the next one can be compared against
 // it; smtBearDiv/smtBullDiv are set the moment our own swing confirms (see
-// the swing-detection block below) and read once, at whichever completion
-// site fires next, by setupConfidence().
+// the swing-detection block below).
 var float smtPrevHigh = na
 var float smtPrevLow  = na
 var bool  smtBearDiv  = false
 var bool  smtBullDiv  = false
 
-// Direction (15m by default) tracking -- same pattern as the SMT pair above:
-// dirPrevHigh/dirPrevLow remember the direction timeframe's own last confirmed
-// pivot so the next one can be compared against it, updating structureBias
-// directly (see the swing-detection block below) when useMtfDirection is on.
+// Direction (15m by default) tracking -- same pattern as the SMT pair
+// above: dirPrevHigh/dirPrevLow remember the direction timeframe's own last
+// confirmed pivot so the next one can be compared against it, updating
+// structureBias directly when useMtfDirection is on.
 var float dirPrevHigh = na
 var float dirPrevLow  = na
 
 // Higher-timeframe FVG tracking (htfFvgTimeframe, default 1H) -- the single
-// most recent untested gap in each direction. "Tested" means either
-// consumed as a trigger or invalidated (price closed decisively through it
-// the wrong way without ever rejecting) -- either way it stops being a live
-// zone until a new one forms. Boxes are visual only (showHtfFvg).
+// most recent untested gap in each direction. "Tested" means price closed
+// decisively through it the wrong way without ever rejecting -- at that
+// point it stops being a live zone until a new one forms. Boxes are visual
+// only (showHtfFvg).
 var float htfBullFvgLo = na
 var float htfBullFvgHi = na
 var bool  htfBullFvgTested = true // true = no active untested zone
@@ -648,23 +165,6 @@ var float htfBearFvgHi = na
 var bool  htfBearFvgTested = true
 var box   htfFvgBullBox = na
 var box   htfFvgBearBox = na
-
-// ---------- persistent state: trade-plan markup (single most recent completed setup) ----------
-var line  tpEntryLine = na
-var line  tpStopLine  = na
-var line  tpTargetLine = na
-var line  tp1Line     = na  // TP-ladder lines (showTpLadder) -- na/unused unless the toggle is on
-var line  tp2Line     = na
-var label tpEntryLbl  = na
-var label tpStopLbl   = na
-var label tpTargetLbl = na
-var label tp1Lbl      = na
-var label tp2Lbl      = na
-var label tpSetupLbl  = na
-var string tpDir      = na   // "bull" | "bear" -- direction of the tracked plan
-var float  tpStop     = na
-var float  tpTarget   = na
-var bool   tpActive   = false
 
 // ---------- persistent state: confluence markup ----------
 var array<box> fvgBoxes     = array.new<box>()
@@ -692,47 +192,10 @@ var label fib618Lbl  = na
 var label fib786Lbl  = na
 var box   oteBox     = na
 
-// ---------- persistent state: scorecard ----------
-// every fired setup gets recorded here until price actually trades through
-// its stop or target; tallied into scoreWins/scoreLosses once resolved.
-// Pine replays this over the whole visible chart history on every reload,
-// so this reflects a real backtest under the current rules, not just
-// signals fired since you last opened the chart.
-// sumR is why win% alone is the wrong number to judge this by: every fired
-// setup already clears minRiskReward, so a loss always costs exactly -1R
-// (it resolves at the stop) but a win pays out whatever THAT trade's real
-// reward:risk was, not a fixed amount. A 35% win rate at 3R average beats
-// a 65% win rate at 1.2R average. sumR / (wins+losses) is real expectancy
-// in R-multiples -- the number that actually says whether this is working.
-var array<string> pendingDir         = array.new<string>()
-var array<float> pendingEntry        = array.new<float>()
-var array<float> pendingStop         = array.new<float>()
-var array<float> pendingTarget       = array.new<float>()
-var array<string> pendingTriggerType = array.new<string>()  // parallel to pendingDir -- which detector fired this pending trade, carried through to the resolved log below
-var array<bool>  pendingTargetSource = array.new<bool>()  // true = real liquidity pool, false = R-multiple fallback -- parallel to pendingDir, carried through to the resolution webhook so the dashboard can explain the target the same way buildAlertMessage's targetSource already lets it explain a live setup
-var int scoreWins   = 0
-var int scoreLosses = 0
-var float sumR      = 0.0
-
-// ---------- persistent state: trade log (every RESOLVED trade, not just the
-// pending ones above) ----------
-// Genuine running history, capped at 200 entries (oldest drops off) so memory
-// doesn't grow unbounded over years of replay -- unlike the single-most-recent
-// trade-plan markup above, this is what actually answers "how far back / how
-// clustered in time were these" instead of leaving it to be inferred from where
-// the chart happens to stop loading data. Newest entries are unshifted to the
-// front, so index 0 is always the most recent resolution.
-var array<int>    resolvedTime        = array.new<int>()
-var array<string> resolvedDir         = array.new<string>()
-var array<string> resolvedOutcome     = array.new<string>()  // "win" | "loss"
-var array<float>  resolvedR           = array.new<float>()
-var array<string> resolvedTriggerType = array.new<string>()
-var array<label>  resolutionMarkerLbls = array.new<label>()  // capped separately (50) -- a chart-visibility budget, not the same cap as the log itself
-
 // ---------- persistent state: per-session volatility ----------
-// running average of each killzone's realized range (high-low across the
-// whole session), folded in the moment a session ends -- not a signal
-// filter, just an "how much does this session actually move" readout.
+// running average realized range (session high - low) for each killzone,
+// folded in the moment a session ends -- not a signal, just an "how much
+// does this session actually move" reference.
 var string curSession     = na
 var float  curSessionHigh = na
 var float  curSessionLow  = na
@@ -745,7 +208,7 @@ var int    countNyAm      = 0
 var float  sumRangeNyPm   = 0.0
 var int    countNyPm      = 0
 
-// ---------- swing detection (mirrors findSwings) + equal highs/lows ----------
+// ---------- swing detection + equal highs/lows ----------
 ph = ta.pivothigh(swingStrength, swingStrength)
 pl = ta.pivotlow(swingStrength, swingStrength)
 
@@ -758,20 +221,16 @@ smtPl = request.security(smtSymbol, timeframe.period, ta.pivotlow(swingStrength,
 
 // Direction source: same pivot function pulled from a dedicated timeframe (15m by
 // default) instead of a correlated symbol -- called unconditionally every bar
-// regardless of useMtfDirection, matching the smtPh/smtPl pattern above (a
-// request.security call gated by an if-block trips Pine's CW10003 warning).
+// regardless of useMtfDirection (a request.security call gated by an if-block
+// trips Pine's CW10003 warning).
 dirPh = request.security(syminfo.tickerid, directionTimeframe, ta.pivothigh(swingStrength, swingStrength))
 dirPl = request.security(syminfo.tickerid, directionTimeframe, ta.pivotlow(swingStrength, swingStrength))
 
 if not na(ph)
     int newHighIdx = bar_index - swingStrength
-    // pool-matching runs unconditionally (it decides which swings are sweep-eligible
-    // liquidity pools) -- showEQ only controls whether the match gets drawn. Also
-    // tracks how many swings have now clustered at this zone (matchTouches), so
-    // target/TP selection can later prefer well-established levels over a level
-    // that just barely qualified on its first match.
+    // pool-matching runs unconditionally (it decides which swings count as
+    // liquidity pools) -- showEQ only controls whether the match gets drawn.
     bool poolMatch = false
-    int matchTouches = 1
     if array.size(swingHighs) > 0
         float tol = ph * eqTolPct / 100
         for i = 0 to array.size(swingHighs) - 1
@@ -779,8 +238,6 @@ if not na(ph)
             if math.abs(s.price - ph) <= tol
                 poolMatch := true
                 s.isPool := true
-                s.touches := s.touches + 1
-                matchTouches := s.touches
                 if showEQ
                     line.new(s.idx, s.price, newHighIdx, ph, color=color.new(#F5C86B, 30), style=line.style_dotted, width=1)
                     label.new(newHighIdx, ph, "EQH", style=label.style_label_down, color=color.new(#0B1626, 15), textcolor=#F5C86B, size=size.tiny)
@@ -799,14 +256,13 @@ if not na(ph)
                 structureBias := "bear"
     if not na(smtPh)
         smtPrevHigh := smtPh
-    array.unshift(swingHighs, Swing.new(newHighIdx, ph, poolMatch, matchTouches))
+    array.unshift(swingHighs, Swing.new(newHighIdx, ph, poolMatch))
     if array.size(swingHighs) > maxSwings
         array.pop(swingHighs)
 
 if not na(pl)
     int newLowIdx = bar_index - swingStrength
     bool poolMatchLow = false
-    int matchTouchesLow = 1
     if array.size(swingLows) > 0
         float tol = pl * eqTolPct / 100
         for i = 0 to array.size(swingLows) - 1
@@ -814,8 +270,6 @@ if not na(pl)
             if math.abs(s.price - pl) <= tol
                 poolMatchLow := true
                 s.isPool := true
-                s.touches := s.touches + 1
-                matchTouchesLow := s.touches
                 if showEQ
                     line.new(s.idx, s.price, newLowIdx, pl, color=color.new(#F5C86B, 30), style=line.style_dotted, width=1)
                     label.new(newLowIdx, pl, "EQL", style=label.style_label_up, color=color.new(#0B1626, 15), textcolor=#F5C86B, size=size.tiny)
@@ -832,7 +286,7 @@ if not na(pl)
                 structureBias := "bull"
     if not na(smtPl)
         smtPrevLow := smtPl
-    array.unshift(swingLows, Swing.new(newLowIdx, pl, poolMatchLow, matchTouchesLow))
+    array.unshift(swingLows, Swing.new(newLowIdx, pl, poolMatchLow))
     if array.size(swingLows) > maxSwings
         array.pop(swingLows)
 
@@ -852,29 +306,8 @@ if useMtfDirection
         dirPrevLow := dirPl
 
 // ---------- helpers ----------
-// mirrors cisdTargetBear/Bull(cs, idx) -- only ever called at idx == current
-// bar (offset 0), i.e. right when a sweep is first detected this bar.
-cisdTargetBear() =>
-    int j = 0
-    if close[j] <= open[j]
-        j := j + 1
-    int start = -1
-    while j <= 200 and close[j] > open[j]
-        start := j
-        j := j + 1
-    start >= 0 ? open[start] : low[0]
-
-cisdTargetBull() =>
-    int j = 0
-    if close[j] >= open[j]
-        j := j + 1
-    int start = -1
-    while j <= 200 and close[j] < open[j]
-        start := j
-        j := j + 1
-    start >= 0 ? open[start] : high[0]
-
-// mirrors fvgAt(cs, k, dir) -- off is bars back from current bar for candle "k"
+// mirrors fvgAt(cs, k, dir) from the original JS scanner -- off is bars back
+// from current bar for candle "k"
 fvgAtBear(int off) =>
     bool has = low[off + 2] > high[off]
     [has, has ? high[off] : na, has ? low[off + 2] : na]
@@ -883,9 +316,10 @@ fvgAtBull(int off) =>
     bool has = high[off + 2] < low[off]
     [has, has ? high[off + 2] : na, has ? low[off] : na]
 
-// atrVal, htfBias and adxVal must all be computed unconditionally every bar --
-// ta.*/request.security calls inside a function or if-block that's only
-// invoked conditionally trip Pine's CW10003 warning.
+// atrVal, htfBias, adxVal, m1*, and the HTF FVG request.security pulls must
+// all be computed unconditionally every bar -- ta.*/request.security calls
+// inside a function or if-block that's only invoked conditionally trip
+// Pine's CW10003 warning.
 atrVal = ta.atr(14)
 
 // higher-timeframe bias -- HTF close above/below its own EMA. Repaint-safe:
@@ -894,16 +328,15 @@ htfClose = request.security(syminfo.tickerid, htfTimeframe, close, lookahead=bar
 htfEma   = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_off)
 string htfBias = htfClose > htfEma ? "bull" : htfClose < htfEma ? "bear" : na
 
-// market regime -- ADX below threshold means chop/no clear trend
+// market regime -- ADX below threshold means chop/no clear trend. Purely
+// informational (the HUD's ADX row) -- nothing gates on this anymore.
 [diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
-bool regimeOk = not useRegimeFilter or adxVal >= adxThreshold
+bool regimeOk = adxVal >= adxThreshold
 
-// 1-minute entry read: the most recently confirmed 1m candle's OHLC, pulled
-// unconditionally every bar (same CW10003 reasoning as htfClose/htfEma above).
-// A long wick relative to the candle's own range is a simple, defensible
-// rejection-leg proxy -- informational only (see grpM1/useM1Confirmation),
-// folded into setupConfidence(), never a gate, so it can't choke signal
-// frequency on top of the 1H bias / 15m direction / 5m state gates.
+// 1-minute read: the most recently confirmed 1m candle's OHLC, pulled
+// unconditionally every bar (same CW10003 reasoning as htfClose/htfEma
+// above). A long wick relative to the candle's own range is a simple,
+// defensible rejection-leg proxy -- informational only, shown on the HUD.
 [m1o, m1h, m1l, m1c] = request.security(syminfo.tickerid, "1", [open, high, low, close], lookahead=barmerge.lookahead_off)
 float m1Range = m1h - m1l
 bool m1RejectionBear = m1Range > 0 and (m1h - math.max(m1o, m1c)) > m1Range * 0.5
@@ -917,442 +350,23 @@ bool m1RejectionBull = m1Range > 0 and (math.min(m1o, m1c) - m1l) > m1Range * 0.
 [htfFvgBullHasR, htfFvgBullLoR, htfFvgBullHiR] = request.security(syminfo.tickerid, htfFvgTimeframe, fvgAtBull(0), lookahead=barmerge.lookahead_off)
 [htfFvgBearHasR, htfFvgBearLoR, htfFvgBearHiR] = request.security(syminfo.tickerid, htfFvgTimeframe, fvgAtBear(0), lookahead=barmerge.lookahead_off)
 
-// declared here (not down by the order-block section it was originally
-// written for) because detectContinuation()/detectBreakout() below also
-// need it, and Pine requires an identifier declared above the code that
-// reads it -- same lesson as the killzone-block move earlier in this file.
+// declared here (not down by the order-block section it feeds) because
+// Pine requires an identifier declared above the code that reads it.
 bool isDisplacement = math.abs(close - open) > atrVal * dispMult
 
 // order flow proxy -- Pine has no access to real bid/ask or DOM data, so
 // this is bar volume vs its own recent average, not true order flow.
-// Informational only: folded into the confidence score below and shown on
-// the HUD, but never blocks a sweep or CISD from firing.
+// Informational only, shown on the HUD.
 avgVolume = ta.sma(volume, volAvgLen)
 float volRatio = avgVolume > 0 ? volume / avgVolume : na
 
-// heuristic only, not predictive -- averages whichever 30-95 sub-scores are
-// currently enabled: FVG size relative to recent volatility (always in),
-// volume strength relative to its own recent average (if useVolumeConfirm),
-// and SMT divergence agreement (if useSmtConfluence, using the reading
-// captured at sweep time -- see seqSmtAligned). None of these ever block a
-// signal from firing; they're only ever ingredients in the confidence
-// number, not gates.
-setupConfidence(float fvgLo, float fvgHi, float atr, float volRatioNow, bool smtAligned, bool m1Aligned) =>
-    float size = fvgHi - fvgLo
-    float sizeRatio = atr > 0 ? size / atr : 0
-    int sizeScore = math.round(math.max(30, math.min(95, 40 + sizeRatio * 40)))
-    float vr = na(volRatioNow) ? 1.0 : volRatioNow
-    int volScore = math.round(math.max(30, math.min(95, 40 + vr * 30)))
-    int smtScore = smtAligned ? 90 : 60
-    int m1Score = m1Aligned ? 90 : 55
-    float sum = sizeScore
-    float cnt = 1.0
-    if useVolumeConfirm and not na(volRatioNow)
-        sum := sum + volScore
-        cnt := cnt + 1
-    if useSmtConfluence
-        sum := sum + smtScore
-        cnt := cnt + 1
-    if useM1Confirmation
-        sum := sum + m1Score
-        cnt := cnt + 1
-    math.round(sum / cnt)
-
-// finds the nearest untested liquidity pool beyond entryP in the trade's
-// direction -- the actual "draw of liquidity" price is likely reaching for,
-// not an arbitrary R-multiple. Bull looks in swingHighs above entry, bear
-// looks in swingLows below entry; returns na if none exist yet. Requires
-// s.touches >= minPoolTouches, not just s.isPool -- a level multiple prior
-// swings have actually clustered at, not just the bare minimum first match.
-findLiquidityTarget(string dir, float entryP) =>
-    float best = na
-    if dir == "bull"
-        if array.size(swingHighs) > 0
-            for i = 0 to array.size(swingHighs) - 1
-                Swing s = array.get(swingHighs, i)
-                if s.touches >= minPoolTouches and s.price > entryP
-                    if na(best) or s.price < best
-                        best := s.price
-    else
-        if array.size(swingLows) > 0
-            for i = 0 to array.size(swingLows) - 1
-                Swing s = array.get(swingLows, i)
-                if s.touches >= minPoolTouches and s.price < entryP
-                    if na(best) or s.price > best
-                        best := s.price
-    best
-
-// finds up to the two nearest untested liquidity pools strictly between entryP
-// and boundaryP (the final target) in the trade's direction -- real draws of
-// liquidity for the TP1/TP2 ladder, not arbitrary percentage splits of the
-// distance to target. Same minPoolTouches significance filter as
-// findLiquidityTarget. Returns na for either/both if fewer than that many
-// pools actually exist in range -- never fabricated.
-findLiquidityLevels(string dir, float entryP, float boundaryP) =>
-    float first = na
-    float second = na
-    if dir == "bull"
-        if array.size(swingHighs) > 0
-            for i = 0 to array.size(swingHighs) - 1
-                Swing s = array.get(swingHighs, i)
-                if s.touches >= minPoolTouches and s.price > entryP and s.price < boundaryP
-                    if na(first) or s.price < first
-                        second := first
-                        first := s.price
-                    else if na(second) or s.price < second
-                        second := s.price
-    else
-        if array.size(swingLows) > 0
-            for i = 0 to array.size(swingLows) - 1
-                Swing s = array.get(swingLows, i)
-                if s.touches >= minPoolTouches and s.price < entryP and s.price > boundaryP
-                    if na(first) or s.price > first
-                        second := first
-                        first := s.price
-                    else if na(second) or s.price > second
-                        second := s.price
-    [first, second]
-
-// the actual target used for the webhook payload: nearest liquidity pool
-// in the trade's direction, or the R-multiple projection if no pool exists
-// yet (early session, thin swing history). Also returns which one it used
-// so the payload can say so -- Polaris explains this back to Landen on the
-// dashboard instead of just showing a bare number.
-computeTarget(string dir, float entryP, float stopP) =>
-    float poolTarget = findLiquidityTarget(dir, entryP)
-    float fallback = dir == "bull" ? entryP + math.abs(entryP - stopP) * rMultiple : entryP - math.abs(entryP - stopP) * rMultiple
-    bool usedPool = not na(poolTarget)
-    [usedPool ? poolTarget : fallback, usedPool]
-
 // ---------- killzone sessions ----------
-// Computed here (ahead of the FVG/order-block/premium-discount markup below
-// it in the original layout) because shouldFireSetup() needs inAnyKillzone
-// and Pine doesn't hoist -- an identifier has to be declared above the code
-// that reads it, not just above it in the same logical section.
 inAsia   = not na(time(timeframe.period, asiaSession, "America/New_York"))
 inLondon = not na(time(timeframe.period, londonSession, "America/New_York"))
 inNyAm   = not na(time(timeframe.period, nyAmSession, "America/New_York"))
 inNyPm   = not na(time(timeframe.period, nyPmSession, "America/New_York"))
-bool inAnyKillzone = inAsia or inLondon or inNyAm or inNyPm
 bgcolor(showKillzones and (inAsia or inLondon) ? color.new(#00D4FF, 95) : na, title="Asia/London killzone")
 bgcolor(showKillzones and (inNyAm or inNyPm) ? color.new(#F5C86B, 95) : na, title="NY killzone")
-
-// ---------- V2: setup detectors + master gate ----------
-// Pine functions can only READ outer-scope state, never reassign it
-// (CE10088) -- so every detector below is a pure function: it searches and
-// returns what it found, but never touches seq*. The call site (top-level
-// code in the main scan block) is what actually assigns seq* on a hit --
-// same split already used for buildTradePlanDrawings above. Each returns
-// [found, level, extreme, cisdTarget] so the scan loop can treat every
-// setup type the same way once more than one is real.
-
-// detectSweep(dir) -- the existing (and currently only) entry trigger: best
-// pool-eligible swing that got wicked through and closed back on the other
-// side. Identical search to what used to be inline in the main scan block.
-detectSweep(string dir) =>
-    bool found = false
-    float level = na
-    float extreme = na
-    float cisdTarget = na
-    if dir == "bear" and array.size(swingHighs) > 0
-        float bestHigh = na
-        for i = 0 to array.size(swingHighs) - 1
-            Swing s = array.get(swingHighs, i)
-            if s.isPool and high > s.price and close < s.price
-                if na(bestHigh) or s.price > bestHigh
-                    bestHigh := s.price
-        if not na(bestHigh)
-            found := true
-            level := bestHigh
-            extreme := high
-            cisdTarget := cisdTargetBear()
-    else if dir == "bull" and array.size(swingLows) > 0
-        float bestLow = na
-        for i = 0 to array.size(swingLows) - 1
-            Swing s = array.get(swingLows, i)
-            if s.isPool and low < s.price and close > s.price
-                if na(bestLow) or s.price < bestLow
-                    bestLow := s.price
-        if not na(bestLow)
-            found := true
-            level := bestLow
-            extreme := low
-            cisdTarget := cisdTargetBull()
-    [found, level, extreme, cisdTarget]
-
-// detectReversal(dir) -- a broader change-of-character trigger than
-// detectSweep(): the single most recent swing (index 0), wicked through and
-// closed back on the other side, WITHOUT requiring it to be a pool-eligible
-// (equal-high/low) swing the way a sweep does. This is the actual coverage-
-// gap fix -- sweep only fires on liquidity pools; reversal fires on any
-// significant swing break. allowReversal defaults off, so this changes
-// nothing until you opt in.
-detectReversal(string dir) =>
-    bool found = false
-    float level = na
-    float extreme = na
-    float cisdTarget = na
-    if dir == "bear" and array.size(swingHighs) > 0
-        Swing s = array.get(swingHighs, 0)
-        if high > s.price and close < s.price
-            found := true
-            level := s.price
-            extreme := high
-            cisdTarget := cisdTargetBear()
-    else if dir == "bull" and array.size(swingLows) > 0
-        Swing s = array.get(swingLows, 0)
-        if low < s.price and close > s.price
-            found := true
-            level := s.price
-            extreme := low
-            cisdTarget := cisdTargetBull()
-    [found, level, extreme, cisdTarget]
-
-// detectContinuation(dir) -- a with-the-trend pullback trigger: fires when
-// structureBias already agrees with dir (the trend is established, unlike
-// sweep/reversal which require structure to actually break) and this bar is
-// a fresh displacement candle in that same direction. level = this bar's
-// own open (the near edge that must hold, mirroring how an order block's
-// base is defined elsewhere in this script); extreme = this bar's opposite
-// wick (the stop basis). Reuses cisdTargetBear/Bull() as-is -- it's a
-// generic "find where the last opposite-colored run started" helper, not
-// intrinsically tied to sweeps.
-detectContinuation(string dir) =>
-    bool found = false
-    float level = na
-    float extreme = na
-    float cisdTarget = na
-    if dir == "bear" and structureBias == "bear" and isDisplacement and close < open
-        found := true
-        level := open
-        extreme := high
-        cisdTarget := cisdTargetBear()
-    else if dir == "bull" and structureBias == "bull" and isDisplacement and close > open
-        found := true
-        level := open
-        extreme := low
-        cisdTarget := cisdTargetBull()
-    [found, level, extreme, cisdTarget]
-
-// detectBreakout(dir) -- fires when a displacement candle closes decisively
-// beyond the widest tracked swing on that side (the edge of the current
-// range), i.e. genuine continuation through resistance/support rather than
-// a sweep-and-reverse. level = that widest swing (support/resistance once
-// broken -- closing back across it invalidates the sequence, same as every
-// other entry trigger); extreme = this bar's opposite wick.
-detectBreakout(string dir) =>
-    bool found = false
-    float level = na
-    float extreme = na
-    float cisdTarget = na
-    if dir == "bull" and array.size(swingHighs) > 0 and isDisplacement and close > open
-        float widestHigh = na
-        for i = 0 to array.size(swingHighs) - 1
-            Swing s = array.get(swingHighs, i)
-            if na(widestHigh) or s.price > widestHigh
-                widestHigh := s.price
-        if not na(widestHigh) and close > widestHigh
-            found := true
-            level := widestHigh
-            extreme := low
-            cisdTarget := cisdTargetBull()
-    else if dir == "bear" and array.size(swingLows) > 0 and isDisplacement and close < open
-        float widestLow = na
-        for i = 0 to array.size(swingLows) - 1
-            Swing s = array.get(swingLows, i)
-            if na(widestLow) or s.price < widestLow
-                widestLow := s.price
-        if not na(widestLow) and close < widestLow
-            found := true
-            level := widestLow
-            extreme := high
-            cisdTarget := cisdTargetBear()
-    [found, level, extreme, cisdTarget]
-
-// detectHtfFvgReject(dir) -- fires when price wicks into the single most
-// recent untested higher-timeframe FVG (tracked above) and closes back out
-// the far side. level = the zone's near edge (the boundary that has to
-// hold -- closing back through it the wrong way invalidates the sequence,
-// same as every other trigger); extreme = this bar's wick into the zone
-// (the stop basis). Reuses cisdTargetBull/Bear() as-is, same as every other
-// trigger. Does NOT mark the zone tested itself -- the call site does that,
-// same split as every other detector (functions only read state here).
-detectHtfFvgReject(string dir) =>
-    bool found = false
-    float level = na
-    float extreme = na
-    float cisdTarget = na
-    if dir == "bull" and not htfBullFvgTested and not na(htfBullFvgHi)
-        if low <= htfBullFvgHi and close > htfBullFvgHi
-            found := true
-            level := htfBullFvgHi
-            extreme := low
-            cisdTarget := cisdTargetBull()
-    else if dir == "bear" and not htfBearFvgTested and not na(htfBearFvgLo)
-        if high >= htfBearFvgLo and close < htfBearFvgLo
-            found := true
-            level := htfBearFvgLo
-            extreme := high
-            cisdTarget := cisdTargetBear()
-    [found, level, extreme, cisdTarget]
-
-// shouldFireSetup(setupType, dir) -- the master gate every candidate signal
-// passes through before a detector even runs. Per-type on/off toggle, the
-// bias/HTF/regime/session checks that started as inline bearAllowed/
-// bullAllowed, plus Phase 2's gates: a stricter optional ADX floor, a
-// volume floor, a minimum bar-range sanity check, and the contradiction
-// filter (blocks a setup within minBarsAfterSetup of the last one that
-// actually fired in the opposite direction -- the "buy signal, then sell
-// signal 5 minutes later" problem). minSeqFvgSizeAtr is checked separately,
-// at the 4 completion sites, since it depends on that specific sequence's
-// FVG, not something shouldFireSetup has visibility into at the sweep stage.
-shouldFireSetup(string setupType, string dir) =>
-    bool typeAllowed = setupType == "sweep" ? allowSweep : setupType == "reversal" ? allowReversal : setupType == "continuation" ? allowContinuation : setupType == "breakout" ? allowBreakout : setupType == "htf_fvg" ? allowHtfFvgReject : false
-    bool biasOk = dir == "bear" ? structureBias != "bull" : structureBias != "bear"
-    bool htfOk = not useHtfBias or (dir == "bear" ? htfBias != "bull" : htfBias != "bear")
-    bool sessionOk = not useSessionFilter or inAnyKillzone
-    bool adxOk = not raiseAdxThreshold or adxVal >= raisedAdxThreshold
-    bool volFloorOk = not useVolFloor or na(volRatio) or volRatio >= volFloorMult
-    bool rangeOk = minBarRangeAtr <= 0 or (high - low) >= minBarRangeAtr * atrVal
-    bool contradictionOk = not useContradictionFilter or na(lastSetupDir) or lastSetupDir == dir or (bar_index - lastSetupBar) >= minBarsAfterSetup
-    typeAllowed and biasOk and htfOk and regimeOk and sessionOk and adxOk and volFloorOk and rangeOk and contradictionOk
-
-// maps seqTriggerType + direction to one of the setupType strings
-// functions/index.js's VALID_SETUP_TYPES already accepts and index.html's
-// setupTypeLabel() already translates to plain English -- both were built
-// ahead of this wiring, back when every completed sequence just reported
-// "CHoCH_DOWN"/"CHoCH_UP" regardless of what actually triggered it. Sweep
-// keeps the literal liquidity-sweep label; reversal keeps CHoCH (a change
-// of character on a non-pool swing is still a change of character);
-// continuation and breakout both map to BOS -- a genuine break of
-// structure either way, and VALID_SETUP_TYPES has no separate "breakout"
-// slot to add without also touching the Cloud Function's allow-list.
-setupTypeForTrigger(string trigger, string dir) =>
-    bool isDown = dir == "bear"
-    trigger == "sweep" ? (isDown ? "LIQUIDITY_SWEEP_SELL" : "LIQUIDITY_SWEEP_BUY") :
-     trigger == "reversal" ? (isDown ? "CHoCH_DOWN" : "CHoCH_UP") :
-     trigger == "htf_fvg" ? (isDown ? "FVG_RETEST_BEAR" : "FVG_RETEST_BULL") :
-     (isDown ? "BOS_DOWN" : "BOS_UP")
-
-// ---------- webhook payload builders ----------
-// "kind" discriminates the two payload shapes this script ever sends -- the
-// Cloud Function branches on it (see functions/index.js): "setup" is a full
-// completed setup (-> alerts collection, AI-reviewed, can SMS); "status" is
-// a lightweight phase-transition ping (-> a single overwritten Firestore
-// doc, no history, purely so the dashboard/Polaris knows what the indicator
-// is currently tracking between full setups).
-buildAlertMessage(string setupType, float entryPrice, float stopPrice, float targetPrice, int confidence, bool targetIsPool) =>
-    float risk = math.abs(entryPrice - stopPrice)
-    float reward = math.abs(targetPrice - entryPrice)
-    float rr = risk > 0 ? math.round((reward / risk) * 100) / 100 : na
-    // triggerType rides along as its own field, separate from setupType --
-    // setupType is constrained to what functions/index.js's VALID_SETUP_TYPES
-    // already accepts (continuation and breakout both report BOS_*, see
-    // setupTypeForTrigger() above), but triggerType carries the real
-    // seqTriggerType value ("sweep"/"reversal"/"continuation"/"breakout"/
-    // "htf_fvg") untranslated, so the dashboard can tell continuation and
-    // breakout apart even though the webhook setupType alone can't.
-    '{"secret":"' + webhookSecret + '","kind":"setup","setupType":"' + setupType + '","triggerType":"' + seqTriggerType + '","entryPrice":' + str.tostring(entryPrice) +
-     ',"stopPrice":' + str.tostring(stopPrice) + ',"targetPrice":' + str.tostring(targetPrice) +
-     ',"confidence":' + str.tostring(confidence) + ',"riskReward":' + str.tostring(rr) +
-     ',"targetSource":"' + (targetIsPool ? "pool" : "fallback") + '"' +
-     ',"symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
-
-// fired from the resolution loop below, once per pending trade that actually
-// resolves against price -- lets the dashboard mirror this script's own
-// backtest (SCORE/EXP on the HUD) as a real, growing trade-history log
-// instead of only ever seeing whatever alerts happened to reach it. Reuses
-// setupTypeForTrigger() so the dashboard's setupTypeLabel()/explainTradePlan()
-// (which key off setupType/targetSource, same as a live "setup" alert) work
-// identically here with no dashboard-side special-casing.
-buildResolutionMessage(string dir, float entryPrice, float stopPrice, float targetPrice, string outcome, float r, string triggerType, bool targetIsPool) =>
-    string setupType = setupTypeForTrigger(triggerType, dir)
-    '{"secret":"' + webhookSecret + '","kind":"resolution","dir":"' + dir + '","setupType":"' + setupType +
-     '","triggerType":"' + triggerType + '","entryPrice":' + str.tostring(entryPrice) +
-     ',"stopPrice":' + str.tostring(stopPrice) + ',"targetPrice":' + str.tostring(targetPrice) +
-     ',"outcome":"' + outcome + '","r":' + str.tostring(r) +
-     ',"targetSource":"' + (targetIsPool ? "pool" : "fallback") + '"' +
-     ',"symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
-
-// wins/losses ride along on every status ping (not just alert completion) so
-// the dashboard's win-rate readout stays current even mid-sequence, not just
-// the instant a setup fires -- cheap to include, they're already tracked.
-buildStatusMessage() =>
-    string regimeTxt = regimeOk ? "trend" : "chop"
-    string biasTxt = na(structureBias) ? "none" : structureBias
-    string htfTxt = na(htfBias) ? "none" : htfBias
-    string phaseTxt = na(seqPhase) ? "idle" : seqPhase
-    string dirTxt = na(seqDir) ? "none" : seqDir
-    '{"secret":"' + webhookSecret + '","kind":"status","structureBias":"' + biasTxt + '","htfBias":"' + htfTxt +
-     '","regime":"' + regimeTxt + '","adx":' + str.tostring(adxVal, "#.##") + ',"phase":"' + phaseTxt +
-     '","dir":"' + dirTxt + '","wins":' + str.tostring(scoreWins) + ',"losses":' + str.tostring(scoreLosses) +
-     ',"symbol":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '"}'
-
-// Pine functions cannot reassign a global-scope variable (CE10088) -- only
-// top-level script code can. So these two helpers only ever READ the tp*
-// globals or act on values passed in as parameters; every actual `:=` to a
-// tp* global happens at the call site instead (see the 4 completion sites
-// below, and the "clear the tracked trade plan" block).
-deleteLineIfExists(line ln) =>
-    if not na(ln)
-        line.delete(ln)
-
-deleteLabelIfExists(label lb) =>
-    if not na(lb)
-        label.delete(lb)
-
-// deletes whatever trade-plan drawings are currently tracked (reads the tp*
-// globals, mutates nothing) -- called both when a new plan replaces an old
-// one and when the tracked plan is invalidated.
-clearTradePlanDrawings() =>
-    deleteLineIfExists(tpEntryLine)
-    deleteLineIfExists(tpStopLine)
-    deleteLineIfExists(tpTargetLine)
-    deleteLineIfExists(tp1Line)
-    deleteLineIfExists(tp2Line)
-    deleteLabelIfExists(tpEntryLbl)
-    deleteLabelIfExists(tpStopLbl)
-    deleteLabelIfExists(tpTargetLbl)
-    deleteLabelIfExists(tp1Lbl)
-    deleteLabelIfExists(tp2Lbl)
-    deleteLabelIfExists(tpSetupLbl)
-
-// builds the entry/stop/target trade-plan drawings for a just-completed
-// setup and returns their handles -- the call site is responsible for
-// clearing the previously-tracked plan first and assigning these into the
-// tp* globals (a plain function can't do either of those itself). When
-// showTpLadder is on, also draws TP1/TP2 at the nearest real liquidity pools
-// between entry and the final target (findLiquidityLevels) -- not arbitrary
-// percentage splits of the distance to target. If fewer than two such pools
-// actually exist, only that many lines are drawn (never fabricated) --
-// visual only either way, doesn't touch the webhook payload, scorecard, or
-// targetP itself, which all still resolve against the one real target.
-buildTradePlanDrawings(string dir, float entryP, float stopP, float targetP, int conf) =>
-    string confText = showConfidence ? "\n" + str.tostring(conf) + "%" : ""
-    string setupText = dir == "bull" ? "▲ LONG SETUP" + confText : "▼ SHORT SETUP" + confText
-    color setupColor = dir == "bull" ? #2FE08A : #FF5566
-    int lineEnd = bar_index + lineExtension
-    label setupLbl = label.new(bar_index, dir == "bull" ? high : low, setupText, style=dir == "bull" ? label.style_label_down : label.style_label_up, color=setupColor, textcolor=#030710, size=size.normal)
-    line entryLine = line.new(bar_index, entryP, lineEnd, entryP, color=#00D4FF, style=line.style_solid, width=2)
-    line stopLine = line.new(bar_index, stopP, lineEnd, stopP, color=#FF5566, style=line.style_dashed, width=1)
-    line targetLine = line.new(bar_index, targetP, lineEnd, targetP, color=#2FE08A, style=line.style_dashed, width=1)
-    label entryLbl = label.new(lineEnd, entryP, "ENTRY " + str.tostring(entryP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#00D4FF, size=size.small)
-    label stopLbl = label.new(lineEnd, stopP, "STOP " + str.tostring(stopP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#FF5566, size=size.small)
-    label targetLbl = label.new(lineEnd, targetP, "TARGET " + str.tostring(targetP, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#2FE08A, size=size.small)
-    // Pine ternaries can't return tuples (CE10163) -- findLiquidityLevels() returns
-    // one, so this has to be an if/else assigning into pre-declared na floats
-    // instead of the ternary pattern used everywhere else in this function.
-    float tp1Price = na
-    float tp2Price = na
-    if showTpLadder
-        [t1, t2] = findLiquidityLevels(dir, entryP, targetP)
-        tp1Price := t1
-        tp2Price := t2
-    line newTp1Line = showTpLadder and not na(tp1Price) ? line.new(bar_index, tp1Price, lineEnd, tp1Price, color=color.new(#2FE08A, 60), style=line.style_dotted, width=1) : line(na)
-    line newTp2Line = showTpLadder and not na(tp2Price) ? line.new(bar_index, tp2Price, lineEnd, tp2Price, color=color.new(#2FE08A, 40), style=line.style_dotted, width=1) : line(na)
-    label newTp1Lbl = showTpLadder and not na(tp1Price) ? label.new(lineEnd, tp1Price, "TP1 " + str.tostring(tp1Price, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=color.new(#2FE08A, 40), size=size.small) : label(na)
-    label newTp2Lbl = showTpLadder and not na(tp2Price) ? label.new(lineEnd, tp2Price, "TP2 " + str.tostring(tp2Price, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=color.new(#2FE08A, 20), size=size.small) : label(na)
-    [setupLbl, entryLine, stopLine, targetLine, entryLbl, stopLbl, targetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl]
 
 // ---------- order blocks (last opposing candle before a displacement move) ----------
 if showOB and barstate.isconfirmed and isDisplacement
@@ -1379,7 +393,7 @@ if showOB and barstate.isconfirmed and isDisplacement
                     box.delete(array.pop(obBoxes))
             k += 1
 
-// ---------- fair value gaps everywhere (not just inside an active sequence) ----------
+// ---------- fair value gaps everywhere ----------
 if showAllFvg and barstate.isconfirmed
     [hasBull, bLo, bHi] = fvgAtBull(0)
     if hasBull and (bHi - bLo) >= minFvgSizeAtr * atrVal
@@ -1442,7 +456,7 @@ if showAllFvg and barstate.isconfirmed
                     array.remove(fvgBoxDir, i)
                     array.remove(fvgBoxDone, i)
 
-// ---------- premium / discount zone + Fibonacci / equilibrium / OTE (around the active swing range) ----------
+// ---------- premium / discount + Fibonacci / equilibrium / OTE ----------
 if (showPD or showFib) and barstate.isconfirmed and array.size(swingHighs) > 0 and array.size(swingLows) > 0
     Swing hiS = array.get(swingHighs, 0)
     Swing loS = array.get(swingLows, 0)
@@ -1512,10 +526,10 @@ if (showPD or showFib) and barstate.isconfirmed and array.size(swingHighs) > 0 a
             oteBox := box.new(leftX, top=oteTop, right=bar_index + 10, bottom=oteBottom, border_color=color.new(#00D4FF, 40), bgcolor=color.new(#00D4FF, 88), extend=extend.none, text="OTE", text_size=size.tiny, text_color=color.new(#00D4FF, 15))
 
 // ---------- per-session volatility tracking ----------
-// runs every confirmed bar regardless of showKillzones/useSessionFilter --
-// this is a pure readout, not a gate. On every session change, folds the
-// just-completed session's realized range into that session's running
-// average; while still inside a session, extends the running high/low.
+// runs every confirmed bar regardless of showKillzones -- this is a pure
+// readout, not a gate. On every session change, folds the just-completed
+// session's realized range into that session's running average; while
+// still inside a session, extends the running high/low.
 if showSessionVolatility and barstate.isconfirmed
     string nowSession = inAsia ? "asia" : inLondon ? "london" : inNyAm ? "nyam" : inNyPm ? "nypm" : na
     if nowSession != curSession
@@ -1545,9 +559,9 @@ if showSessionVolatility and barstate.isconfirmed
 // tracked zone, size-filtered by minHtfFvgSizeAtr x the chart's own ATR;
 // (2) drop the tracked zone if price has since closed decisively through it
 // the wrong way without ever rejecting (a failed/invalidated gap shouldn't
-// linger and fire out of context later); (3) keep the visual box in sync.
-// Consuming a zone as an actual trigger (marking it tested) happens in the
-// main scan block below, not here.
+// linger indefinitely); (3) keep the visual box in sync. Purely visual now
+// -- there's no trigger left to "consume" the zone the instant price wicks
+// into it, so it stays drawn while price is actually trading into it.
 if barstate.isconfirmed
     if htfFvgBullHasR and (htfFvgBullHiR - htfFvgBullLoR) >= minHtfFvgSizeAtr * atrVal and (na(htfBullFvgLo) or htfFvgBullLoR != htfBullFvgLo or htfFvgBullHiR != htfBullFvgHi)
         htfBullFvgLo := htfFvgBullLoR
@@ -1575,611 +589,41 @@ if barstate.isconfirmed
             box.delete(htfFvgBearBox)
             htfFvgBearBox := box(na)
 
-// ---------- clear the tracked trade plan once it's played out ----------
-// an entry that already hit its stop or target shouldn't linger on the
-// chart looking live -- top-level code (not a function) so it can actually
-// clear tpActive itself.
-if barstate.isconfirmed and tpActive
-    bool tpStopped = tpDir == "bull" ? low <= tpStop : high >= tpStop
-    bool tpReached = tpDir == "bull" ? high >= tpTarget : low <= tpTarget
-    if tpStopped or tpReached
-        clearTradePlanDrawings()
-        tpActive := false
-
-// ---------- scorecard: resolve pending signals against price ----------
-// runs before the main scan so a signal recorded THIS bar (entry = this
-// bar's close) never gets checked against this same bar's high/low --
-// resolution only starts from the next bar onward.
-if showScorecard and barstate.isconfirmed and array.size(pendingDir) > 0
-    for i = array.size(pendingDir) - 1 to 0
-        string pDir = array.get(pendingDir, i)
-        float pEntry = array.get(pendingEntry, i)
-        float pStop = array.get(pendingStop, i)
-        float pTarget = array.get(pendingTarget, i)
-        string pTrig = array.get(pendingTriggerType, i)
-        bool pTargetSource = array.get(pendingTargetSource, i)
-        bool hitStop = pDir == "bull" ? low <= pStop : high >= pStop
-        bool hitTarget = pDir == "bull" ? high >= pTarget : low <= pTarget
-        if hitStop or hitTarget
-            // conservative tie-break: if a single wide bar could have
-            // touched both, we can't know which came first intrabar, so
-            // it counts as a loss rather than assuming the favorable order
-            bool isWin = hitTarget and not hitStop
-            float thisR = -1.0
-            if isWin
-                scoreWins := scoreWins + 1
-                // a win pays out THIS trade's real reward:risk, not a fixed
-                // amount -- risk is what actually happened at entry, so this
-                // is real realized R, not the minRiskReward floor
-                float riskAtEntry = math.abs(pEntry - pStop)
-                thisR := riskAtEntry > 0 ? math.abs(pTarget - pEntry) / riskAtEntry : 0.0
-                sumR := sumR + thisR
-            else
-                scoreLosses := scoreLosses + 1
-                // a loss always costs exactly -1R by definition -- it
-                // resolved at the stop, i.e. the full risked distance
-                sumR := sumR - 1.0
-            if sendResolutionWebhook
-                alert(buildResolutionMessage(pDir, pEntry, pStop, pTarget, isWin ? "win" : "loss", thisR, pTrig, pTargetSource), alert.freq_all)
-            // trade log: a real running history, distinct from the single-
-            // most-recent tp* trade-plan markup above -- this is what actually
-            // answers "when did these resolve" instead of leaving it to be
-            // inferred from where the chart stops loading history.
-            array.unshift(resolvedTime, time)
-            array.unshift(resolvedDir, pDir)
-            array.unshift(resolvedOutcome, isWin ? "win" : "loss")
-            array.unshift(resolvedR, thisR)
-            array.unshift(resolvedTriggerType, pTrig)
-            if array.size(resolvedTime) > 200
-                array.pop(resolvedTime)
-                array.pop(resolvedDir)
-                array.pop(resolvedOutcome)
-                array.pop(resolvedR)
-                array.pop(resolvedTriggerType)
-            if showResolutionMarkers
-                label markerLbl = label.new(bar_index, isWin ? pTarget : pStop, isWin ? "W" : "L", style=isWin ? label.style_label_down : label.style_label_up, color=color.new(isWin ? #2FE08A : #FF5566, 20), textcolor=#030710, size=size.tiny)
-                array.unshift(resolutionMarkerLbls, markerLbl)
-                if array.size(resolutionMarkerLbls) > 50
-                    label.delete(array.pop(resolutionMarkerLbls))
-            array.remove(pendingDir, i)
-            array.remove(pendingEntry, i)
-            array.remove(pendingStop, i)
-            array.remove(pendingTarget, i)
-            array.remove(pendingTriggerType, i)
-            array.remove(pendingTargetSource, i)
-
-// ---------- main scan (mirrors advanceScan), only on confirmed/closed bars ----------
-if barstate.isconfirmed
-    string prevPhase = seqPhase  // snapshot before this bar's transitions, for the status ping below
-    if na(seqDir)
-        // Entry triggers, checked in order -- first one to actually find
-        // something starts the sequence. Each is independently gated by
-        // shouldFireSetup(type, dir) (which includes the per-type
-        // allowSweep/allowReversal/allowContinuation/allowBreakout toggle),
-        // so with only allowSweep on by default this reduces to exactly the
-        // old sweep-only behavior. seqSmtAligned captures this sequence's
-        // SMT reading once, at trigger time, for setupConfidence() to use
-        // later regardless of how many bars pass before it actually fires.
-        if shouldFireSetup("sweep", "bear")
-            [found, level, extreme, cisdTarget] = detectSweep("bear")
-            if found
-                seqDir := "bear"
-                seqPhase := "sweep"
-                seqLevel := level
-                seqSweepExtreme := extreme
-                seqCisdTarget := cisdTarget
-                seqSweepBar := bar_index
-                seqHasFvg := false
-                seqSmtAligned := smtBearDiv
-                seqTriggerType := "sweep"
-                if showTriggerLabels
-                    label.new(bar_index, high, "⚡ SWEEP", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
-
-        if na(seqDir) and shouldFireSetup("reversal", "bear")
-            [found, level, extreme, cisdTarget] = detectReversal("bear")
-            if found
-                seqDir := "bear"
-                seqPhase := "sweep"
-                seqLevel := level
-                seqSweepExtreme := extreme
-                seqCisdTarget := cisdTarget
-                seqSweepBar := bar_index
-                seqHasFvg := false
-                seqSmtAligned := smtBearDiv
-                seqTriggerType := "reversal"
-                if showTriggerLabels
-                    label.new(bar_index, high, "⚡ REVERSAL", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
-
-        if na(seqDir) and shouldFireSetup("continuation", "bear")
-            [found, level, extreme, cisdTarget] = detectContinuation("bear")
-            if found
-                seqDir := "bear"
-                seqPhase := "sweep"
-                seqLevel := level
-                seqSweepExtreme := extreme
-                seqCisdTarget := cisdTarget
-                seqSweepBar := bar_index
-                seqHasFvg := false
-                seqSmtAligned := smtBearDiv
-                seqTriggerType := "continuation"
-                if showTriggerLabels
-                    label.new(bar_index, high, "⚡ CONTINUATION", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
-
-        if na(seqDir) and shouldFireSetup("breakout", "bear")
-            [found, level, extreme, cisdTarget] = detectBreakout("bear")
-            if found
-                seqDir := "bear"
-                seqPhase := "sweep"
-                seqLevel := level
-                seqSweepExtreme := extreme
-                seqCisdTarget := cisdTarget
-                seqSweepBar := bar_index
-                seqHasFvg := false
-                seqSmtAligned := smtBearDiv
-                seqTriggerType := "breakout"
-                if showTriggerLabels
-                    label.new(bar_index, high, "⚡ BREAKOUT", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
-
-        if na(seqDir) and shouldFireSetup("htf_fvg", "bear")
-            [found, level, extreme, cisdTarget] = detectHtfFvgReject("bear")
-            if found
-                seqDir := "bear"
-                seqPhase := "sweep"
-                seqLevel := level
-                seqSweepExtreme := extreme
-                seqCisdTarget := cisdTarget
-                seqSweepBar := bar_index
-                seqHasFvg := false
-                seqSmtAligned := smtBearDiv
-                seqTriggerType := "htf_fvg"
-                htfBearFvgTested := true
-                if not na(htfFvgBearBox)
-                    box.delete(htfFvgBearBox)
-                    htfFvgBearBox := box(na)
-                if showTriggerLabels
-                    label.new(bar_index, high, "⚡ HTF FVG", style=label.style_label_down, color=#F5C86B, textcolor=#030710, size=size.small)
-
-        if na(seqDir) and shouldFireSetup("sweep", "bull")
-            [found, level, extreme, cisdTarget] = detectSweep("bull")
-            if found
-                seqDir := "bull"
-                seqPhase := "sweep"
-                seqLevel := level
-                seqSweepExtreme := extreme
-                seqCisdTarget := cisdTarget
-                seqSweepBar := bar_index
-                seqHasFvg := false
-                seqSmtAligned := smtBullDiv
-                seqTriggerType := "sweep"
-                if showTriggerLabels
-                    label.new(bar_index, low, "⚡ SWEEP", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
-
-        if na(seqDir) and shouldFireSetup("reversal", "bull")
-            [found, level, extreme, cisdTarget] = detectReversal("bull")
-            if found
-                seqDir := "bull"
-                seqPhase := "sweep"
-                seqLevel := level
-                seqSweepExtreme := extreme
-                seqCisdTarget := cisdTarget
-                seqSweepBar := bar_index
-                seqHasFvg := false
-                seqSmtAligned := smtBullDiv
-                seqTriggerType := "reversal"
-                if showTriggerLabels
-                    label.new(bar_index, low, "⚡ REVERSAL", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
-
-        if na(seqDir) and shouldFireSetup("continuation", "bull")
-            [found, level, extreme, cisdTarget] = detectContinuation("bull")
-            if found
-                seqDir := "bull"
-                seqPhase := "sweep"
-                seqLevel := level
-                seqSweepExtreme := extreme
-                seqCisdTarget := cisdTarget
-                seqSweepBar := bar_index
-                seqHasFvg := false
-                seqSmtAligned := smtBullDiv
-                seqTriggerType := "continuation"
-                if showTriggerLabels
-                    label.new(bar_index, low, "⚡ CONTINUATION", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
-
-        if na(seqDir) and shouldFireSetup("breakout", "bull")
-            [found, level, extreme, cisdTarget] = detectBreakout("bull")
-            if found
-                seqDir := "bull"
-                seqPhase := "sweep"
-                seqLevel := level
-                seqSweepExtreme := extreme
-                seqCisdTarget := cisdTarget
-                seqSweepBar := bar_index
-                seqHasFvg := false
-                seqSmtAligned := smtBullDiv
-                seqTriggerType := "breakout"
-                if showTriggerLabels
-                    label.new(bar_index, low, "⚡ BREAKOUT", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
-
-        if na(seqDir) and shouldFireSetup("htf_fvg", "bull")
-            [found, level, extreme, cisdTarget] = detectHtfFvgReject("bull")
-            if found
-                seqDir := "bull"
-                seqPhase := "sweep"
-                seqLevel := level
-                seqSweepExtreme := extreme
-                seqCisdTarget := cisdTarget
-                seqSweepBar := bar_index
-                seqHasFvg := false
-                seqSmtAligned := smtBullDiv
-                seqTriggerType := "htf_fvg"
-                htfBullFvgTested := true
-                if not na(htfFvgBullBox)
-                    box.delete(htfFvgBullBox)
-                    htfFvgBullBox := box(na)
-                if showTriggerLabels
-                    label.new(bar_index, low, "⚡ HTF FVG", style=label.style_label_up, color=#F5C86B, textcolor=#030710, size=size.small)
-
-    else
-        if bar_index - seqSweepBar > maxBarsValid
-            seqDir := na
-            seqPhase := na
-        else if seqDir == "bear"
-            if seqPhase == "sweep"
-                if close > seqLevel
-                    seqDir := na
-                    seqPhase := na
-                else if close < seqCisdTarget
-                    int barsSince = bar_index - seqSweepBar
-                    bool found = false
-                    float fLo = na
-                    float fHi = na
-                    for off = 0 to math.min(barsSince - 1, 200)
-                        if not found
-                            [has, lo, hi] = fvgAtBear(off)
-                            if has
-                                found := true
-                                fLo := lo
-                                fHi := hi
-                    seqPhase := "cisd"
-                    seqHasFvg := found
-                    seqFvgLo := fLo
-                    seqFvgHi := fHi
-            else if seqPhase == "cisd"
-                if not seqHasFvg
-                    [has, lo, hi] = fvgAtBear(0)
-                    if has
-                        seqHasFvg := true
-                        seqFvgLo := lo
-                        seqFvgHi := hi
-                    else if close > seqLevel
-                        seqDir := na
-                        seqPhase := na
-                if seqHasFvg and not na(seqDir)
-                    if close > seqFvgHi
-                        seqDir := na
-                        seqPhase := na
-                    else if high >= seqFvgLo
-                        if close < seqFvgLo
-                            int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned, seqDir == "bear" ? m1RejectionBear : m1RejectionBull)
-                            float entryP = close
-                            float stopP = seqSweepExtreme + stopBufferPts + (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
-                            [targetP, targetIsPool] = computeTarget("bear", entryP, stopP)
-                            float riskPts = math.abs(entryP - stopP)
-                            float rewardPts = math.abs(targetP - entryP)
-                            bool rrOk = minRiskReward <= 0 or (riskPts > 0 and (rewardPts / riskPts) >= minRiskReward)
-                            if rewardPts >= minTargetAtrMult * atrVal and rewardPts >= minTargetPts and rrOk and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
-                                alert(buildAlertMessage(setupTypeForTrigger(seqTriggerType, "bear"), entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
-                                lastSetupDir := "bear"
-                                lastSetupBar := bar_index
-                                if showScorecard
-                                    array.unshift(pendingDir, "bear")
-                                    array.unshift(pendingEntry, entryP)
-                                    array.unshift(pendingStop, stopP)
-                                    array.unshift(pendingTarget, targetP)
-                                    array.unshift(pendingTriggerType, seqTriggerType)
-                                    array.unshift(pendingTargetSource, targetIsPool)
-                                    if array.size(pendingDir) > maxPending
-                                        array.pop(pendingDir)
-                                        array.pop(pendingEntry)
-                                        array.pop(pendingStop)
-                                        array.pop(pendingTarget)
-                                        array.pop(pendingTriggerType)
-                                        array.pop(pendingTargetSource)
-                                if showTradePlan
-                                    clearTradePlanDrawings()
-                                    [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
-                                    tpSetupLbl := newSetupLbl
-                                    tpEntryLine := newEntryLine
-                                    tpStopLine := newStopLine
-                                    tpTargetLine := newTargetLine
-                                    tpEntryLbl := newEntryLbl
-                                    tpStopLbl := newStopLbl
-                                    tpTargetLbl := newTargetLbl
-                                    tp1Line := newTp1Line
-                                    tp2Line := newTp2Line
-                                    tp1Lbl := newTp1Lbl
-                                    tp2Lbl := newTp2Lbl
-                                    tpDir := "bear"
-                                    tpStop := stopP
-                                    tpTarget := targetP
-                                    tpActive := true
-                            seqDir := na
-                            seqPhase := na
-                        else
-                            seqPhase := "retrace"
-            else if seqPhase == "retrace"
-                if close > seqFvgHi
-                    seqDir := na
-                    seqPhase := na
-                else if close < seqFvgLo
-                    int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned, seqDir == "bear" ? m1RejectionBear : m1RejectionBull)
-                    float entryP = close
-                    float stopP = seqSweepExtreme + stopBufferPts + (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
-                    [targetP, targetIsPool] = computeTarget("bear", entryP, stopP)
-                    float riskPts = math.abs(entryP - stopP)
-                    float rewardPts = math.abs(targetP - entryP)
-                    bool rrOk = minRiskReward <= 0 or (riskPts > 0 and (rewardPts / riskPts) >= minRiskReward)
-                    if rewardPts >= minTargetAtrMult * atrVal and rewardPts >= minTargetPts and rrOk and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
-                        alert(buildAlertMessage(setupTypeForTrigger(seqTriggerType, "bear"), entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
-                        lastSetupDir := "bear"
-                        lastSetupBar := bar_index
-                        if showScorecard
-                            array.unshift(pendingDir, "bear")
-                            array.unshift(pendingEntry, entryP)
-                            array.unshift(pendingStop, stopP)
-                            array.unshift(pendingTarget, targetP)
-                            array.unshift(pendingTriggerType, seqTriggerType)
-                            array.unshift(pendingTargetSource, targetIsPool)
-                            if array.size(pendingDir) > maxPending
-                                array.pop(pendingDir)
-                                array.pop(pendingEntry)
-                                array.pop(pendingStop)
-                                array.pop(pendingTarget)
-                                array.pop(pendingTriggerType)
-                                array.pop(pendingTargetSource)
-                        if showTradePlan
-                            clearTradePlanDrawings()
-                            [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bear", entryP, stopP, targetP, conf)
-                            tpSetupLbl := newSetupLbl
-                            tpEntryLine := newEntryLine
-                            tpStopLine := newStopLine
-                            tpTargetLine := newTargetLine
-                            tpEntryLbl := newEntryLbl
-                            tpStopLbl := newStopLbl
-                            tpTargetLbl := newTargetLbl
-                            tp1Line := newTp1Line
-                            tp2Line := newTp2Line
-                            tp1Lbl := newTp1Lbl
-                            tp2Lbl := newTp2Lbl
-                            tpDir := "bear"
-                            tpStop := stopP
-                            tpTarget := targetP
-                            tpActive := true
-                    seqDir := na
-                    seqPhase := na
-        else if seqDir == "bull"
-            if seqPhase == "sweep"
-                if close < seqLevel
-                    seqDir := na
-                    seqPhase := na
-                else if close > seqCisdTarget
-                    int barsSince = bar_index - seqSweepBar
-                    bool found = false
-                    float fLo = na
-                    float fHi = na
-                    for off = 0 to math.min(barsSince - 1, 200)
-                        if not found
-                            [has, lo, hi] = fvgAtBull(off)
-                            if has
-                                found := true
-                                fLo := lo
-                                fHi := hi
-                    seqPhase := "cisd"
-                    seqHasFvg := found
-                    seqFvgLo := fLo
-                    seqFvgHi := fHi
-            else if seqPhase == "cisd"
-                if not seqHasFvg
-                    [has, lo, hi] = fvgAtBull(0)
-                    if has
-                        seqHasFvg := true
-                        seqFvgLo := lo
-                        seqFvgHi := hi
-                    else if close < seqLevel
-                        seqDir := na
-                        seqPhase := na
-                if seqHasFvg and not na(seqDir)
-                    if close < seqFvgLo
-                        seqDir := na
-                        seqPhase := na
-                    else if low <= seqFvgHi
-                        if close > seqFvgHi
-                            int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned, seqDir == "bear" ? m1RejectionBear : m1RejectionBull)
-                            float entryP = close
-                            float stopP = seqSweepExtreme - stopBufferPts - (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
-                            [targetP, targetIsPool] = computeTarget("bull", entryP, stopP)
-                            float riskPts = math.abs(entryP - stopP)
-                            float rewardPts = math.abs(targetP - entryP)
-                            bool rrOk = minRiskReward <= 0 or (riskPts > 0 and (rewardPts / riskPts) >= minRiskReward)
-                            if rewardPts >= minTargetAtrMult * atrVal and rewardPts >= minTargetPts and rrOk and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
-                                alert(buildAlertMessage(setupTypeForTrigger(seqTriggerType, "bull"), entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
-                                lastSetupDir := "bull"
-                                lastSetupBar := bar_index
-                                if showScorecard
-                                    array.unshift(pendingDir, "bull")
-                                    array.unshift(pendingEntry, entryP)
-                                    array.unshift(pendingStop, stopP)
-                                    array.unshift(pendingTarget, targetP)
-                                    array.unshift(pendingTriggerType, seqTriggerType)
-                                    array.unshift(pendingTargetSource, targetIsPool)
-                                    if array.size(pendingDir) > maxPending
-                                        array.pop(pendingDir)
-                                        array.pop(pendingEntry)
-                                        array.pop(pendingStop)
-                                        array.pop(pendingTarget)
-                                        array.pop(pendingTriggerType)
-                                        array.pop(pendingTargetSource)
-                                if showTradePlan
-                                    clearTradePlanDrawings()
-                                    [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
-                                    tpSetupLbl := newSetupLbl
-                                    tpEntryLine := newEntryLine
-                                    tpStopLine := newStopLine
-                                    tpTargetLine := newTargetLine
-                                    tpEntryLbl := newEntryLbl
-                                    tpStopLbl := newStopLbl
-                                    tpTargetLbl := newTargetLbl
-                                    tp1Line := newTp1Line
-                                    tp2Line := newTp2Line
-                                    tp1Lbl := newTp1Lbl
-                                    tp2Lbl := newTp2Lbl
-                                    tpDir := "bull"
-                                    tpStop := stopP
-                                    tpTarget := targetP
-                                    tpActive := true
-                            seqDir := na
-                            seqPhase := na
-                        else
-                            seqPhase := "retrace"
-            else if seqPhase == "retrace"
-                if close < seqFvgLo
-                    seqDir := na
-                    seqPhase := na
-                else if close > seqFvgHi
-                    int conf = setupConfidence(seqFvgLo, seqFvgHi, atrVal, volRatio, seqSmtAligned, seqDir == "bear" ? m1RejectionBear : m1RejectionBull)
-                    float entryP = close
-                    float stopP = seqSweepExtreme - stopBufferPts - (useWickTolerance ? wickToleranceAtr * atrVal : 0.0)
-                    [targetP, targetIsPool] = computeTarget("bull", entryP, stopP)
-                    float riskPts = math.abs(entryP - stopP)
-                    float rewardPts = math.abs(targetP - entryP)
-                    bool rrOk = minRiskReward <= 0 or (riskPts > 0 and (rewardPts / riskPts) >= minRiskReward)
-                    if rewardPts >= minTargetAtrMult * atrVal and rewardPts >= minTargetPts and rrOk and (seqFvgHi - seqFvgLo) >= minSeqFvgSizeAtr * atrVal
-                        alert(buildAlertMessage(setupTypeForTrigger(seqTriggerType, "bull"), entryP, stopP, targetP, conf, targetIsPool), alert.freq_once_per_bar_close)
-                        lastSetupDir := "bull"
-                        lastSetupBar := bar_index
-                        if showScorecard
-                            array.unshift(pendingDir, "bull")
-                            array.unshift(pendingEntry, entryP)
-                            array.unshift(pendingStop, stopP)
-                            array.unshift(pendingTarget, targetP)
-                            array.unshift(pendingTriggerType, seqTriggerType)
-                            array.unshift(pendingTargetSource, targetIsPool)
-                            if array.size(pendingDir) > maxPending
-                                array.pop(pendingDir)
-                                array.pop(pendingEntry)
-                                array.pop(pendingStop)
-                                array.pop(pendingTarget)
-                                array.pop(pendingTriggerType)
-                                array.pop(pendingTargetSource)
-                        if showTradePlan
-                            clearTradePlanDrawings()
-                            [newSetupLbl, newEntryLine, newStopLine, newTargetLine, newEntryLbl, newStopLbl, newTargetLbl, newTp1Line, newTp2Line, newTp1Lbl, newTp2Lbl] = buildTradePlanDrawings("bull", entryP, stopP, targetP, conf)
-                            tpSetupLbl := newSetupLbl
-                            tpEntryLine := newEntryLine
-                            tpStopLine := newStopLine
-                            tpTargetLine := newTargetLine
-                            tpEntryLbl := newEntryLbl
-                            tpStopLbl := newStopLbl
-                            tpTargetLbl := newTargetLbl
-                            tp1Line := newTp1Line
-                            tp2Line := newTp2Line
-                            tp1Lbl := newTp1Lbl
-                            tp2Lbl := newTp2Lbl
-                            tpDir := "bull"
-                            tpStop := stopP
-                            tpTarget := targetP
-                            tpActive := true
-                    seqDir := na
-                    seqPhase := na
-
-    // fires a lightweight status ping whenever the phase actually advanced
-    // this bar (na->sweep, sweep->cisd, cisd->retrace) -- not on invalidation
-    // or completion (seqPhase going back to na), since a real "setup" alert
-    // already covers completion with far richer detail.
-    if seqPhase != prevPhase and not na(seqPhase)
-        alert(buildStatusMessage(), alert.freq_once_per_bar_close)
-
-// ---------- tracked level line while a sequence is active ----------
-if showVisuals and not na(seqPhase)
-    line.new(seqSweepBar, seqLevel, bar_index, seqLevel, color=color.new(#F5C86B, 55), style=line.style_dashed, width=1)
-
 // ---------- status HUD (top-right) ----------
-var table hud = table.new(position=position.top_right, columns=2, rows=13, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
+var table hud = table.new(position=position.top_right, columns=2, rows=9, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
 
 if showHud and barstate.islast
     // "BIAS" row doubles as the direction row -- structureBias IS the direction
-    // reading once useMtfDirection is on (see the swing-detection block above), so
-    // this is a single row with a label that names its actual source, not two rows
-    // showing the same value.
+    // reading once useMtfDirection is on, so this is a single row with a label
+    // that names its actual source, not two rows showing the same value.
     string biasLabel = useMtfDirection ? "DIR " + directionTimeframe : "BIAS"
     table.cell(hud, 0, 0, "◆ POLARIS", text_color=#F5C86B, text_size=size.small, text_halign=text.align_left)
-    table.cell(hud, 1, 0, "SCANNER", text_color=#F5C86B, text_size=size.small, text_halign=text.align_right)
+    table.cell(hud, 1, 0, "MAP", text_color=#F5C86B, text_size=size.small, text_halign=text.align_right)
     table.cell(hud, 0, 1, biasLabel, text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
     table.cell(hud, 1, 1, na(structureBias) ? "--" : (structureBias == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(structureBias) ? #6E93AD : (structureBias == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
-    table.cell(hud, 0, 2, "HTF " + htfTimeframe, text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(hud, 1, 2, na(htfBias) ? "--" : (htfBias == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(htfBias) ? #6E93AD : (htfBias == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
-    table.cell(hud, 0, 3, "ADX", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(hud, 1, 3, str.tostring(adxVal, "#.#") + (regimeOk ? " TREND" : " CHOP"), text_color=regimeOk ? #DDF3FF : #6E93AD, text_size=size.small, text_halign=text.align_right)
-    table.cell(hud, 0, 4, "PHASE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(hud, 1, 4, na(seqPhase) ? "IDLE" : str.upper(seqPhase), text_color=na(seqPhase) ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
-    table.cell(hud, 0, 5, "SETUP", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(hud, 1, 5, na(seqDir) ? "--" : (seqDir == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(seqDir) ? #6E93AD : (seqDir == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
+    if showHtfBias
+        table.cell(hud, 0, 2, "HTF " + htfTimeframe, text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 2, na(htfBias) ? "--" : (htfBias == "bull" ? "▲ LONG" : "▼ SHORT"), text_color=na(htfBias) ? #6E93AD : (htfBias == "bull" ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
+    if showRegime
+        table.cell(hud, 0, 3, "ADX", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 3, str.tostring(adxVal, "#.#") + (regimeOk ? " TREND" : " CHOP"), text_color=regimeOk ? #DDF3FF : #6E93AD, text_size=size.small, text_halign=text.align_right)
     string sessionName = inAsia ? "ASIA" : inLondon ? "LONDON" : inNyAm ? "NY AM" : inNyPm ? "NY PM" : "--"
     float sessionAvg = inAsia ? (countAsia > 0 ? sumRangeAsia / countAsia : na) : inLondon ? (countLondon > 0 ? sumRangeLondon / countLondon : na) : inNyAm ? (countNyAm > 0 ? sumRangeNyAm / countNyAm : na) : inNyPm ? (countNyPm > 0 ? sumRangeNyPm / countNyPm : na) : na
     string sessionTxt = sessionName == "--" ? "--" : sessionName + (na(sessionAvg) ? "" : " · avg " + str.tostring(sessionAvg, format.mintick))
-    table.cell(hud, 0, 6, "SESSION", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(hud, 1, 6, sessionTxt, text_color=sessionName == "--" ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
-    if useVolumeConfirm
-        table.cell(hud, 0, 7, "VOL", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(hud, 1, 7, na(volRatio) ? "--" : str.tostring(volRatio, "#.##") + "x avg", text_color=na(volRatio) ? #6E93AD : (volRatio >= 1.2 ? #2FE08A : #DDF3FF), text_size=size.small, text_halign=text.align_right)
-    if useSmtConfluence
+    table.cell(hud, 0, 4, "SESSION", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 4, sessionTxt, text_color=sessionName == "--" ? #6E93AD : #DDF3FF, text_size=size.small, text_halign=text.align_right)
+    if showVolume
+        table.cell(hud, 0, 5, "VOL", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 5, na(volRatio) ? "--" : str.tostring(volRatio, "#.##") + "x avg", text_color=na(volRatio) ? #6E93AD : (volRatio >= 1.2 ? #2FE08A : #DDF3FF), text_size=size.small, text_halign=text.align_right)
+    if showSmt
         string smtTxt = smtBearDiv ? "BEAR DIV" : smtBullDiv ? "BULL DIV" : "--"
-        table.cell(hud, 0, 8, "SMT", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(hud, 1, 8, smtTxt, text_color=smtTxt == "--" ? #6E93AD : #F5C86B, text_size=size.small, text_halign=text.align_right)
-    if useM1Confirmation
+        table.cell(hud, 0, 6, "SMT", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 6, smtTxt, text_color=smtTxt == "--" ? #6E93AD : #F5C86B, text_size=size.small, text_halign=text.align_right)
+    if showM1
         string m1Txt = m1RejectionBear ? "BEAR REJ" : m1RejectionBull ? "BULL REJ" : "--"
-        table.cell(hud, 0, 9, "M1", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(hud, 1, 9, m1Txt, text_color=m1Txt == "--" ? #6E93AD : #F5C86B, text_size=size.small, text_halign=text.align_right)
-    if allowHtfFvgReject or showHtfFvg
+        table.cell(hud, 0, 7, "M1", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 7, m1Txt, text_color=m1Txt == "--" ? #6E93AD : #F5C86B, text_size=size.small, text_halign=text.align_right)
+    if showHtfFvg
         string htfFvgTxt = not htfBullFvgTested and not na(htfBullFvgLo) ? "BULL @ " + str.tostring(htfBullFvgHi, format.mintick) : not htfBearFvgTested and not na(htfBearFvgLo) ? "BEAR @ " + str.tostring(htfBearFvgLo, format.mintick) : "--"
-        table.cell(hud, 0, 12, "HTF FVG " + htfFvgTimeframe, text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(hud, 1, 12, htfFvgTxt, text_color=htfFvgTxt == "--" ? #6E93AD : #00D4FF, text_size=size.small, text_halign=text.align_right)
-    if showScorecard
-        int totalResolved = scoreWins + scoreLosses
-        string scoreTxt = totalResolved > 0 ? str.tostring(math.round(scoreWins / totalResolved * 100)) + "% (" + str.tostring(scoreWins) + "/" + str.tostring(totalResolved) + ")" : "-- (0/0)"
-        table.cell(hud, 0, 10, "SCORE", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(hud, 1, 10, scoreTxt, text_color=totalResolved > 0 and scoreWins / totalResolved >= 0.5 ? #2FE08A : #DDF3FF, text_size=size.small, text_halign=text.align_right)
-        // the number that actually says whether this is working -- win% alone
-        // can't tell a 35%-win-at-3R system (great) from a 65%-win-at-1.2R one
-        // (bad). Real average R-multiple per resolved trade, not win count.
-        float avgR = totalResolved > 0 ? sumR / totalResolved : na
-        string expTxt = na(avgR) ? "--" : (avgR >= 0 ? "+" : "") + str.tostring(avgR, "#.##") + "R"
-        table.cell(hud, 0, 11, "EXP", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(hud, 1, 11, expTxt, text_color=na(avgR) ? #6E93AD : (avgR >= 0 ? #2FE08A : #FF5566), text_size=size.small, text_halign=text.align_right)
-
-// ---------- trade log table (bottom-right, separate from the HUD) ----------
-// Real, readable history of the most recent resolved trades -- date, direction,
-// outcome, realized R -- so "how far back / how clustered were these" has a direct
-// answer on the chart instead of needing to be inferred. rows fixed at 21 (20 max
-// possible logTableRows + 1 header) regardless of the current logTableRows value,
-// so a table.cell call can never index past the table's own declared size.
-var table tradeLogTable = table.new(position=position.bottom_right, columns=4, rows=21, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
-
-if showTradeLog and barstate.islast
-    table.cell(tradeLogTable, 0, 0, "DATE", text_color=#F5C86B, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(tradeLogTable, 1, 0, "DIR", text_color=#F5C86B, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(tradeLogTable, 2, 0, "RESULT", text_color=#F5C86B, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(tradeLogTable, 3, 0, "R", text_color=#F5C86B, text_size=size.tiny, text_halign=text.align_right)
-    int rowsToShow = math.min(array.size(resolvedTime), logTableRows)
-    if rowsToShow > 0
-        for i = 0 to rowsToShow - 1
-            string rowDir = array.get(resolvedDir, i)
-            string rowOutcome = array.get(resolvedOutcome, i)
-            float rowR = array.get(resolvedR, i)
-            bool rowWin = rowOutcome == "win"
-            color rowColor = rowWin ? #2FE08A : #FF5566
-            string dateTxt = str.format_time(array.get(resolvedTime, i), "yyyy-MM-dd", syminfo.timezone)
-            string rTxt = (rowR >= 0 ? "+" : "") + str.tostring(rowR, "#.##") + "R"
-            table.cell(tradeLogTable, 0, i + 1, dateTxt, text_color=#DDF3FF, text_size=size.tiny, text_halign=text.align_left)
-            table.cell(tradeLogTable, 1, i + 1, rowDir == "bull" ? "▲" : "▼", text_color=rowDir == "bull" ? #2FE08A : #FF5566, text_size=size.tiny, text_halign=text.align_center)
-            table.cell(tradeLogTable, 2, i + 1, rowWin ? "WIN" : "LOSS", text_color=rowColor, text_size=size.tiny, text_halign=text.align_center)
-            table.cell(tradeLogTable, 3, i + 1, rTxt, text_color=rowColor, text_size=size.tiny, text_halign=text.align_right)
+        table.cell(hud, 0, 8, "HTF FVG " + htfFvgTimeframe, text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 8, htfFvgTxt, text_color=htfFvgTxt == "--" ? #6E93AD : #00D4FF, text_size=size.small, text_halign=text.align_right)
