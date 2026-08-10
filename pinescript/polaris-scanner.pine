@@ -26,6 +26,9 @@ indicator("Polaris Scanner — Liquidity & Structure Map", overlay=true, max_lin
 //   - SMT divergence against a correlated symbol (default ES).
 //   - A 1-minute rejection-candle read.
 //   - Equal highs/lows (liquidity pools).
+//   - The nearest significant (multi-touch) untested liquidity draw above
+//     and below price -- BSL/SSL, classic ICT buy-side/sell-side liquidity,
+//     distinct from the routine EQH/EQL match lines above.
 //   - Order blocks (last opposing candle before a displacement move).
 //   - Every significant fair value gap, flipped to iFVG styling once
 //     violated, deleted once reclaimed.
@@ -67,6 +70,15 @@ maxOB        = input.int(12, "Max order blocks shown", minval=1, maxval=40, grou
 grpEQ = "Equal Highs / Lows"
 showEQ   = input.bool(true, "Mark equal highs/lows (liquidity pools)", group=grpEQ)
 eqTolPct = input.float(0.01, "Equal tolerance (% of price)", minval=0.01, step=0.01, group=grpEQ)
+
+grpDraws = "Liquidity Draws"
+// The nearest untested pool above/below price that multiple swings have
+// actually clustered at -- classic ICT buy-side/sell-side liquidity, the
+// levels price is most likely being drawn toward -- distinct from the
+// routine EQH/EQL dotted match-lines above, which mark every equal-swing
+// match regardless of how established it is.
+showLiquidityDraws = input.bool(true, "Mark the nearest significant untested liquidity draw above/below price (BSL/SSL)", group=grpDraws)
+minDrawTouches      = input.int(3, "Min swings clustered at a level to count as a significant draw", minval=2, maxval=6, group=grpDraws)
 
 grpPD = "Premium / Discount"
 showPD = input.bool(false, "Shade premium/discount zone", group=grpPD)
@@ -126,6 +138,7 @@ type Swing
     int   idx
     float price
     bool  isPool  // true once this swing clusters with another (an equal high/low)
+    int   touches // how many swings (including this one) have clustered at this price zone -- starts at 1, rises with each further match. isPool still flips true on the first match (touches=2); a "significant" draw (BSL/SSL below) requires touches >= minDrawTouches, so a level multiple swings have actually clustered at, not just the bare minimum first match.
 
 // ---------- persistent state ----------
 var array<Swing> swingHighs = array.new<Swing>()
@@ -176,6 +189,17 @@ var array<box> obBoxes      = array.new<box>()
 var box premiumBox = na
 var box discountBox = na
 var line eqLine = na
+
+// Nearest significant (multi-touch) untested liquidity draw above/below
+// price -- BSL (buy-side liquidity) and SSL (sell-side liquidity), classic
+// ICT terms for the levels price is most likely being drawn toward.
+// Redrawn from scratch every confirmed bar, same pattern as premium/discount.
+var line bslLine = na
+var label bslLbl = na
+var line sslLine = na
+var label sslLbl = na
+var float bslTrackedPrice = na
+var float sslTrackedPrice = na
 
 // Fibonacci / equilibrium / OTE (showFib) -- redrawn from scratch whenever
 // the active swing range changes, same delete-then-recreate pattern as
@@ -231,6 +255,7 @@ if not na(ph)
     // pool-matching runs unconditionally (it decides which swings count as
     // liquidity pools) -- showEQ only controls whether the match gets drawn.
     bool poolMatch = false
+    int matchTouches = 1
     if array.size(swingHighs) > 0
         float tol = ph * eqTolPct / 100
         for i = 0 to array.size(swingHighs) - 1
@@ -238,6 +263,8 @@ if not na(ph)
             if math.abs(s.price - ph) <= tol
                 poolMatch := true
                 s.isPool := true
+                s.touches := s.touches + 1
+                matchTouches := s.touches
                 if showEQ
                     line.new(s.idx, s.price, newHighIdx, ph, color=color.new(#F5C86B, 30), style=line.style_dotted, width=1)
                     label.new(newHighIdx, ph, "EQH", style=label.style_label_down, color=color.new(#0B1626, 15), textcolor=#F5C86B, size=size.tiny)
@@ -256,13 +283,14 @@ if not na(ph)
                 structureBias := "bear"
     if not na(smtPh)
         smtPrevHigh := smtPh
-    array.unshift(swingHighs, Swing.new(newHighIdx, ph, poolMatch))
+    array.unshift(swingHighs, Swing.new(newHighIdx, ph, poolMatch, matchTouches))
     if array.size(swingHighs) > maxSwings
         array.pop(swingHighs)
 
 if not na(pl)
     int newLowIdx = bar_index - swingStrength
     bool poolMatchLow = false
+    int matchTouchesLow = 1
     if array.size(swingLows) > 0
         float tol = pl * eqTolPct / 100
         for i = 0 to array.size(swingLows) - 1
@@ -270,6 +298,8 @@ if not na(pl)
             if math.abs(s.price - pl) <= tol
                 poolMatchLow := true
                 s.isPool := true
+                s.touches := s.touches + 1
+                matchTouchesLow := s.touches
                 if showEQ
                     line.new(s.idx, s.price, newLowIdx, pl, color=color.new(#F5C86B, 30), style=line.style_dotted, width=1)
                     label.new(newLowIdx, pl, "EQL", style=label.style_label_up, color=color.new(#0B1626, 15), textcolor=#F5C86B, size=size.tiny)
@@ -286,7 +316,7 @@ if not na(pl)
                 structureBias := "bull"
     if not na(smtPl)
         smtPrevLow := smtPl
-    array.unshift(swingLows, Swing.new(newLowIdx, pl, poolMatchLow))
+    array.unshift(swingLows, Swing.new(newLowIdx, pl, poolMatchLow, matchTouchesLow))
     if array.size(swingLows) > maxSwings
         array.pop(swingLows)
 
@@ -315,6 +345,30 @@ fvgAtBear(int off) =>
 fvgAtBull(int off) =>
     bool has = high[off + 2] < low[off]
     [has, has ? high[off + 2] : na, has ? low[off] : na]
+
+// nearest untested liquidity pool beyond refPrice in the given direction,
+// requiring s.touches >= minDrawTouches -- a level multiple prior swings
+// have actually clustered at, not just a bare first equal-high/low match.
+// Bull looks in swingHighs above refPrice (BSL, buy-side liquidity above
+// price), bear looks in swingLows below refPrice (SSL, sell-side liquidity
+// below price). Returns na if no such level exists yet.
+findLiquidityDraw(string dir, float refPrice) =>
+    float best = na
+    if dir == "bull"
+        if array.size(swingHighs) > 0
+            for i = 0 to array.size(swingHighs) - 1
+                Swing s = array.get(swingHighs, i)
+                if s.touches >= minDrawTouches and s.price > refPrice
+                    if na(best) or s.price < best
+                        best := s.price
+    else
+        if array.size(swingLows) > 0
+            for i = 0 to array.size(swingLows) - 1
+                Swing s = array.get(swingLows, i)
+                if s.touches >= minDrawTouches and s.price < refPrice
+                    if na(best) or s.price > best
+                        best := s.price
+    best
 
 // atrVal, htfBias, adxVal, m1*, and the HTF FVG request.security pulls must
 // all be computed unconditionally every bar -- ta.*/request.security calls
@@ -456,6 +510,27 @@ if showAllFvg and barstate.isconfirmed
                     array.remove(fvgBoxDir, i)
                     array.remove(fvgBoxDone, i)
 
+// ---------- liquidity draws (nearest significant untested pool above/below price) ----------
+if showLiquidityDraws and barstate.isconfirmed
+    float bslPrice = findLiquidityDraw("bull", close)
+    float sslPrice = findLiquidityDraw("bear", close)
+    bslTrackedPrice := bslPrice
+    sslTrackedPrice := sslPrice
+    if not na(bslLine)
+        line.delete(bslLine)
+    if not na(bslLbl)
+        label.delete(bslLbl)
+    if not na(bslPrice)
+        bslLine := line.new(bar_index - 40, bslPrice, bar_index + 10, bslPrice, color=color.new(#F5C86B, 15), style=line.style_dashed, width=2)
+        bslLbl := label.new(bar_index + 10, bslPrice, "BSL " + str.tostring(bslPrice, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#F5C86B, size=size.small)
+    if not na(sslLine)
+        line.delete(sslLine)
+    if not na(sslLbl)
+        label.delete(sslLbl)
+    if not na(sslPrice)
+        sslLine := line.new(bar_index - 40, sslPrice, bar_index + 10, sslPrice, color=color.new(#F5C86B, 15), style=line.style_dashed, width=2)
+        sslLbl := label.new(bar_index + 10, sslPrice, "SSL " + str.tostring(sslPrice, format.mintick), style=label.style_label_left, color=color.new(#0B1626, 10), textcolor=#F5C86B, size=size.small)
+
 // ---------- premium / discount + Fibonacci / equilibrium / OTE ----------
 if (showPD or showFib) and barstate.isconfirmed and array.size(swingHighs) > 0 and array.size(swingLows) > 0
     Swing hiS = array.get(swingHighs, 0)
@@ -590,7 +665,7 @@ if barstate.isconfirmed
             htfFvgBearBox := box(na)
 
 // ---------- status HUD (top-right) ----------
-var table hud = table.new(position=position.top_right, columns=2, rows=9, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
+var table hud = table.new(position=position.top_right, columns=2, rows=11, bgcolor=color.new(#0B1626, 8), border_color=color.new(#00D4FF, 45), border_width=1, frame_color=color.new(#00D4FF, 45), frame_width=1)
 
 if showHud and barstate.islast
     // "BIAS" row doubles as the direction row -- structureBias IS the direction
@@ -623,7 +698,12 @@ if showHud and barstate.islast
         string m1Txt = m1RejectionBear ? "BEAR REJ" : m1RejectionBull ? "BULL REJ" : "--"
         table.cell(hud, 0, 7, "M1", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
         table.cell(hud, 1, 7, m1Txt, text_color=m1Txt == "--" ? #6E93AD : #F5C86B, text_size=size.small, text_halign=text.align_right)
+    if showLiquidityDraws
+        table.cell(hud, 0, 8, "BSL", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 8, na(bslTrackedPrice) ? "--" : str.tostring(bslTrackedPrice, format.mintick), text_color=na(bslTrackedPrice) ? #6E93AD : #F5C86B, text_size=size.small, text_halign=text.align_right)
+        table.cell(hud, 0, 9, "SSL", text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 9, na(sslTrackedPrice) ? "--" : str.tostring(sslTrackedPrice, format.mintick), text_color=na(sslTrackedPrice) ? #6E93AD : #F5C86B, text_size=size.small, text_halign=text.align_right)
     if showHtfFvg
         string htfFvgTxt = not htfBullFvgTested and not na(htfBullFvgLo) ? "BULL @ " + str.tostring(htfBullFvgHi, format.mintick) : not htfBearFvgTested and not na(htfBearFvgLo) ? "BEAR @ " + str.tostring(htfBearFvgLo, format.mintick) : "--"
-        table.cell(hud, 0, 8, "HTF FVG " + htfFvgTimeframe, text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(hud, 1, 8, htfFvgTxt, text_color=htfFvgTxt == "--" ? #6E93AD : #00D4FF, text_size=size.small, text_halign=text.align_right)
+        table.cell(hud, 0, 10, "HTF FVG " + htfFvgTimeframe, text_color=#6E93AD, text_size=size.tiny, text_halign=text.align_left)
+        table.cell(hud, 1, 10, htfFvgTxt, text_color=htfFvgTxt == "--" ? #6E93AD : #00D4FF, text_size=size.small, text_halign=text.align_right)

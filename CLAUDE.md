@@ -342,6 +342,19 @@ decision to the trader.
   sweep/CISD/FVG model) is **unaffected** — it still chimes and speaks scan events exactly as
   before. This pivot only touched the TradingView Pine indicator and its dashboard integration.
 
+**Liquidity draws (BSL/SSL).** Follow-up to the pivot above: Landen asked for the chart to mark
+"levels of importance," specifically significant draws on liquidity — classic ICT buy-side/sell-side
+liquidity, not just any equal-high/low match. `Swing` got its `touches` field back (how many swings
+have clustered at that price zone, starting at 1 — dropped during the rewrite since the old
+target-selection code that used it was gone, now needed again for this). `findLiquidityDraw(dir,
+refPrice)` finds the nearest swing beyond `refPrice` with `touches >= minDrawTouches` (default 3) —
+a level multiple swings have actually clustered at, not a bare first EQH/EQL match. Redrawn every
+confirmed bar (`showLiquidityDraws`, default on), same delete-then-recreate pattern as premium/
+discount: a bold gold dashed line + label reading "BSL {price}" for the nearest untested pool above
+price, "SSL {price}" for the nearest below, visually distinct from the routine faint dotted EQH/EQL
+match-lines. Also gets its own two-row HUD entry (BSL/SSL prices, `--` when none exists yet) —
+`table.new`'s `rows` bumped 9→11 to fit.
+
 ## Git
 
 Primary branch: `main`. This session's work landed on `claude/polaris-living-system-ahe5fl`
