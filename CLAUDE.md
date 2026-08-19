@@ -358,4 +358,4 @@ match-lines. Also gets its own two-row HUD entry (BSL/SSL prices, `--` when none
 ## Git
 
 Primary branch: `main`. This session's work landed on `claude/polaris-living-system-ahe5fl`
-(one commit per feature above) and has been pushed but not yet merged to `main`.
+(one commit per feature above) and has been merged to `main` (fast-forward, no divergent commits).
