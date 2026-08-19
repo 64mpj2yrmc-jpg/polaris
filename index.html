@@ -68,7 +68,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.10-1";
+const BUILD = "2026.08.19-1";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -2282,7 +2282,16 @@ Rules:
   async function fetchIntradayYahoo(silent) {
     try {
       const interval = YF_INTERVAL[tfRef.current] || "5m";
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/NQ=F?interval=${interval}&range=1d`;
+      // range=1d used to mean "only today's bars" -- NQ=F trades a continuous
+      // 24hr session, but Yahoo still buckets that day window on its own
+      // schedule, so right after it rolls over there'd only be 1-2 bars
+      // available yet (CandleChart's bw = width / candle count blows each one
+      // up to fill the whole chart when count is that small). 5d keeps a
+      // rolling window of real history regardless of where we are in the
+      // current session -- safely within Yahoo's ~7d cap on 1m bars and well
+      // under its ~60d cap on 5m/15m. CandleChart already only displays the
+      // most recent 60 anyway, so the extra history is free.
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/NQ=F?interval=${interval}&range=5d`;
       const data = await fetchViaRelay(url);
       const result = data && data.chart && data.chart.result && data.chart.result[0];
       if (!result) throw new Error((data && data.chart && data.chart.error && data.chart.error.description) || "no data returned");

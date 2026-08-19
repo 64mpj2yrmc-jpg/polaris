@@ -66,7 +66,13 @@ best-effort convenience, not a requirement for the app to function.
   sweep → change-in-state-of-delivery (CISD) → FVG retrace → rejection, fed candle-by-candle by
   `runScanner`. Data comes from Twelve Data (QQQ proxy, US hours) or a Yahoo Finance relay
   (`NQ=F`, delayed, 24hr) depending on `source`/`activeSource`. Scanner events are chimed and
-  spoken (`emit` → `speak`) when live (not the initial silent backfill).
+  spoken (`emit` → `speak`) when live (not the initial silent backfill). `fetchIntradayYahoo`
+  requests `range=5d` from the chart API (was `range=1d`) — NQ=F trades a continuous 24hr session,
+  but Yahoo still buckets its "day" window on its own schedule, so right after that window rolled
+  over there'd only be 1-2 bars available yet; `CandleChart`'s bar width is chart width ÷ candle
+  count, so a sparse array made each candle balloon into a giant block instead of a normal tape.
+  `CandleChart` already only renders the most recent 60 (`cs.slice(-60)`), so the extra history is
+  free — 5d stays safely within Yahoo's ~7d cap on 1m bars and well under its ~60d cap on 5m/15m.
 - **POLARIS chat** (POLARIS tab): `sendToPolaris` builds a short `buildSystemPrompt()` snapshot
   (today/all-time journal stats, last price, scanner on/off, memory) and runs a bounded agentic
   tool-use loop against Claude — see "Tool-use (agentic chat)" below — streaming the reply as it
