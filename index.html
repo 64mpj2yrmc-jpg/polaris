@@ -68,7 +68,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.09.21-7";
+const BUILD = "2026.09.21-8";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -2350,6 +2350,18 @@ Rules:
     return result;
   }
 
+  // The real get_accounts response has `plan` as a nested object ({id, title,
+  // description, icon, leverage, startingBalance, ...}), not the plain string this was
+  // originally built against -- rendering that object directly is what crashed the app
+  // (React error #31, "objects are not valid as a React child"). This coerces either
+  // shape into safe display text.
+  function fundedNextPlanLabel(plan) {
+    if (plan == null) return "";
+    if (typeof plan === "string" || typeof plan === "number") return String(plan);
+    if (typeof plan === "object") return plan.title || plan.name || plan.type || "";
+    return "";
+  }
+
   async function callFundedNextTool(name, args) {
     const result = await callFundedNextMcp("tools/call", { name, arguments: args || {} });
     return unwrapMcpToolResult(result);
@@ -3948,22 +3960,42 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
                   )}
                 </div>
 
-                {fundedNextAccounts && fundedNextAccounts.length > 0 && (
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
-                    {fundedNextAccounts.map((a) => (
-                      <button key={a.id} onClick={() => fetchFundedNextAccountOverview(a.id)}
-                        style={{
-                          background: fundedNextSelectedAccountId === a.id ? "rgba(0,212,255,0.18)" : "rgba(3,10,20,0.8)",
-                          color: fundedNextSelectedAccountId === a.id ? C.cyan : C.text,
-                          border: `1px solid ${fundedNextSelectedAccountId === a.id ? C.borderBright : C.border}`,
-                          borderRadius: 4, padding: "8px 12px", fontFamily: mono, fontSize: 11, cursor: "pointer", textAlign: "left",
-                        }}>
-                        <div style={{ fontWeight: 600 }}>{a.login || a.id}</div>
-                        <div style={{ color: C.muted, fontSize: 10, marginTop: 2 }}>{a.plan || ""} {a.balance != null ? "· " + fmt$(a.balance) : ""}</div>
-                      </button>
-                    ))}
-                  </div>
-                )}
+                {fundedNextAccounts && fundedNextAccounts.length > 0 && (() => {
+                  // Same safety net as the overview panel below: a field coming back a
+                  // different shape than expected (this is exactly how the plan-object bug
+                  // crashed the whole app) falls back to raw JSON instead of blanking Polaris.
+                  try {
+                    return (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+                        {fundedNextAccounts.map((a, i) => (
+                          <button key={a.id != null ? a.id : i} onClick={() => fetchFundedNextAccountOverview(a.id)}
+                            style={{
+                              background: fundedNextSelectedAccountId === a.id ? "rgba(0,212,255,0.18)" : "rgba(3,10,20,0.8)",
+                              color: fundedNextSelectedAccountId === a.id ? C.cyan : C.text,
+                              border: `1px solid ${fundedNextSelectedAccountId === a.id ? C.borderBright : C.border}`,
+                              borderRadius: 4, padding: "8px 12px", fontFamily: mono, fontSize: 11, cursor: "pointer", textAlign: "left",
+                            }}>
+                            <div style={{ fontWeight: 600 }}>{typeof a.login === "object" ? fundedNextPlanLabel(a.login) || String(a.id) : String(a.login || a.id)}</div>
+                            <div style={{ color: C.muted, fontSize: 10, marginTop: 2 }}>{fundedNextPlanLabel(a.plan)} {a.balance != null && !isNaN(Number(a.balance)) ? "· " + fmt$(Number(a.balance)) : ""}</div>
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  } catch (renderErr) {
+                    let raw = "";
+                    try { raw = JSON.stringify(fundedNextAccounts, null, 2); } catch (e2) { raw = String(fundedNextAccounts); }
+                    return (
+                      <div style={{ marginBottom: 14 }}>
+                        <div style={{ fontSize: 12, color: C.red, marginBottom: 8 }}>
+                          Got accounts back, but they weren't shaped how I expected ({renderErr.message}). Raw data — send this to Claude to fix the display:
+                        </div>
+                        <pre style={{ fontSize: 10, color: C.muted, background: "rgba(3,10,20,0.8)", border: `1px solid ${C.border}`, borderRadius: 4, padding: 10, maxHeight: 300, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                          {raw}
+                        </pre>
+                      </div>
+                    );
+                  }
+                })()}
 
                 {fundedNextOverviewBusy && <div style={{ fontSize: 11, color: C.muted }}>Loading account…</div>}
                 {fundedNextOverviewStatus && (
