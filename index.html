@@ -68,7 +68,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.09.21-2";
+const BUILD = "2026.09.21-3";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -1026,6 +1026,15 @@ function App() {
   const fundedNextWorkerUrlRef = useRef(fundedNextWorkerUrl); fundedNextWorkerUrlRef.current = fundedNextWorkerUrl;
   const fundedNextSecretRef = useRef(fundedNextSecret); fundedNextSecretRef.current = fundedNextSecret;
   const fundedNextSessionIdRef = useRef(null);
+  // Real account display (built against FundedNext's actual get_accounts / get_account_overview tools)
+  const [fundedNextAccounts, setFundedNextAccounts] = useState(null);
+  const [fundedNextAccountsStatus, setFundedNextAccountsStatus] = useState("");
+  const [fundedNextAccountsBusy, setFundedNextAccountsBusy] = useState(false);
+  const [fundedNextSelectedAccountId, setFundedNextSelectedAccountId] = useState(null);
+  const [fundedNextOverview, setFundedNextOverview] = useState(null);
+  const [fundedNextOverviewStatus, setFundedNextOverviewStatus] = useState("");
+  const [fundedNextOverviewBusy, setFundedNextOverviewBusy] = useState(false);
+  const [fundedNextShowTools, setFundedNextShowTools] = useState(false);
 
   // keys + engine
   const [anthropicKey, setAnthropicKey] = useState("");
@@ -2276,6 +2285,9 @@ Rules:
     setFundedNextBusy(true);
     setFundedNextStatus("Connecting…");
     setFundedNextTools(null);
+    setFundedNextAccounts(null);
+    setFundedNextOverview(null);
+    setFundedNextSelectedAccountId(null);
     fundedNextSessionIdRef.current = null;
     try {
       await saveFundedNextWorkerUrl(workerUrl);
@@ -2290,6 +2302,7 @@ Rules:
       const tools = (result && result.tools) || [];
       setFundedNextTools(tools);
       setFundedNextStatus(tools.length ? `Connected — ${tools.length} tool${tools.length > 1 ? "s" : ""} available` : "Connected, but no tools were listed");
+      if (tools.length) fetchFundedNextAccounts();
     } catch (e) {
       const msg = e.message || "check the Worker URL and secret";
       const hint = /polaris-worker-shared-secret-mismatch/i.test(msg)
@@ -2304,6 +2317,79 @@ Rules:
       setFundedNextStatus("Connection failed: " + msg + hint);
     } finally {
       setFundedNextBusy(false);
+    }
+  }
+
+  // Unwrap an MCP tools/call result into plain data. Servers vary between putting the
+  // real payload in `structuredContent` vs. a JSON string inside the first text content
+  // block -- try both rather than assuming one shape.
+  function unwrapMcpToolResult(result) {
+    if (!result) return null;
+    if (result.isError) {
+      const text = Array.isArray(result.content) ? result.content.map((c) => c.text).filter(Boolean).join(" ") : "";
+      throw new Error(text || "tool call failed");
+    }
+    if (result.structuredContent !== undefined) return result.structuredContent;
+    if (Array.isArray(result.content)) {
+      const textBlock = result.content.find((c) => c.type === "text" && typeof c.text === "string");
+      if (textBlock) {
+        try { return JSON.parse(textBlock.text); } catch (e) { return textBlock.text; }
+      }
+    }
+    return result;
+  }
+
+  async function callFundedNextTool(name, args) {
+    const result = await callFundedNextMcp("tools/call", { name, arguments: args || {} });
+    return unwrapMcpToolResult(result);
+  }
+
+  // Pulls the FundedNext-side account list into Polaris (get_accounts, both product
+  // lines) and auto-selects the single account when there's exactly one, so the common
+  // case ("I have one funded account") needs zero extra clicks.
+  async function fetchFundedNextAccounts() {
+    setFundedNextAccountsBusy(true);
+    setFundedNextAccountsStatus("Loading accounts…");
+    setFundedNextAccounts(null);
+    try {
+      const [futuresRes, forexRes] = await Promise.allSettled([
+        callFundedNextTool("get_accounts", { type: "active", tab: "futures" }),
+        callFundedNextTool("get_accounts", { type: "active", tab: "forex" }),
+      ]);
+      const extractList = (settled) => {
+        if (settled.status !== "fulfilled") return [];
+        const v = settled.value;
+        if (Array.isArray(v)) return v;
+        if (v && Array.isArray(v.data)) return v.data;
+        if (v && v.data && Array.isArray(v.data.data)) return v.data.data;
+        return [];
+      };
+      const accounts = [...extractList(futuresRes), ...extractList(forexRes)];
+      setFundedNextAccounts(accounts);
+      setFundedNextAccountsStatus(accounts.length ? `${accounts.length} account${accounts.length > 1 ? "s" : ""} found` : "No active accounts found");
+      if (accounts.length === 1) {
+        fetchFundedNextAccountOverview(accounts[0].id);
+      }
+    } catch (e) {
+      setFundedNextAccountsStatus("Couldn't load accounts: " + (e.message || "unknown error"));
+    } finally {
+      setFundedNextAccountsBusy(false);
+    }
+  }
+
+  async function fetchFundedNextAccountOverview(accountId) {
+    setFundedNextSelectedAccountId(accountId);
+    setFundedNextOverviewBusy(true);
+    setFundedNextOverviewStatus("Loading account…");
+    setFundedNextOverview(null);
+    try {
+      const overview = await callFundedNextTool("get_account_overview", { account_id: accountId });
+      setFundedNextOverview(overview);
+      setFundedNextOverviewStatus("");
+    } catch (e) {
+      setFundedNextOverviewStatus("Couldn't load account details: " + (e.message || "unknown error"));
+    } finally {
+      setFundedNextOverviewBusy(false);
     }
   }
 
@@ -3817,17 +3903,119 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
                 </div>
               )}
               {fundedNextTools && fundedNextTools.length > 0 && (
-                <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
-                  <Label>Tools discovered</Label>
-                  {fundedNextTools.map((t, i) => (
-                    <div key={i} style={{ background: "rgba(3,10,20,0.8)", border: `1px solid ${C.border}`, borderRadius: 4, padding: "8px 10px", fontSize: 11 }}>
-                      <span style={{ color: C.cyan, fontWeight: 600 }}>{t.name}</span>
-                      {t.description && <div style={{ color: C.muted, marginTop: 2 }}>{t.description}</div>}
+                <div style={{ marginTop: 12 }}>
+                  <button onClick={() => setFundedNextShowTools((v) => !v)}
+                    style={{ background: "transparent", color: C.muted, border: `1px solid ${C.border}`, borderRadius: 4, padding: "6px 10px", fontFamily: mono, fontWeight: 600, fontSize: 10, letterSpacing: "0.06em", cursor: "pointer" }}>
+                    {fundedNextShowTools ? "HIDE" : "SHOW"} {fundedNextTools.length} DISCOVERED TOOLS
+                  </button>
+                  {fundedNextShowTools && (
+                    <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" }}>
+                      {fundedNextTools.map((t, i) => (
+                        <div key={i} style={{ background: "rgba(3,10,20,0.8)", border: `1px solid ${C.border}`, borderRadius: 4, padding: "8px 10px", fontSize: 11 }}>
+                          <span style={{ color: C.cyan, fontWeight: 600 }}>{t.name}</span>
+                          {t.description && <div style={{ color: C.muted, marginTop: 2 }}>{t.description.slice(0, 180)}</div>}
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
                 </div>
               )}
             </Panel>
+
+            {fundedNextTools && fundedNextTools.length > 0 && (
+              <Panel>
+                <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>FUNDEDNEXT — ACCOUNT</div>
+                <div style={{ color: C.muted, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
+                  Live balance, drawdown buffers and objective progress, pulled straight from your account.
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <button onClick={fetchFundedNextAccounts} disabled={fundedNextAccountsBusy}
+                    style={{ background: "rgba(0,212,255,0.14)", color: C.cyan, border: `1px solid ${C.borderBright}`, borderRadius: 4, padding: "10px 16px", fontFamily: mono, fontWeight: 600, fontSize: 11, letterSpacing: "0.08em", cursor: "pointer" }}>
+                    {fundedNextAccountsBusy ? "LOADING…" : "REFRESH ACCOUNTS"}
+                  </button>
+                  {fundedNextAccountsStatus && (
+                    <span style={{ fontSize: 11, marginLeft: 10, color: fundedNextAccountsStatus.toLowerCase().includes("couldn't") ? C.red : C.muted }}>
+                      {fundedNextAccountsStatus}
+                    </span>
+                  )}
+                </div>
+
+                {fundedNextAccounts && fundedNextAccounts.length > 1 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+                    {fundedNextAccounts.map((a) => (
+                      <button key={a.id} onClick={() => fetchFundedNextAccountOverview(a.id)}
+                        style={{
+                          background: fundedNextSelectedAccountId === a.id ? "rgba(0,212,255,0.18)" : "rgba(3,10,20,0.8)",
+                          color: fundedNextSelectedAccountId === a.id ? C.cyan : C.text,
+                          border: `1px solid ${fundedNextSelectedAccountId === a.id ? C.borderBright : C.border}`,
+                          borderRadius: 4, padding: "8px 12px", fontFamily: mono, fontSize: 11, cursor: "pointer", textAlign: "left",
+                        }}>
+                        <div style={{ fontWeight: 600 }}>{a.login || a.id}</div>
+                        <div style={{ color: C.muted, fontSize: 10, marginTop: 2 }}>{a.plan || ""} {a.balance != null ? "· " + fmt$(a.balance) : ""}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {fundedNextOverviewBusy && <div style={{ fontSize: 11, color: C.muted }}>Loading account…</div>}
+                {fundedNextOverviewStatus && (
+                  <div style={{ fontSize: 11, color: C.red, marginBottom: 10 }}>{fundedNextOverviewStatus}</div>
+                )}
+
+                {fundedNextOverview && (() => {
+                  const acct = fundedNextAccounts && fundedNextAccounts.find((a) => a.id === fundedNextSelectedAccountId);
+                  const obj = fundedNextOverview.objectives || {};
+                  const details = fundedNextOverview.account_details || {};
+                  const cycle = fundedNextOverview.trading_cycle_details || {};
+                  const breached = details.breached === true || details.breached === 1;
+                  const statusLabel = (s) => (s === 1 || s === "PASSED" ? "PASSED" : s === 2 || s === "ON_GOING" ? "ON GOING" : s ? String(s) : "—");
+                  const statusColor = (s) => (s === 1 || s === "PASSED" ? C.green : C.cyan);
+                  const objRow = (label, o, remainingKey) => {
+                    if (!o) return null;
+                    const remaining = remainingKey && o[remainingKey] != null ? o[remainingKey] : null;
+                    return (
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.border}` }}>
+                        <div>
+                          <div style={{ fontSize: 11, color: C.muted }}>{label}</div>
+                          <div style={{ fontSize: 13, marginTop: 2 }}>
+                            {o.current_value != null && o.target_value != null ? `${o.current_value} / ${o.target_value}` : "—"}
+                          </div>
+                        </div>
+                        <div style={{ textAlign: "right" }}>
+                          {remaining != null && <div style={{ fontSize: 13, color: C.gold }}>{fmt$(remaining)} left</div>}
+                          <div style={{ fontSize: 10, color: statusColor(o.status), marginTop: 2, letterSpacing: "0.06em" }}>{statusLabel(o.status)}</div>
+                        </div>
+                      </div>
+                    );
+                  };
+                  return (
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+                        <div style={{ fontFamily: disp, fontSize: 20, fontWeight: 700 }}>
+                          {acct && acct.balance != null ? fmt$2(acct.balance) : "—"}
+                        </div>
+                        <div style={{ fontSize: 11, padding: "3px 8px", borderRadius: 3, background: breached ? "rgba(255,61,61,0.15)" : "rgba(0,255,136,0.12)", color: breached ? C.red : C.green, letterSpacing: "0.08em" }}>
+                          {breached ? "BREACHED" : "ACTIVE"}
+                        </div>
+                      </div>
+                      {acct && acct.equity != null && (
+                        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>Equity {fmt$2(acct.equity)}</div>
+                      )}
+                      {breached && details.breached_by && (
+                        <div style={{ fontSize: 12, color: C.red, marginBottom: 10 }}>Breached by: {details.breached_by}</div>
+                      )}
+                      {objRow("Daily loss limit", obj.daily_loss, "daily_loss_till_now")}
+                      {objRow("Max overall loss", obj.overall_loss, "max_loss_till_now")}
+                      {objRow("Profit target", obj.profit, null)}
+                      {objRow("Trading days", obj.trading_days, null)}
+                      {cycle.payout_eligible_date && (
+                        <div style={{ fontSize: 11, color: C.muted, marginTop: 10 }}>Next payout eligible: {cycle.payout_eligible_date}</div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </Panel>
+            )}
 
             <Panel>
               <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.8 }}>
