@@ -68,7 +68,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.09.21-9";
+const BUILD = "2026.09.21-10";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -1043,6 +1043,8 @@ function App() {
   const [fundedNextOverviewStatus, setFundedNextOverviewStatus] = useState("");
   const [fundedNextOverviewBusy, setFundedNextOverviewBusy] = useState(false);
   const [fundedNextShowTools, setFundedNextShowTools] = useState(false);
+  const [fundedNextImportStatus, setFundedNextImportStatus] = useState("");
+  const [fundedNextImportBusy, setFundedNextImportBusy] = useState(false);
 
   // keys + engine
   const [anthropicKey, setAnthropicKey] = useState("");
@@ -2384,16 +2386,131 @@ Rules:
         return [];
       };
       let futuresList = [];
-      try { futuresList = extractList(await callFundedNextTool("get_accounts", { type: "active", tab: "futures" })); } catch (e) {}
+      try { futuresList = extractList(await callFundedNextTool("get_accounts", { type: "active", tab: "futures" })).map((a) => ({ ...a, __fnTab: "futures" })); } catch (e) {}
       let forexList = [];
-      try { forexList = extractList(await callFundedNextTool("get_accounts", { type: "active", tab: "forex" })); } catch (e) {}
+      try { forexList = extractList(await callFundedNextTool("get_accounts", { type: "active", tab: "forex" })).map((a) => ({ ...a, __fnTab: "forex" })); } catch (e) {}
       const accounts = [...futuresList, ...forexList].filter((a) => a && a.id != null);
       setFundedNextAccounts(accounts);
       setFundedNextAccountsStatus(accounts.length ? `${accounts.length} account${accounts.length > 1 ? "s" : ""} found — tap one to load its details` : "No active accounts found");
+      if (accounts.length) importFundedNextTrades(accounts);
     } catch (e) {
       setFundedNextAccountsStatus("Couldn't load accounts: " + (e.message || "unknown error"));
     } finally {
       setFundedNextAccountsBusy(false);
+    }
+  }
+
+  // Pulls trade history for every discovered FundedNext account straight into the real
+  // Journal (not a separate view) -- tagged with source:"fundednext" and a stable fnKey
+  // (account id + ticket) so repeat syncs never create duplicates. Restricted to NQ/MNQ,
+  // same as manual entry and screenshot-scan, since calcPnl/the risk tools are built on
+  // POINT_VALUE which only knows those two symbols -- anything else would corrupt every
+  // P&L stat in the app (net, win rate, equity curve) rather than just being wrong for
+  // that one trade.
+  async function importFundedNextTrades(accounts) {
+    const futuresAccounts = accounts.filter((a) => a.__fnTab === "futures");
+    const cfdAccounts = accounts.filter((a) => a.__fnTab === "forex");
+    if (!futuresAccounts.length && !cfdAccounts.length) return;
+    setFundedNextImportBusy(true);
+    setFundedNextImportStatus("Checking for new trades…");
+    try {
+      const existingKeys = new Set(tradesRef.current.filter((t) => t.fnKey).map((t) => t.fnKey));
+      const newTrades = [];
+      let skippedSymbol = 0;
+      let nextId = Date.now();
+
+      const toDateStr = (timestamp, timeStr) => {
+        if (typeof timestamp === "number" && timestamp > 0) {
+          const d = new Date(timestamp * 1000);
+          if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+        }
+        if (typeof timeStr === "string" && /^\d{4}-\d{2}-\d{2}/.test(timeStr)) return timeStr.slice(0, 10);
+        return new Date().toISOString().slice(0, 10);
+      };
+
+      for (const acct of futuresAccounts) {
+        let page = 1;
+        let lastPage = 1;
+        do {
+          let result;
+          try { result = await callFundedNextTool("get_futures_trade_history", { account_id: acct.id, page, per_page: 20 }); }
+          catch (e) { break; }
+          const list = result && Array.isArray(result.data) ? result.data : Array.isArray(result) ? result : [];
+          lastPage = (result && result.last_page) || 1;
+          for (const raw of list) {
+            const ticket = raw.close_ticket != null ? raw.close_ticket : raw.open_ticket != null ? raw.open_ticket : raw.id;
+            if (ticket == null) continue;
+            const key = "fn:" + acct.id + ":" + ticket;
+            if (existingKeys.has(key)) continue;
+            const symbol = String(raw.symbol || "").toUpperCase();
+            if (symbol !== "NQ" && symbol !== "MNQ") { skippedSymbol++; existingKeys.add(key); continue; }
+            const entry = Number(raw.open_price);
+            const exit = Number(raw.close_price);
+            const contracts = Number(raw.qty);
+            if (!Number.isFinite(entry) || !Number.isFinite(exit) || !contracts) continue;
+            existingKeys.add(key);
+            newTrades.push({
+              id: nextId++,
+              date: toDateStr(raw.close_timestamp, raw.close_time),
+              instrument: symbol,
+              direction: String(raw.type || "").toLowerCase() === "sell" ? "SHORT" : "LONG",
+              contracts, entry, exit, stop: "", tp: "",
+              setup: "Other",
+              notes: "Imported from FundedNext (ticket #" + ticket + ")",
+              source: "fundednext",
+              fnKey: key,
+            });
+          }
+          page++;
+        } while (page <= lastPage && page <= 20);
+      }
+
+      for (const acct of cfdAccounts) {
+        let page = 1;
+        let lastPage = 1;
+        do {
+          let result;
+          try { result = await callFundedNextTool("get_trading_history", { account_id: acct.id, page, per_page: 20 }); }
+          catch (e) { break; }
+          const list = result && Array.isArray(result.data) ? result.data : Array.isArray(result) ? result : [];
+          lastPage = (result && result.last_page) || 1;
+          for (const raw of list) {
+            const ticket = raw.ticket;
+            if (ticket == null) continue;
+            const key = "fn:" + acct.id + ":" + ticket;
+            if (existingKeys.has(key)) continue;
+            const symbol = String(raw.symbol || "").toUpperCase();
+            if (symbol !== "NQ" && symbol !== "MNQ") { skippedSymbol++; existingKeys.add(key); continue; }
+            const entry = Number(raw.entry_price);
+            const exit = Number(raw.exit_price);
+            const contracts = Number(raw.lots);
+            if (!Number.isFinite(entry) || !Number.isFinite(exit) || !contracts) continue;
+            existingKeys.add(key);
+            newTrades.push({
+              id: nextId++,
+              date: toDateStr(null, raw.close_time),
+              instrument: symbol,
+              direction: String(raw.type || "").toLowerCase() === "sell" ? "SHORT" : "LONG",
+              contracts, entry, exit, stop: "", tp: "",
+              setup: "Other",
+              notes: "Imported from FundedNext (ticket #" + ticket + ")",
+              source: "fundednext",
+              fnKey: key,
+            });
+          }
+          page++;
+        } while (page <= lastPage && page <= 20);
+      }
+
+      if (newTrades.length) persist([...newTrades, ...tradesRef.current]);
+      const parts = [];
+      if (newTrades.length) parts.push(`${newTrades.length} new trade${newTrades.length > 1 ? "s" : ""} imported into the Journal`);
+      if (skippedSymbol) parts.push(`${skippedSymbol} skipped (not NQ/MNQ)`);
+      setFundedNextImportStatus(parts.length ? parts.join(" — ") : "No new trades to import");
+    } catch (e) {
+      setFundedNextImportStatus("Trade import failed: " + (e.message || "unknown error"));
+    } finally {
+      setFundedNextImportBusy(false);
     }
   }
 
@@ -3468,6 +3585,9 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
                         </div>
                         <div style={{ display: "flex", gap: 10, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
                           <span style={{ fontSize: 10, letterSpacing: "0.1em", color: C.cyan, border: `1px solid ${C.border}`, borderRadius: 3, padding: "2px 8px" }}>{t.setup.toUpperCase()}</span>
+                          {t.source === "fundednext" && (
+                            <span style={{ fontSize: 10, letterSpacing: "0.1em", color: C.gold, border: `1px solid ${C.gold}`, borderRadius: 3, padding: "2px 8px" }}>FUNDEDNEXT</span>
+                          )}
                           {t.notes && <span style={{ fontSize: 12, color: C.muted, flex: 1 }}>{t.notes}</span>}
                           <button onClick={() => deleteTrade(t.id)} style={{ background: "transparent", border: "none", color: C.faint, fontFamily: mono, fontSize: 11, cursor: "pointer" }}>
                             DELETE
@@ -3970,6 +4090,12 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
                     </span>
                   )}
                 </div>
+
+                {(fundedNextImportBusy || fundedNextImportStatus) && (
+                  <div style={{ fontSize: 11, marginBottom: 14, color: fundedNextImportBusy ? C.muted : fundedNextImportStatus.toLowerCase().includes("failed") ? C.red : C.green }}>
+                    {fundedNextImportBusy ? "Pulling trade history into the Journal…" : fundedNextImportStatus}
+                  </div>
+                )}
 
                 {fundedNextAccounts && fundedNextAccounts.length > 0 && (() => {
                   // Same safety net as the overview panel below: a field coming back a
