@@ -68,7 +68,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.08.19-1";
+const BUILD = "2026.09.21-1";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -1014,6 +1014,14 @@ function App() {
   const applyingRemoteRef = useRef(false);
   const lastSyncBlobUpdatedAtRef = useRef(0);
 
+  // ----- FundedNext MCP (discovery step) -----
+  const [fundedNextToken, setFundedNextToken] = useState("");
+  const [fundedNextStatus, setFundedNextStatus] = useState("");
+  const [fundedNextBusy, setFundedNextBusy] = useState(false);
+  const [fundedNextTools, setFundedNextTools] = useState(null);
+  const fundedNextTokenRef = useRef(fundedNextToken); fundedNextTokenRef.current = fundedNextToken;
+  const fundedNextSessionIdRef = useRef(null);
+
   // keys + engine
   const [anthropicKey, setAnthropicKey] = useState("");
   const [engine, setEngine] = useState("device");
@@ -1120,6 +1128,7 @@ function App() {
         }
       } catch (e) {}
       try { const k = await S.get("polaris-tdkey"); if (k && k.value) setTdKey(k.value); } catch (e) {}
+      try { const fk = await S.get("polaris-fundednext-token"); if (fk && fk.value) setFundedNextToken(fk.value); } catch (e) {}
     })();
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) setSpeechSupported(false);
@@ -2200,6 +2209,80 @@ Rules:
   async function saveTdKey(k) {
     setTdKey(k);
     try { await S.set("polaris-tdkey", k); } catch (e) {}
+  }
+
+  // ---------- FundedNext MCP (discovery step) ----------
+  // mcp.fundednext.com is a standard JSON-RPC 2.0 / MCP "Streamable HTTP" endpoint, reachable
+  // directly from the browser (no CORS relay needed -- verified). What's NOT yet known: whether
+  // the token from the FundedNext dashboard works as a plain bearer token, or whether their server
+  // actually requires a full interactive OAuth handshake (the 401 it returns without a token points
+  // at a real oauth-protected-resource). This function only goes as far as connecting and listing
+  // available tools so we can see the real answer instead of guessing at it.
+  async function saveFundedNextToken(k) {
+    setFundedNextToken(k);
+    try { await S.set("polaris-fundednext-token", k); } catch (e) {}
+  }
+
+  async function callFundedNextMcp(method, params, opts) {
+    const isNotification = !!(opts && opts.isNotification);
+    const body = { jsonrpc: "2.0", method, params: params || {} };
+    if (!isNotification) body.id = Date.now();
+    const headers = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+      "Authorization": "Bearer " + fundedNextTokenRef.current.trim(),
+    };
+    if (fundedNextSessionIdRef.current) headers["Mcp-Session-Id"] = fundedNextSessionIdRef.current;
+    const res = await fetch("https://mcp.fundednext.com", { method: "POST", headers, body: JSON.stringify(body) });
+    const sid = res.headers.get("Mcp-Session-Id");
+    if (sid) fundedNextSessionIdRef.current = sid;
+    if (isNotification) {
+      if (!res.ok && res.status !== 202) throw new Error("HTTP " + res.status);
+      return null;
+    }
+    const contentType = res.headers.get("Content-Type") || "";
+    let payload;
+    if (contentType.includes("text/event-stream")) {
+      const raw = await res.text();
+      const dataLine = raw.split("\n").find((l) => l.startsWith("data:"));
+      payload = dataLine ? JSON.parse(dataLine.slice(5).trim()) : null;
+    } else {
+      payload = await res.json().catch(() => null);
+    }
+    if (!res.ok || !payload) {
+      const detail = payload && payload.error ? payload.error.message : "HTTP " + res.status;
+      throw new Error(detail || "request failed");
+    }
+    if (payload.error) throw new Error(payload.error.message || "MCP error");
+    return payload.result;
+  }
+
+  async function connectFundedNext() {
+    const token = fundedNextToken.trim();
+    if (!token) { flash("Paste a FundedNext token first"); return; }
+    setFundedNextBusy(true);
+    setFundedNextStatus("Connecting…");
+    setFundedNextTools(null);
+    fundedNextSessionIdRef.current = null;
+    try {
+      await saveFundedNextToken(token);
+      await callFundedNextMcp("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "Polaris", version: BUILD },
+      });
+      await callFundedNextMcp("notifications/initialized", {}, { isNotification: true });
+      const result = await callFundedNextMcp("tools/list", {});
+      const tools = (result && result.tools) || [];
+      setFundedNextTools(tools);
+      setFundedNextStatus(tools.length ? `Connected — ${tools.length} tool${tools.length > 1 ? "s" : ""} available` : "Connected, but no tools were listed");
+    } catch (e) {
+      const msg = e.message || "check your token";
+      const oauthHint = /invalid_token|bearer|unauthorized|401/i.test(msg) ? " — this may mean FundedNext needs a full OAuth login rather than a static token; tell me exactly what this says and I'll dig further" : "";
+      setFundedNextStatus("Connection failed: " + msg + oauthHint);
+    } finally {
+      setFundedNextBusy(false);
+    }
   }
 
   function addScanEvent(ev) {
@@ -3687,6 +3770,37 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
               <div style={{ fontSize: 11, marginTop: 8, color: syncEnabled ? C.green : C.faint }}>
                 {syncEnabled ? "✓ Sync active — auto-syncs a few seconds after any change" : "Sync is off — your data stays local-only"}
               </div>
+            </Panel>
+
+            <Panel>
+              <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>FUNDEDNEXT — DISCOVERY STEP</div>
+              <div style={{ color: C.muted, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
+                Connects to your FundedNext account via their MCP endpoint — read-only, it can't place trades or move funds. This first step only tests the connection and lists what data is available; the real account display comes next, built against whatever this actually returns rather than a guess.
+              </div>
+              <Label>FundedNext token</Label>
+              <input type="password" value={fundedNextToken} onChange={(e) => setFundedNextToken(e.target.value)} placeholder="paste your FundedNext token…" style={inputStyle} />
+              <div style={{ marginTop: 12 }}>
+                <button onClick={connectFundedNext} disabled={fundedNextBusy}
+                  style={{ background: C.cyan, color: "#04121C", border: "none", borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
+                  {fundedNextBusy ? "CONNECTING…" : "TEST CONNECTION"}
+                </button>
+              </div>
+              {fundedNextStatus && (
+                <div style={{ fontSize: 11, marginTop: 10, color: fundedNextStatus.toLowerCase().includes("failed") ? C.red : C.green, lineHeight: 1.6 }}>
+                  {fundedNextStatus}
+                </div>
+              )}
+              {fundedNextTools && fundedNextTools.length > 0 && (
+                <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+                  <Label>Tools discovered</Label>
+                  {fundedNextTools.map((t, i) => (
+                    <div key={i} style={{ background: "rgba(3,10,20,0.8)", border: `1px solid ${C.border}`, borderRadius: 4, padding: "8px 10px", fontSize: 11 }}>
+                      <span style={{ color: C.cyan, fontWeight: 600 }}>{t.name}</span>
+                      {t.description && <div style={{ color: C.muted, marginTop: 2 }}>{t.description}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
             </Panel>
 
             <Panel>
