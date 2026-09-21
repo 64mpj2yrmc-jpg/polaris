@@ -68,7 +68,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.09.21-8";
+const BUILD = "2026.09.21-9";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -2407,7 +2407,18 @@ Rules:
       setFundedNextOverview(overview);
       setFundedNextOverviewStatus("");
     } catch (e) {
-      setFundedNextOverviewStatus("Couldn't load account details: " + (e.message || "unknown error"));
+      let detail = e.message || "unknown error";
+      // FundedNext's own get_account_overview tool sometimes reports its error as a raw
+      // JSON blob (e.g. {"error":true,"code":"API_ERROR","message":"Server Error","status":500})
+      // rather than a plain sentence -- pull the readable message out of it when present.
+      try {
+        const parsed = JSON.parse(detail);
+        if (parsed && parsed.message) detail = parsed.message + (parsed.code ? ` (${parsed.code})` : "");
+      } catch (e2) {}
+      const hint = /server error|api_error|internal|^500\b/i.test(detail)
+        ? " — this is coming from FundedNext's own server, not Polaris. Try REFRESH ACCOUNTS again in a bit."
+        : "";
+      setFundedNextOverviewStatus("Couldn't load account details: " + detail + hint);
     } finally {
       setFundedNextOverviewBusy(false);
     }
