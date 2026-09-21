@@ -68,7 +68,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.09.21-1";
+const BUILD = "2026.09.21-2";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -1014,12 +1014,17 @@ function App() {
   const applyingRemoteRef = useRef(false);
   const lastSyncBlobUpdatedAtRef = useRef(0);
 
-  // ----- FundedNext MCP (discovery step) -----
-  const [fundedNextToken, setFundedNextToken] = useState("");
+  // ----- FundedNext MCP, via a Cloudflare Worker proxy (discovery step) -----
+  // Polaris never holds the real FundedNext token -- it lives only in the Worker's
+  // secret storage. Polaris authenticates to the WORKER with a separate shared
+  // secret. See worker/fundednext-proxy.js.
+  const [fundedNextWorkerUrl, setFundedNextWorkerUrl] = useState("");
+  const [fundedNextSecret, setFundedNextSecret] = useState("");
   const [fundedNextStatus, setFundedNextStatus] = useState("");
   const [fundedNextBusy, setFundedNextBusy] = useState(false);
   const [fundedNextTools, setFundedNextTools] = useState(null);
-  const fundedNextTokenRef = useRef(fundedNextToken); fundedNextTokenRef.current = fundedNextToken;
+  const fundedNextWorkerUrlRef = useRef(fundedNextWorkerUrl); fundedNextWorkerUrlRef.current = fundedNextWorkerUrl;
+  const fundedNextSecretRef = useRef(fundedNextSecret); fundedNextSecretRef.current = fundedNextSecret;
   const fundedNextSessionIdRef = useRef(null);
 
   // keys + engine
@@ -1128,7 +1133,8 @@ function App() {
         }
       } catch (e) {}
       try { const k = await S.get("polaris-tdkey"); if (k && k.value) setTdKey(k.value); } catch (e) {}
-      try { const fk = await S.get("polaris-fundednext-token"); if (fk && fk.value) setFundedNextToken(fk.value); } catch (e) {}
+      try { const fwu = await S.get("polaris-fundednext-workerurl"); if (fwu && fwu.value) setFundedNextWorkerUrl(fwu.value); } catch (e) {}
+      try { const fs = await S.get("polaris-fundednext-secret"); if (fs && fs.value) setFundedNextSecret(fs.value); } catch (e) {}
     })();
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) setSpeechSupported(false);
@@ -2211,16 +2217,23 @@ Rules:
     try { await S.set("polaris-tdkey", k); } catch (e) {}
   }
 
-  // ---------- FundedNext MCP (discovery step) ----------
-  // mcp.fundednext.com is a standard JSON-RPC 2.0 / MCP "Streamable HTTP" endpoint, reachable
-  // directly from the browser (no CORS relay needed -- verified). What's NOT yet known: whether
-  // the token from the FundedNext dashboard works as a plain bearer token, or whether their server
-  // actually requires a full interactive OAuth handshake (the 401 it returns without a token points
-  // at a real oauth-protected-resource). This function only goes as far as connecting and listing
-  // available tools so we can see the real answer instead of guessing at it.
-  async function saveFundedNextToken(k) {
-    setFundedNextToken(k);
-    try { await S.set("polaris-fundednext-token", k); } catch (e) {}
+  // ---------- FundedNext MCP, via the Worker proxy (discovery step) ----------
+  // mcp.fundednext.com rejects direct cross-origin requests from Polaris's own origin --
+  // confirmed by testing against the real deployed site. Everything now routes through a
+  // Cloudflare Worker (worker/fundednext-proxy.js) that holds the real FundedNext token
+  // server-side and forwards MCP calls on Polaris's behalf; Polaris only ever holds the
+  // Worker's URL and a separate shared secret used to authenticate to that Worker, never
+  // the FundedNext token itself. What's still unverified: whether FundedNext's token works
+  // as a plain bearer token at all, or requires a full interactive OAuth handshake (their
+  // 401 without one points at a real oauth-protected-resource) -- this step only goes as
+  // far as connecting and listing available tools so we see the real answer either way.
+  async function saveFundedNextWorkerUrl(u) {
+    setFundedNextWorkerUrl(u);
+    try { await S.set("polaris-fundednext-workerurl", u); } catch (e) {}
+  }
+  async function saveFundedNextSecret(s) {
+    setFundedNextSecret(s);
+    try { await S.set("polaris-fundednext-secret", s); } catch (e) {}
   }
 
   async function callFundedNextMcp(method, params, opts) {
@@ -2229,12 +2242,11 @@ Rules:
     if (!isNotification) body.id = Date.now();
     const headers = {
       "Content-Type": "application/json",
-      "Accept": "application/json, text/event-stream",
-      "Authorization": "Bearer " + fundedNextTokenRef.current.trim(),
+      "X-Polaris-Secret": fundedNextSecretRef.current.trim(),
     };
-    if (fundedNextSessionIdRef.current) headers["Mcp-Session-Id"] = fundedNextSessionIdRef.current;
-    const res = await fetch("https://mcp.fundednext.com", { method: "POST", headers, body: JSON.stringify(body) });
-    const sid = res.headers.get("Mcp-Session-Id");
+    if (fundedNextSessionIdRef.current) headers["X-Mcp-Session-Id"] = fundedNextSessionIdRef.current;
+    const res = await fetch(fundedNextWorkerUrlRef.current.trim(), { method: "POST", headers, body: JSON.stringify(body) });
+    const sid = res.headers.get("X-Mcp-Session-Id");
     if (sid) fundedNextSessionIdRef.current = sid;
     if (isNotification) {
       if (!res.ok && res.status !== 202) throw new Error("HTTP " + res.status);
@@ -2258,14 +2270,16 @@ Rules:
   }
 
   async function connectFundedNext() {
-    const token = fundedNextToken.trim();
-    if (!token) { flash("Paste a FundedNext token first"); return; }
+    const workerUrl = fundedNextWorkerUrl.trim();
+    const secret = fundedNextSecret.trim();
+    if (!workerUrl || !secret) { flash("Fill in both the Worker URL and the shared secret first"); return; }
     setFundedNextBusy(true);
     setFundedNextStatus("Connecting…");
     setFundedNextTools(null);
     fundedNextSessionIdRef.current = null;
     try {
-      await saveFundedNextToken(token);
+      await saveFundedNextWorkerUrl(workerUrl);
+      await saveFundedNextSecret(secret);
       await callFundedNextMcp("initialize", {
         protocolVersion: "2024-11-05",
         capabilities: {},
@@ -2277,9 +2291,17 @@ Rules:
       setFundedNextTools(tools);
       setFundedNextStatus(tools.length ? `Connected — ${tools.length} tool${tools.length > 1 ? "s" : ""} available` : "Connected, but no tools were listed");
     } catch (e) {
-      const msg = e.message || "check your token";
-      const oauthHint = /invalid_token|bearer|unauthorized|401/i.test(msg) ? " — this may mean FundedNext needs a full OAuth login rather than a static token; tell me exactly what this says and I'll dig further" : "";
-      setFundedNextStatus("Connection failed: " + msg + oauthHint);
+      const msg = e.message || "check the Worker URL and secret";
+      const hint = /polaris-worker-shared-secret-mismatch/i.test(msg)
+        ? " — the shared secret Polaris sent doesn't match POLARIS_SHARED_SECRET on the Worker"
+        : /missing its secrets/i.test(msg)
+        ? " — the Worker is deployed but hasn't had its secrets set yet (Settings → Variables and Secrets on the Worker)"
+        : /invalid_token|bearer|unauthorized/i.test(msg)
+        ? " — the Worker reached FundedNext, but FundedNext itself rejected the token; it may need a full OAuth login rather than a static token"
+        : /HTTP 404|HTTP 000|Failed to fetch|Load failed/i.test(msg)
+        ? " — check the Worker URL is correct and the Worker is actually deployed"
+        : "";
+      setFundedNextStatus("Connection failed: " + msg + hint);
     } finally {
       setFundedNextBusy(false);
     }
@@ -3775,10 +3797,14 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
             <Panel>
               <div style={{ fontFamily: disp, fontSize: 16, fontWeight: 700, letterSpacing: "0.12em", color: C.cyan, marginBottom: 4 }}>FUNDEDNEXT — DISCOVERY STEP</div>
               <div style={{ color: C.muted, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
-                Connects to your FundedNext account via their MCP endpoint — read-only, it can't place trades or move funds. This first step only tests the connection and lists what data is available; the real account display comes next, built against whatever this actually returns rather than a guess.
+                Connects to your FundedNext account via their MCP endpoint — read-only, it can't place trades or move funds. FundedNext blocks direct browser requests, so this goes through a small Worker you deploy yourself (see worker/fundednext-proxy.js in the repo) that holds your real FundedNext token server-side. Polaris only ever holds the Worker's URL and a separate shared secret below — never your FundedNext token itself.
               </div>
-              <Label>FundedNext token</Label>
-              <input type="password" value={fundedNextToken} onChange={(e) => setFundedNextToken(e.target.value)} placeholder="paste your FundedNext token…" style={inputStyle} />
+              <Label>Worker URL</Label>
+              <input value={fundedNextWorkerUrl} onChange={(e) => setFundedNextWorkerUrl(e.target.value)} placeholder="https://your-worker.your-subdomain.workers.dev" style={inputStyle} />
+              <div style={{ marginTop: 10 }}>
+                <Label>Shared secret (the POLARIS_SHARED_SECRET you set on the Worker)</Label>
+                <input type="password" value={fundedNextSecret} onChange={(e) => setFundedNextSecret(e.target.value)} placeholder="paste the shared secret…" style={inputStyle} />
+              </div>
               <div style={{ marginTop: 12 }}>
                 <button onClick={connectFundedNext} disabled={fundedNextBusy}
                   style={{ background: C.cyan, color: "#04121C", border: "none", borderRadius: 4, padding: "12px 18px", fontFamily: mono, fontWeight: 600, fontSize: 12, letterSpacing: "0.08em", cursor: "pointer" }}>
