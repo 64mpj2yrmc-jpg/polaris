@@ -68,7 +68,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.09.21-3";
+const BUILD = "2026.09.21-4";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -2352,19 +2352,19 @@ Rules:
     setFundedNextAccountsStatus("Loading accounts…");
     setFundedNextAccounts(null);
     try {
-      const [futuresRes, forexRes] = await Promise.allSettled([
-        callFundedNextTool("get_accounts", { type: "active", tab: "futures" }),
-        callFundedNextTool("get_accounts", { type: "active", tab: "forex" }),
-      ]);
-      const extractList = (settled) => {
-        if (settled.status !== "fulfilled") return [];
-        const v = settled.value;
+      // Sequential, not parallel -- the MCP session id is a single shared value
+      // (fundedNextSessionIdRef), so two concurrent tool calls could race on it.
+      const extractList = (v) => {
         if (Array.isArray(v)) return v;
         if (v && Array.isArray(v.data)) return v.data;
         if (v && v.data && Array.isArray(v.data.data)) return v.data.data;
         return [];
       };
-      const accounts = [...extractList(futuresRes), ...extractList(forexRes)];
+      let futuresList = [];
+      try { futuresList = extractList(await callFundedNextTool("get_accounts", { type: "active", tab: "futures" })); } catch (e) {}
+      let forexList = [];
+      try { forexList = extractList(await callFundedNextTool("get_accounts", { type: "active", tab: "forex" })); } catch (e) {}
+      const accounts = [...futuresList, ...forexList].filter((a) => a && a.id != null);
       setFundedNextAccounts(accounts);
       setFundedNextAccountsStatus(accounts.length ? `${accounts.length} account${accounts.length > 1 ? "s" : ""} found` : "No active accounts found");
       if (accounts.length === 1) {
@@ -3963,56 +3963,77 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
                 )}
 
                 {fundedNextOverview && (() => {
-                  const acct = fundedNextAccounts && fundedNextAccounts.find((a) => a.id === fundedNextSelectedAccountId);
-                  const obj = fundedNextOverview.objectives || {};
-                  const details = fundedNextOverview.account_details || {};
-                  const cycle = fundedNextOverview.trading_cycle_details || {};
-                  const breached = details.breached === true || details.breached === 1;
-                  const statusLabel = (s) => (s === 1 || s === "PASSED" ? "PASSED" : s === 2 || s === "ON_GOING" ? "ON GOING" : s ? String(s) : "—");
-                  const statusColor = (s) => (s === 1 || s === "PASSED" ? C.green : C.cyan);
-                  const objRow = (label, o, remainingKey) => {
-                    if (!o) return null;
-                    const remaining = remainingKey && o[remainingKey] != null ? o[remainingKey] : null;
-                    return (
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.border}` }}>
-                        <div>
-                          <div style={{ fontSize: 11, color: C.muted }}>{label}</div>
-                          <div style={{ fontSize: 13, marginTop: 2 }}>
-                            {o.current_value != null && o.target_value != null ? `${o.current_value} / ${o.target_value}` : "—"}
+                  // Rendering against a documented-but-unverified response shape from FundedNext's
+                  // real server -- if it doesn't match, fall back to the raw JSON rather than
+                  // letting an unexpected shape throw during render and blank the whole app (React
+                  // has no error boundary here).
+                  try {
+                    const acct = fundedNextAccounts && fundedNextAccounts.find((a) => a.id === fundedNextSelectedAccountId);
+                    const obj = fundedNextOverview.objectives || {};
+                    const details = fundedNextOverview.account_details || {};
+                    const cycle = fundedNextOverview.trading_cycle_details || {};
+                    const breached = details.breached === true || details.breached === 1;
+                    const statusLabel = (s) => (s === 1 || s === "PASSED" ? "PASSED" : s === 2 || s === "ON_GOING" ? "ON GOING" : s ? String(s) : "—");
+                    const statusColor = (s) => (s === 1 || s === "PASSED" ? C.green : C.cyan);
+                    const objRow = (label, o, remainingKey) => {
+                      if (!o || typeof o !== "object") return null;
+                      const remaining = remainingKey && o[remainingKey] != null && !isNaN(Number(o[remainingKey])) ? Number(o[remainingKey]) : null;
+                      return (
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.border}` }}>
+                          <div>
+                            <div style={{ fontSize: 11, color: C.muted }}>{label}</div>
+                            <div style={{ fontSize: 13, marginTop: 2 }}>
+                              {o.current_value != null && o.target_value != null ? `${o.current_value} / ${o.target_value}` : "—"}
+                            </div>
+                          </div>
+                          <div style={{ textAlign: "right" }}>
+                            {remaining != null && <div style={{ fontSize: 13, color: C.gold }}>{fmt$(remaining)} left</div>}
+                            <div style={{ fontSize: 10, color: statusColor(o.status), marginTop: 2, letterSpacing: "0.06em" }}>{statusLabel(o.status)}</div>
                           </div>
                         </div>
-                        <div style={{ textAlign: "right" }}>
-                          {remaining != null && <div style={{ fontSize: 13, color: C.gold }}>{fmt$(remaining)} left</div>}
-                          <div style={{ fontSize: 10, color: statusColor(o.status), marginTop: 2, letterSpacing: "0.06em" }}>{statusLabel(o.status)}</div>
+                      );
+                    };
+                    const balanceNum = acct && acct.balance != null && !isNaN(Number(acct.balance)) ? Number(acct.balance) : null;
+                    const equityNum = acct && acct.equity != null && !isNaN(Number(acct.equity)) ? Number(acct.equity) : null;
+                    return (
+                      <div>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+                          <div style={{ fontFamily: disp, fontSize: 20, fontWeight: 700 }}>
+                            {balanceNum != null ? fmt$2(balanceNum) : "—"}
+                          </div>
+                          <div style={{ fontSize: 11, padding: "3px 8px", borderRadius: 3, background: breached ? "rgba(255,61,61,0.15)" : "rgba(0,255,136,0.12)", color: breached ? C.red : C.green, letterSpacing: "0.08em" }}>
+                            {breached ? "BREACHED" : "ACTIVE"}
+                          </div>
                         </div>
+                        {equityNum != null && (
+                          <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>Equity {fmt$2(equityNum)}</div>
+                        )}
+                        {breached && details.breached_by && (
+                          <div style={{ fontSize: 12, color: C.red, marginBottom: 10 }}>Breached by: {String(details.breached_by)}</div>
+                        )}
+                        {objRow("Daily loss limit", obj.daily_loss, "daily_loss_till_now")}
+                        {objRow("Max overall loss", obj.overall_loss, "max_loss_till_now")}
+                        {objRow("Profit target", obj.profit, null)}
+                        {objRow("Trading days", obj.trading_days, null)}
+                        {cycle.payout_eligible_date && (
+                          <div style={{ fontSize: 11, color: C.muted, marginTop: 10 }}>Next payout eligible: {String(cycle.payout_eligible_date)}</div>
+                        )}
                       </div>
                     );
-                  };
-                  return (
-                    <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
-                        <div style={{ fontFamily: disp, fontSize: 20, fontWeight: 700 }}>
-                          {acct && acct.balance != null ? fmt$2(acct.balance) : "—"}
+                  } catch (renderErr) {
+                    let raw = "";
+                    try { raw = JSON.stringify(fundedNextOverview, null, 2); } catch (e2) { raw = String(fundedNextOverview); }
+                    return (
+                      <div>
+                        <div style={{ fontSize: 12, color: C.red, marginBottom: 8 }}>
+                          Got a response back, but it wasn't shaped how I expected ({renderErr.message}). Here's the raw data — send this to Claude to fix the display:
                         </div>
-                        <div style={{ fontSize: 11, padding: "3px 8px", borderRadius: 3, background: breached ? "rgba(255,61,61,0.15)" : "rgba(0,255,136,0.12)", color: breached ? C.red : C.green, letterSpacing: "0.08em" }}>
-                          {breached ? "BREACHED" : "ACTIVE"}
-                        </div>
+                        <pre style={{ fontSize: 10, color: C.muted, background: "rgba(3,10,20,0.8)", border: `1px solid ${C.border}`, borderRadius: 4, padding: 10, maxHeight: 300, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                          {raw}
+                        </pre>
                       </div>
-                      {acct && acct.equity != null && (
-                        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>Equity {fmt$2(acct.equity)}</div>
-                      )}
-                      {breached && details.breached_by && (
-                        <div style={{ fontSize: 12, color: C.red, marginBottom: 10 }}>Breached by: {details.breached_by}</div>
-                      )}
-                      {objRow("Daily loss limit", obj.daily_loss, "daily_loss_till_now")}
-                      {objRow("Max overall loss", obj.overall_loss, "max_loss_till_now")}
-                      {objRow("Profit target", obj.profit, null)}
-                      {objRow("Trading days", obj.trading_days, null)}
-                      {cycle.payout_eligible_date && (
-                        <div style={{ fontSize: 11, color: C.muted, marginTop: 10 }}>Next payout eligible: {cycle.payout_eligible_date}</div>
-                      )}
-                    </div>
-                  );
+                    );
+                  }
                 })()}
               </Panel>
             )}
