@@ -68,7 +68,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.09.21-5";
+const BUILD = "2026.09.21-6";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -615,11 +615,15 @@ const PANEL_CORNERS = [
 const Panel = ({ children, style }) => (
   <div style={{
     position: "relative",
-    background: "linear-gradient(160deg, rgba(14,30,52,0.78) 0%, rgba(8,18,34,0.72) 55%, rgba(6,14,28,0.78) 100%)",
+    background: "linear-gradient(160deg, rgba(14,30,52,0.92) 0%, rgba(8,18,34,0.9) 55%, rgba(6,14,28,0.92) 100%)",
     border: `1px solid ${C.border}`,
     borderRadius: 8,
     padding: 16,
-    backdropFilter: "blur(6px)",
+    // No backdrop-filter here on purpose: it was combined with an infinite repaint-triggering
+    // sweep animation inside, across ~10 simultaneous Panel instances in SETUP -- exactly the
+    // pattern that causes Safari to occasionally mis-composite and paint the whole page solid
+    // black after a layout change nearby (recoverable only by reload). Made the base gradient
+    // more opaque to keep the same visual weight without needing the blur.
     boxShadow: "0 10px 34px rgba(0,0,0,0.45), 0 0 24px rgba(0,212,255,0.05), inset 0 1px 0 rgba(0,212,255,0.12), inset 0 0 0 1px rgba(0,212,255,0.05)",
     animation: "panelIn 0.4s ease both",
     ...style,
@@ -3027,7 +3031,7 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
     <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 700px at 50% -10%, #06182B 0%, ${C.bg} 55%)`, color: C.text, fontFamily: mono }}>
       <Backdrop dayPct={dayPct} />
       {/* status bar */}
-      <div style={{ borderBottom: `1px solid ${breaches.length ? C.red : C.border}`, background: breaches.length ? "rgba(40,8,12,0.85)" : "rgba(5,14,26,0.85)", padding: "10px 16px", display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", position: "sticky", top: 0, zIndex: 5, backdropFilter: "blur(8px)" }}>
+      <div style={{ borderBottom: `1px solid ${breaches.length ? C.red : C.border}`, background: breaches.length ? "rgba(40,8,12,0.97)" : "rgba(5,14,26,0.97)", padding: "10px 16px", display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap", position: "sticky", top: 0, zIndex: 5 }}>
         <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Reactor state={voiceState} onClick={toggleListening} awake={wakeFlash} seqPhase={scanning && seqView ? seqView.phase : null} flash={reactorFlash} level={audioLevel} proactive={proactiveTell} size={26} />
           <span style={{ fontFamily: disp, fontWeight: 700, fontSize: 19, letterSpacing: "0.22em", color: breaches.length ? C.red : C.cyan, textShadow: breaches.length ? `0 0 14px rgba(255,85,102,0.6)` : `0 0 14px rgba(0,212,255,0.6)` }}>
