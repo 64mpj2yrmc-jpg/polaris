@@ -68,7 +68,7 @@ const S = {
 // ---------- constants ----------
 // bump this on every commit: "YYYY.MM.DD-N" where N resets to 1 on a new date and
 // increments for additional same-day commits. Drives the in-app update check below.
-const BUILD = "2026.09.21-4";
+const BUILD = "2026.09.21-5";
 const POINT_VALUE = { NQ: 20, MNQ: 2 };
 const SETUPS = ["Opening Drive", "Breakout", "Pullback", "Reversal", "Range Fade", "Trend Continuation", "News Play", "Other"];
 const DEFAULT_RULES = {
@@ -904,11 +904,15 @@ function Backdrop({ dayPct }) {
   const moodOpacity = mood ? Math.min(Math.abs(dayPct) / 2, 1) * 0.06 : 0;
   return (
     <div aria-hidden="true" style={{ position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none", overflow: "hidden" }}>
-      <div style={{ position: "absolute", width: "70%", height: "70%", top: "-18%", left: "-12%", background: "radial-gradient(circle, rgba(0,212,255,0.17) 0%, transparent 70%)", filter: "blur(70px)", animation: "auroraDrift1 32s ease-in-out infinite" }} />
-      <div style={{ position: "absolute", width: "65%", height: "65%", bottom: "-22%", right: "-12%", background: "radial-gradient(circle, rgba(64,74,190,0.19) 0%, transparent 70%)", filter: "blur(85px)", animation: "auroraDrift2 40s ease-in-out infinite" }} />
-      <div style={{ position: "absolute", width: "52%", height: "52%", top: "28%", left: "32%", background: "radial-gradient(circle, rgba(0,212,255,0.10) 0%, transparent 70%)", filter: "blur(90px)", animation: "auroraDrift3 26s ease-in-out infinite" }} />
-      <div style={{ position: "absolute", width: "42%", height: "42%", top: "2%", right: "2%", background: "radial-gradient(circle, rgba(128,96,224,0.13) 0%, transparent 70%)", filter: "blur(65px)", animation: "auroraDrift2 36s ease-in-out infinite reverse" }} />
-      <div style={{ position: "absolute", width: "38%", height: "38%", bottom: "8%", left: "-6%", background: "radial-gradient(circle, rgba(0,212,255,0.09) 0%, transparent 70%)", filter: "blur(60px)", animation: "auroraDrift1 24s ease-in-out infinite reverse" }} />
+      {/* Each layer gets its own stable GPU compositing layer (transform + will-change) so
+          Safari doesn't re-tile these blurred/animated layers -- and occasionally paint them
+          solid black -- when an unrelated part of the page (e.g. SETUP growing after a
+          FundedNext connect) triggers a big layout change elsewhere. */}
+      <div style={{ position: "absolute", width: "70%", height: "70%", top: "-18%", left: "-12%", background: "radial-gradient(circle, rgba(0,212,255,0.17) 0%, transparent 70%)", filter: "blur(70px)", animation: "auroraDrift1 32s ease-in-out infinite", transform: "translateZ(0)", WebkitTransform: "translateZ(0)", willChange: "transform", WebkitBackfaceVisibility: "hidden" }} />
+      <div style={{ position: "absolute", width: "65%", height: "65%", bottom: "-22%", right: "-12%", background: "radial-gradient(circle, rgba(64,74,190,0.19) 0%, transparent 70%)", filter: "blur(85px)", animation: "auroraDrift2 40s ease-in-out infinite", transform: "translateZ(0)", WebkitTransform: "translateZ(0)", willChange: "transform", WebkitBackfaceVisibility: "hidden" }} />
+      <div style={{ position: "absolute", width: "52%", height: "52%", top: "28%", left: "32%", background: "radial-gradient(circle, rgba(0,212,255,0.10) 0%, transparent 70%)", filter: "blur(90px)", animation: "auroraDrift3 26s ease-in-out infinite", transform: "translateZ(0)", WebkitTransform: "translateZ(0)", willChange: "transform", WebkitBackfaceVisibility: "hidden" }} />
+      <div style={{ position: "absolute", width: "42%", height: "42%", top: "2%", right: "2%", background: "radial-gradient(circle, rgba(128,96,224,0.13) 0%, transparent 70%)", filter: "blur(65px)", animation: "auroraDrift2 36s ease-in-out infinite reverse", transform: "translateZ(0)", WebkitTransform: "translateZ(0)", willChange: "transform", WebkitBackfaceVisibility: "hidden" }} />
+      <div style={{ position: "absolute", width: "38%", height: "38%", bottom: "8%", left: "-6%", background: "radial-gradient(circle, rgba(0,212,255,0.09) 0%, transparent 70%)", filter: "blur(60px)", animation: "auroraDrift1 24s ease-in-out infinite reverse", transform: "translateZ(0)", WebkitTransform: "translateZ(0)", willChange: "transform", WebkitBackfaceVisibility: "hidden" }} />
       {mood && (
         <div style={{ position: "absolute", inset: 0, background: `radial-gradient(120% 90% at 50% 40%, ${mood} 0%, transparent 65%)`, opacity: moodOpacity, transition: "opacity 3s ease" }} />
       )}
@@ -2302,7 +2306,10 @@ Rules:
       const tools = (result && result.tools) || [];
       setFundedNextTools(tools);
       setFundedNextStatus(tools.length ? `Connected — ${tools.length} tool${tools.length > 1 ? "s" : ""} available` : "Connected, but no tools were listed");
-      if (tools.length) fetchFundedNextAccounts();
+      // Deliberately NOT auto-chaining into fetchFundedNextAccounts() here -- that call
+      // (and get_account_overview after it) is untested against FundedNext's real server.
+      // Keeping this step manual (REFRESH ACCOUNTS button below) so a failure in that new
+      // code can't take down the connection step that's already known to work.
     } catch (e) {
       const msg = e.message || "check the Worker URL and secret";
       const hint = /polaris-worker-shared-secret-mismatch/i.test(msg)
@@ -2366,10 +2373,7 @@ Rules:
       try { forexList = extractList(await callFundedNextTool("get_accounts", { type: "active", tab: "forex" })); } catch (e) {}
       const accounts = [...futuresList, ...forexList].filter((a) => a && a.id != null);
       setFundedNextAccounts(accounts);
-      setFundedNextAccountsStatus(accounts.length ? `${accounts.length} account${accounts.length > 1 ? "s" : ""} found` : "No active accounts found");
-      if (accounts.length === 1) {
-        fetchFundedNextAccountOverview(accounts[0].id);
-      }
+      setFundedNextAccountsStatus(accounts.length ? `${accounts.length} account${accounts.length > 1 ? "s" : ""} found — tap one to load its details` : "No active accounts found");
     } catch (e) {
       setFundedNextAccountsStatus("Couldn't load accounts: " + (e.message || "unknown error"));
     } finally {
@@ -3940,7 +3944,7 @@ TRADES (newest first, most recent 200): ${JSON.stringify(rows)}`;
                   )}
                 </div>
 
-                {fundedNextAccounts && fundedNextAccounts.length > 1 && (
+                {fundedNextAccounts && fundedNextAccounts.length > 0 && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
                     {fundedNextAccounts.map((a) => (
                       <button key={a.id} onClick={() => fetchFundedNextAccountOverview(a.id)}
